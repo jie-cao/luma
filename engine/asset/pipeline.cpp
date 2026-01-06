@@ -1,5 +1,7 @@
 #include "pipeline.h"
 
+#include <regex>
+
 namespace luma::asset_pipeline {
 
 std::uint64_t compute_hash(std::string_view data) {

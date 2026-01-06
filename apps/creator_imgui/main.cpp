@@ -18,6 +18,8 @@
 #include "backends/imgui_impl_dx12.h"
 #include "backends/imgui_impl_win32.h"
 
+extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam);
+
 using Microsoft::WRL::ComPtr;
 
 static LRESULT WINAPI WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
@@ -93,11 +95,11 @@ static void CreateRTV(DxContext& ctx) {
     ctx.device->CreateDescriptorHeap(&heapDesc, IID_PPV_ARGS(&ctx.rtvHeap));
     ctx.rtvDescriptorSize = ctx.device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_RTV);
     ctx.renderTargets.resize(2);
-    CD3DX12_CPU_DESCRIPTOR_HANDLE rtvHandle(ctx.rtvHeap->GetCPUDescriptorHandleForHeapStart());
+    D3D12_CPU_DESCRIPTOR_HANDLE rtvHandle = ctx.rtvHeap->GetCPUDescriptorHandleForHeapStart();
     for (UINT i = 0; i < 2; i++) {
         ctx.swapchain->GetBuffer(i, IID_PPV_ARGS(&ctx.renderTargets[i]));
         ctx.device->CreateRenderTargetView(ctx.renderTargets[i].Get(), nullptr, rtvHandle);
-        rtvHandle.Offset(1, ctx.rtvDescriptorSize);
+        rtvHandle.ptr += ctx.rtvDescriptorSize;
     }
 }
 
@@ -125,22 +127,24 @@ static void Render(DxContext& ctx, ImVec4 clear_color) {
     ctx.allocator->Reset();
     ctx.cmdList->Reset(ctx.allocator.Get(), nullptr);
 
-    auto barrier = CD3DX12_RESOURCE_BARRIER::Transition(
-        ctx.renderTargets[ctx.frameIndex].Get(),
-        D3D12_RESOURCE_STATE_PRESENT,
-        D3D12_RESOURCE_STATE_RENDER_TARGET);
+    D3D12_RESOURCE_BARRIER barrier{};
+    barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+    barrier.Flags = D3D12_RESOURCE_BARRIER_FLAG_NONE;
+    barrier.Transition.pResource = ctx.renderTargets[ctx.frameIndex].Get();
+    barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_PRESENT;
+    barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_RENDER_TARGET;
+    barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
     ctx.cmdList->ResourceBarrier(1, &barrier);
 
-    CD3DX12_CPU_DESCRIPTOR_HANDLE rtv(ctx.rtvHeap->GetCPUDescriptorHandleForHeapStart(), ctx.frameIndex, ctx.rtvDescriptorSize);
+    D3D12_CPU_DESCRIPTOR_HANDLE rtv = ctx.rtvHeap->GetCPUDescriptorHandleForHeapStart();
+    rtv.ptr += static_cast<SIZE_T>(ctx.frameIndex) * ctx.rtvDescriptorSize;
     ctx.cmdList->ClearRenderTargetView(rtv, reinterpret_cast<float*>(&clear_color), 0, nullptr);
     ctx.cmdList->OMSetRenderTargets(1, &rtv, FALSE, nullptr);
 
     ImGui_ImplDX12_RenderDrawData(ImGui::GetDrawData(), ctx.cmdList.Get());
 
-    barrier = CD3DX12_RESOURCE_BARRIER::Transition(
-        ctx.renderTargets[ctx.frameIndex].Get(),
-        D3D12_RESOURCE_STATE_RENDER_TARGET,
-        D3D12_RESOURCE_STATE_PRESENT);
+    barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_RENDER_TARGET;
+    barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_PRESENT;
     ctx.cmdList->ResourceBarrier(1, &barrier);
     ctx.cmdList->Close();
 
@@ -150,7 +154,8 @@ static void Render(DxContext& ctx, ImVec4 clear_color) {
     WaitForGPU(ctx);
 }
 
-int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR, int) {
+int main() {
+    HINSTANCE hInstance = GetModuleHandleW(nullptr);
     // Engine state
     luma::Scene scene;
     scene.add_node(luma::Node{"MeshNode", "asset_mesh_hero", std::nullopt, {}});
