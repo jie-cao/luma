@@ -1,0 +1,9 @@
+build/
+.vscode/
+.idea/
+.DS_Store
+.clangd/
+.clang-format
+.clang-tidy
+.clang-tools-extra
+.clang-tools-extra
