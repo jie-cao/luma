@@ -1,23 +1,33 @@
 #ifdef _WIN32
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
+#include <commdlg.h>
 #include <d3d12.h>
 #include <dxgi1_6.h>
+#include <d3dcompiler.h>
 #include <wrl/client.h>
 
+#include <cmath>
+#include <cstring>
 #include <chrono>
 #include <string>
 #include <vector>
 #include <unordered_map>
 #include <iostream>
+#include <algorithm>
 
 #include "engine/engine_facade.h"
 #include "engine/scene/scene.h"
 #include "engine/actions/action.h"
+#include "engine/renderer/mesh.h"
+#include "engine/asset/model_loader.h"
 
 #include "imgui.h"
 #include "backends/imgui_impl_dx12.h"
 #include "backends/imgui_impl_win32.h"
+
+#pragma comment(lib, "d3dcompiler.lib")
+#pragma comment(lib, "comdlg32.lib")
 
 extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam);
 
@@ -25,7 +35,7 @@ using Microsoft::WRL::ComPtr;
 
 inline void CheckHR(HRESULT hr, const char* where) {
     if (FAILED(hr)) {
-        std::cerr << "[luma_imgui] DX12 failure at " << where << " hr=0x" << std::hex << hr << std::dec << std::endl;
+        std::cerr << "[luma] DX12 failure at " << where << " hr=0x" << std::hex << hr << std::dec << std::endl;
         std::terminate();
     }
 }
@@ -34,19 +44,6 @@ static void EnableDebugLayer() {
     ComPtr<ID3D12Debug> debug;
     if (SUCCEEDED(D3D12GetDebugInterface(IID_PPV_ARGS(&debug)))) {
         debug->EnableDebugLayer();
-        std::cerr << "[luma_imgui] DX12 debug layer enabled" << std::endl;
-    } else {
-        std::cerr << "[luma_imgui] DX12 debug layer not available" << std::endl;
-    }
-}
-
-static void EnableInfoQueue(ComPtr<ID3D12Device> device) {
-    ComPtr<ID3D12InfoQueue> infoQueue;
-    if (SUCCEEDED(device.As(&infoQueue))) {
-        infoQueue->SetBreakOnSeverity(D3D12_MESSAGE_SEVERITY_CORRUPTION, FALSE);
-        infoQueue->SetBreakOnSeverity(D3D12_MESSAGE_SEVERITY_ERROR, FALSE);
-        infoQueue->SetBreakOnSeverity(D3D12_MESSAGE_SEVERITY_WARNING, FALSE);
-        std::cerr << "[luma_imgui] InfoQueue enabled (no break)" << std::endl;
     }
 }
 
@@ -54,23 +51,152 @@ static LRESULT WINAPI WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
     if (ImGui_ImplWin32_WndProcHandler(hWnd, msg, wParam, lParam))
         return true;
     switch (msg) {
-        case WM_SIZE:
-            return 0;
-        case WM_DESTROY:
-            PostQuitMessage(0);
-            return 0;
+        case WM_SIZE: return 0;
+        case WM_DESTROY: PostQuitMessage(0); return 0;
     }
     return DefWindowProc(hWnd, msg, wParam, lParam);
 }
 
+// ===== Math helpers =====
+namespace math {
+    void identity(float* m) {
+        std::memset(m, 0, 16 * sizeof(float));
+        m[0] = m[5] = m[10] = m[15] = 1.0f;
+    }
+    void perspective(float* m, float fovY, float aspect, float nearZ, float farZ) {
+        std::memset(m, 0, 16 * sizeof(float));
+        float yScale = 1.0f / tanf(fovY * 0.5f);
+        m[0] = yScale / aspect;
+        m[5] = yScale;
+        m[10] = farZ / (farZ - nearZ);
+        m[11] = 1.0f;
+        m[14] = -nearZ * farZ / (farZ - nearZ);
+    }
+    void lookAt(float* m, const float* eye, const float* at, const float* up) {
+        float zAxis[3] = {at[0] - eye[0], at[1] - eye[1], at[2] - eye[2]};
+        float len = sqrtf(zAxis[0]*zAxis[0] + zAxis[1]*zAxis[1] + zAxis[2]*zAxis[2]);
+        if (len < 0.0001f) len = 1.0f;
+        zAxis[0] /= len; zAxis[1] /= len; zAxis[2] /= len;
+        float xAxis[3] = {up[1]*zAxis[2] - up[2]*zAxis[1], up[2]*zAxis[0] - up[0]*zAxis[2], up[0]*zAxis[1] - up[1]*zAxis[0]};
+        len = sqrtf(xAxis[0]*xAxis[0] + xAxis[1]*xAxis[1] + xAxis[2]*xAxis[2]);
+        if (len < 0.0001f) { xAxis[0] = 1; len = 1.0f; }
+        xAxis[0] /= len; xAxis[1] /= len; xAxis[2] /= len;
+        float yAxis[3] = {zAxis[1]*xAxis[2] - zAxis[2]*xAxis[1], zAxis[2]*xAxis[0] - zAxis[0]*xAxis[2], zAxis[0]*xAxis[1] - zAxis[1]*xAxis[0]};
+        m[0] = xAxis[0]; m[1] = yAxis[0]; m[2] = zAxis[0]; m[3] = 0;
+        m[4] = xAxis[1]; m[5] = yAxis[1]; m[6] = zAxis[1]; m[7] = 0;
+        m[8] = xAxis[2]; m[9] = yAxis[2]; m[10] = zAxis[2]; m[11] = 0;
+        m[12] = -(xAxis[0]*eye[0] + xAxis[1]*eye[1] + xAxis[2]*eye[2]);
+        m[13] = -(yAxis[0]*eye[0] + yAxis[1]*eye[1] + yAxis[2]*eye[2]);
+        m[14] = -(zAxis[0]*eye[0] + zAxis[1]*eye[1] + zAxis[2]*eye[2]);
+        m[15] = 1;
+    }
+    void multiply(float* out, const float* a, const float* b) {
+        float tmp[16];
+        for (int i = 0; i < 4; i++)
+            for (int j = 0; j < 4; j++)
+                tmp[i*4+j] = a[i*4+0]*b[0*4+j] + a[i*4+1]*b[1*4+j] + a[i*4+2]*b[2*4+j] + a[i*4+3]*b[3*4+j];
+        std::memcpy(out, tmp, sizeof(tmp));
+    }
+}
+
+// ===== Shader with texture support =====
+const char* kShaderSource = R"(
+cbuffer ConstantBuffer : register(b0) {
+    float4x4 worldViewProj;
+    float4x4 world;
+    float3 lightDir;
+    float hasTexture;
+    float3 cameraPos;
+    float metallic;
+    float3 baseColor;
+    float roughness;
+};
+
+Texture2D diffuseTexture : register(t0);
+SamplerState texSampler : register(s0);
+
+struct VSInput {
+    float3 position : POSITION;
+    float3 normal : NORMAL;
+    float2 uv : TEXCOORD;
+    float3 color : COLOR;
+};
+
+struct PSInput {
+    float4 position : SV_POSITION;
+    float3 worldPos : TEXCOORD0;
+    float3 normal : TEXCOORD1;
+    float2 uv : TEXCOORD2;
+    float3 color : COLOR;
+};
+
+PSInput VSMain(VSInput input) {
+    PSInput output;
+    output.position = mul(worldViewProj, float4(input.position, 1.0));
+    output.worldPos = mul(world, float4(input.position, 1.0)).xyz;
+    output.normal = mul((float3x3)world, input.normal);
+    output.uv = input.uv;
+    output.color = input.color;
+    return output;
+}
+
+float4 PSMain(PSInput input) : SV_TARGET {
+    float3 albedo = input.color * baseColor;
+    if (hasTexture > 0.5) {
+        albedo = diffuseTexture.Sample(texSampler, input.uv).rgb;
+    }
+    
+    float3 N = normalize(input.normal);
+    float3 L = normalize(-lightDir);
+    float3 V = normalize(cameraPos - input.worldPos);
+    float3 H = normalize(L + V);
+
+    float NdotL = max(dot(N, L), 0.0);
+    float NdotH = max(dot(N, H), 0.0);
+
+    float3 diffuse = albedo * NdotL;
+    float shininess = (1.0 - roughness) * 128.0 + 1.0;
+    float spec = pow(NdotH, shininess);
+    float3 specular = float3(1, 1, 1) * spec * (1.0 - roughness) * metallic;
+    float3 ambient = albedo * 0.15;
+
+    return float4(ambient + diffuse + specular, 1.0);
+}
+)";
+
+// ===== Constant buffer =====
+struct alignas(256) SceneConstants {
+    float worldViewProj[16];
+    float world[16];
+    float lightDir[3]; float hasTexture;
+    float cameraPos[3]; float metallic;
+    float baseColor[3]; float roughness;
+};
+
+// ===== GPU Mesh with texture =====
+struct MeshGPU {
+    ComPtr<ID3D12Resource> vertexBuffer;
+    ComPtr<ID3D12Resource> indexBuffer;
+    ComPtr<ID3D12Resource> texture;
+    D3D12_VERTEX_BUFFER_VIEW vbv{};
+    D3D12_INDEX_BUFFER_VIEW ibv{};
+    UINT indexCount{0};
+    bool hasTexture{false};
+    UINT srvIndex{0};  // Index in SRV heap
+};
+
+// ===== DX Context =====
 struct DxContext {
     HWND hwnd{};
     UINT width{1280}, height{720};
     ComPtr<ID3D12Device> device;
-    ComPtr<ID3D12DescriptorHeap> rtvHeap;
-    ComPtr<ID3D12DescriptorHeap> srvHeap;  // ImGui SRV heap
     ComPtr<ID3D12CommandQueue> queue;
     ComPtr<IDXGISwapChain3> swapchain;
+    ComPtr<ID3D12DescriptorHeap> rtvHeap;
+    ComPtr<ID3D12DescriptorHeap> dsvHeap;
+    ComPtr<ID3D12DescriptorHeap> srvHeap;  // For textures + ImGui
+    std::vector<ComPtr<ID3D12Resource>> renderTargets;
+    ComPtr<ID3D12Resource> depthStencil;
     std::vector<ComPtr<ID3D12CommandAllocator>> allocators;
     ComPtr<ID3D12GraphicsCommandList> cmdList;
     ComPtr<ID3D12Fence> fence;
@@ -78,74 +204,62 @@ struct DxContext {
     HANDLE fenceEvent{nullptr};
     UINT frameIndex{0};
     UINT rtvDescriptorSize{0};
-    std::vector<ComPtr<ID3D12Resource>> renderTargets;
+    UINT srvDescriptorSize{0};
+    UINT nextSrvIndex{1};  // 0 is reserved for ImGui font
+    
+    ComPtr<ID3D12RootSignature> rootSignature;
+    ComPtr<ID3D12PipelineState> pipelineState;
+    ComPtr<ID3D12Resource> constantBuffer;
+    SceneConstants sceneConstants{};
+    bool pipelineReady{false};
+    
+    // Default white texture for meshes without texture
+    ComPtr<ID3D12Resource> defaultTexture;
+    UINT defaultTextureSrvIndex{0};
+};
+
+struct ModelState {
+    std::vector<MeshGPU> meshes;
+    float center[3] = {0, 0, 0};
+    float radius = 1.0f;
+    std::string name = "Default Cube";
+    size_t totalVerts = 0;
+    size_t totalTris = 0;
+    int textureCount = 0;
 };
 
 static void CreateDevice(DxContext& ctx) {
-    ComPtr<IDXGIFactory6> factory;
     EnableDebugLayer();
+    ComPtr<IDXGIFactory6> factory;
     CheckHR(CreateDXGIFactory2(0, IID_PPV_ARGS(&factory)), "CreateDXGIFactory2");
-
     ComPtr<IDXGIAdapter1> adapter;
-    // Prefer high-performance GPU if available.
-    for (UINT i = 0;
-         factory->EnumAdapterByGpuPreference(i, DXGI_GPU_PREFERENCE_HIGH_PERFORMANCE, IID_PPV_ARGS(&adapter)) != DXGI_ERROR_NOT_FOUND;
-         ++i) {
-        DXGI_ADAPTER_DESC1 desc;
-        adapter->GetDesc1(&desc);
+    for (UINT i = 0; factory->EnumAdapterByGpuPreference(i, DXGI_GPU_PREFERENCE_HIGH_PERFORMANCE, IID_PPV_ARGS(&adapter)) != DXGI_ERROR_NOT_FOUND; ++i) {
+        DXGI_ADAPTER_DESC1 desc; adapter->GetDesc1(&desc);
         if (desc.Flags & DXGI_ADAPTER_FLAG_SOFTWARE) continue;
-        std::wcerr << L"[luma_imgui] Using adapter: " << desc.Description << std::endl;
-        if (SUCCEEDED(D3D12CreateDevice(adapter.Get(), D3D_FEATURE_LEVEL_11_0, IID_PPV_ARGS(&ctx.device)))) {
-            break;
-        }
-    }
-    if (!ctx.device) {
-        // Fallback: first hardware adapter
-        for (UINT i = 0; factory->EnumAdapters1(i, &adapter) != DXGI_ERROR_NOT_FOUND; ++i) {
-            DXGI_ADAPTER_DESC1 desc;
-            adapter->GetDesc1(&desc);
-            if (desc.Flags & DXGI_ADAPTER_FLAG_SOFTWARE) continue;
-            std::wcerr << L"[luma_imgui] Fallback adapter: " << desc.Description << std::endl;
-            if (SUCCEEDED(D3D12CreateDevice(adapter.Get(), D3D_FEATURE_LEVEL_11_0, IID_PPV_ARGS(&ctx.device)))) {
-                break;
-            }
-        }
+        if (SUCCEEDED(D3D12CreateDevice(adapter.Get(), D3D_FEATURE_LEVEL_11_0, IID_PPV_ARGS(&ctx.device)))) break;
     }
     CheckHR(ctx.device ? S_OK : E_FAIL, "D3D12CreateDevice");
-
-    D3D12_COMMAND_QUEUE_DESC qdesc{};
-    qdesc.Type = D3D12_COMMAND_LIST_TYPE_DIRECT;
+    D3D12_COMMAND_QUEUE_DESC qdesc{}; qdesc.Type = D3D12_COMMAND_LIST_TYPE_DIRECT;
     CheckHR(ctx.device->CreateCommandQueue(&qdesc, IID_PPV_ARGS(&ctx.queue)), "CreateCommandQueue");
-    std::cerr << "[luma_imgui] Device/Queue ready" << std::endl;
-
-    EnableInfoQueue(ctx.device);
 }
 
 static void CreateSwapchain(DxContext& ctx) {
     ComPtr<IDXGIFactory6> factory;
-    CheckHR(CreateDXGIFactory2(0, IID_PPV_ARGS(&factory)), "CreateDXGIFactory2 (swapchain)");
+    CheckHR(CreateDXGIFactory2(0, IID_PPV_ARGS(&factory)), "CreateDXGIFactory2");
     DXGI_SWAP_CHAIN_DESC1 desc{};
-    desc.BufferCount = 2;
-    desc.Width = ctx.width;
-    desc.Height = ctx.height;
-    desc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
-    desc.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
-    desc.SwapEffect = DXGI_SWAP_EFFECT_FLIP_DISCARD;
-    desc.SampleDesc.Count = 1;
-
-    ComPtr<IDXGISwapChain1> swapchain1;
-    CheckHR(factory->CreateSwapChainForHwnd(ctx.queue.Get(), ctx.hwnd, &desc, nullptr, nullptr, &swapchain1),
-            "CreateSwapChainForHwnd");
-    CheckHR(swapchain1.As(&ctx.swapchain), "Swapchain As");
+    desc.BufferCount = 2; desc.Width = ctx.width; desc.Height = ctx.height;
+    desc.Format = DXGI_FORMAT_R8G8B8A8_UNORM; desc.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
+    desc.SwapEffect = DXGI_SWAP_EFFECT_FLIP_DISCARD; desc.SampleDesc.Count = 1;
+    ComPtr<IDXGISwapChain1> sc1;
+    CheckHR(factory->CreateSwapChainForHwnd(ctx.queue.Get(), ctx.hwnd, &desc, nullptr, nullptr, &sc1), "CreateSwapChainForHwnd");
+    CheckHR(sc1.As(&ctx.swapchain), "Swapchain As");
     ctx.frameIndex = ctx.swapchain->GetCurrentBackBufferIndex();
-    std::cerr << "[luma_imgui] Swapchain ready" << std::endl;
 }
 
-static void CreateRTV(DxContext& ctx) {
-    D3D12_DESCRIPTOR_HEAP_DESC heapDesc{};
-    heapDesc.NumDescriptors = 2;
-    heapDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_RTV;
-    ctx.device->CreateDescriptorHeap(&heapDesc, IID_PPV_ARGS(&ctx.rtvHeap));
+static void CreateHeaps(DxContext& ctx) {
+    // RTV
+    D3D12_DESCRIPTOR_HEAP_DESC rtvDesc{}; rtvDesc.NumDescriptors = 2; rtvDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_RTV;
+    CheckHR(ctx.device->CreateDescriptorHeap(&rtvDesc, IID_PPV_ARGS(&ctx.rtvHeap)), "RTV Heap");
     ctx.rtvDescriptorSize = ctx.device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_RTV);
     ctx.renderTargets.resize(2);
     D3D12_CPU_DESCRIPTOR_HANDLE rtvHandle = ctx.rtvHeap->GetCPUDescriptorHandleForHeapStart();
@@ -154,235 +268,498 @@ static void CreateRTV(DxContext& ctx) {
         ctx.device->CreateRenderTargetView(ctx.renderTargets[i].Get(), nullptr, rtvHandle);
         rtvHandle.ptr += ctx.rtvDescriptorSize;
     }
-    std::cerr << "[luma_imgui] RTV heap ready" << std::endl;
+    // DSV
+    D3D12_DESCRIPTOR_HEAP_DESC dsvDesc{}; dsvDesc.NumDescriptors = 1; dsvDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_DSV;
+    CheckHR(ctx.device->CreateDescriptorHeap(&dsvDesc, IID_PPV_ARGS(&ctx.dsvHeap)), "DSV Heap");
+    D3D12_HEAP_PROPERTIES heapProps{}; heapProps.Type = D3D12_HEAP_TYPE_DEFAULT;
+    D3D12_RESOURCE_DESC depthDesc{};
+    depthDesc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+    depthDesc.Width = ctx.width; depthDesc.Height = ctx.height;
+    depthDesc.DepthOrArraySize = 1; depthDesc.MipLevels = 1;
+    depthDesc.Format = DXGI_FORMAT_D32_FLOAT; depthDesc.SampleDesc.Count = 1;
+    depthDesc.Flags = D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL;
+    D3D12_CLEAR_VALUE clearValue{}; clearValue.Format = DXGI_FORMAT_D32_FLOAT; clearValue.DepthStencil.Depth = 1.0f;
+    CheckHR(ctx.device->CreateCommittedResource(&heapProps, D3D12_HEAP_FLAG_NONE, &depthDesc, D3D12_RESOURCE_STATE_DEPTH_WRITE, &clearValue, IID_PPV_ARGS(&ctx.depthStencil)), "Depth");
+    ctx.device->CreateDepthStencilView(ctx.depthStencil.Get(), nullptr, ctx.dsvHeap->GetCPUDescriptorHandleForHeapStart());
+    // SRV heap (for textures + ImGui)
+    D3D12_DESCRIPTOR_HEAP_DESC srvDesc{}; srvDesc.NumDescriptors = 256;  // Room for many textures
+    srvDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV; srvDesc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
+    CheckHR(ctx.device->CreateDescriptorHeap(&srvDesc, IID_PPV_ARGS(&ctx.srvHeap)), "SRV Heap");
+    ctx.srvDescriptorSize = ctx.device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
 }
 
 static void CreateCommands(DxContext& ctx) {
     ctx.allocators.resize(2);
-    for (auto& alloc : ctx.allocators) {
-        CheckHR(ctx.device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&alloc)), "CreateCommandAllocator");
-    }
-    CheckHR(ctx.device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, ctx.allocators[0].Get(), nullptr, IID_PPV_ARGS(&ctx.cmdList)),
-            "CreateCommandList");
+    for (auto& alloc : ctx.allocators)
+        CheckHR(ctx.device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&alloc)), "Allocator");
+    CheckHR(ctx.device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, ctx.allocators[0].Get(), nullptr, IID_PPV_ARGS(&ctx.cmdList)), "CmdList");
     ctx.cmdList->Close();
-    CheckHR(ctx.device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&ctx.fence)), "CreateFence");
+    CheckHR(ctx.device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&ctx.fence)), "Fence");
     ctx.fenceValue = 1;
     ctx.fenceEvent = CreateEvent(nullptr, FALSE, FALSE, nullptr);
-    std::cerr << "[luma_imgui] Command objects ready" << std::endl;
+}
+
+static void CreateDefaultTexture(DxContext& ctx) {
+    // Create 1x1 white texture
+    D3D12_HEAP_PROPERTIES heapProps{}; heapProps.Type = D3D12_HEAP_TYPE_DEFAULT;
+    D3D12_RESOURCE_DESC texDesc{};
+    texDesc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+    texDesc.Width = 1; texDesc.Height = 1; texDesc.DepthOrArraySize = 1; texDesc.MipLevels = 1;
+    texDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM; texDesc.SampleDesc.Count = 1;
+    CheckHR(ctx.device->CreateCommittedResource(&heapProps, D3D12_HEAP_FLAG_NONE, &texDesc, D3D12_RESOURCE_STATE_COPY_DEST, nullptr, IID_PPV_ARGS(&ctx.defaultTexture)), "DefaultTex");
+    
+    // Upload white pixel
+    D3D12_HEAP_PROPERTIES uploadHeap{}; uploadHeap.Type = D3D12_HEAP_TYPE_UPLOAD;
+    D3D12_RESOURCE_DESC bufDesc{}; bufDesc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+    bufDesc.Width = 256; bufDesc.Height = 1; bufDesc.DepthOrArraySize = 1; bufDesc.MipLevels = 1;
+    bufDesc.SampleDesc.Count = 1; bufDesc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+    ComPtr<ID3D12Resource> uploadBuf;
+    CheckHR(ctx.device->CreateCommittedResource(&uploadHeap, D3D12_HEAP_FLAG_NONE, &bufDesc, D3D12_RESOURCE_STATE_GENERIC_READ, nullptr, IID_PPV_ARGS(&uploadBuf)), "UploadBuf");
+    uint8_t white[4] = {255, 255, 255, 255};
+    void* mapped; uploadBuf->Map(0, nullptr, &mapped);
+    memcpy(mapped, white, 4);
+    uploadBuf->Unmap(0, nullptr);
+    
+    // Copy
+    ctx.allocators[0]->Reset();
+    ctx.cmdList->Reset(ctx.allocators[0].Get(), nullptr);
+    D3D12_TEXTURE_COPY_LOCATION dst{}; dst.pResource = ctx.defaultTexture.Get(); dst.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+    D3D12_TEXTURE_COPY_LOCATION src{}; src.pResource = uploadBuf.Get(); src.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+    src.PlacedFootprint.Footprint.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+    src.PlacedFootprint.Footprint.Width = 1; src.PlacedFootprint.Footprint.Height = 1;
+    src.PlacedFootprint.Footprint.Depth = 1; src.PlacedFootprint.Footprint.RowPitch = 256;
+    ctx.cmdList->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
+    D3D12_RESOURCE_BARRIER barrier{}; barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+    barrier.Transition.pResource = ctx.defaultTexture.Get();
+    barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_DEST;
+    barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+    barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+    ctx.cmdList->ResourceBarrier(1, &barrier);
+    ctx.cmdList->Close();
+    ID3D12CommandList* lists[] = {ctx.cmdList.Get()};
+    ctx.queue->ExecuteCommandLists(1, lists);
+    ctx.queue->Signal(ctx.fence.Get(), ctx.fenceValue);
+    ctx.fence->SetEventOnCompletion(ctx.fenceValue++, ctx.fenceEvent);
+    WaitForSingleObject(ctx.fenceEvent, INFINITE);
+    
+    // Create SRV
+    ctx.defaultTextureSrvIndex = ctx.nextSrvIndex++;
+    D3D12_CPU_DESCRIPTOR_HANDLE srvHandle = ctx.srvHeap->GetCPUDescriptorHandleForHeapStart();
+    srvHandle.ptr += ctx.defaultTextureSrvIndex * ctx.srvDescriptorSize;
+    D3D12_SHADER_RESOURCE_VIEW_DESC srvViewDesc{}; srvViewDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+    srvViewDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM; srvViewDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+    srvViewDesc.Texture2D.MipLevels = 1;
+    ctx.device->CreateShaderResourceView(ctx.defaultTexture.Get(), &srvViewDesc, srvHandle);
+}
+
+static void CreatePipeline(DxContext& ctx) {
+    // Root signature: CBV(b0), SRV(t0), Sampler(s0)
+    D3D12_DESCRIPTOR_RANGE srvRange{}; srvRange.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
+    srvRange.NumDescriptors = 1; srvRange.BaseShaderRegister = 0;
+    D3D12_ROOT_PARAMETER rootParams[2]{};
+    rootParams[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_CBV; rootParams[0].Descriptor.ShaderRegister = 0;
+    rootParams[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
+    rootParams[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+    rootParams[1].DescriptorTable.NumDescriptorRanges = 1; rootParams[1].DescriptorTable.pDescriptorRanges = &srvRange;
+    rootParams[1].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+    
+    D3D12_STATIC_SAMPLER_DESC sampler{}; sampler.Filter = D3D12_FILTER_MIN_MAG_MIP_LINEAR;
+    sampler.AddressU = sampler.AddressV = sampler.AddressW = D3D12_TEXTURE_ADDRESS_MODE_WRAP;
+    sampler.ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+    
+    D3D12_ROOT_SIGNATURE_DESC rsDesc{}; rsDesc.NumParameters = 2; rsDesc.pParameters = rootParams;
+    rsDesc.NumStaticSamplers = 1; rsDesc.pStaticSamplers = &sampler;
+    rsDesc.Flags = D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT;
+    
+    ComPtr<ID3DBlob> signature, error;
+    HRESULT hr = D3D12SerializeRootSignature(&rsDesc, D3D_ROOT_SIGNATURE_VERSION_1, &signature, &error);
+    if (FAILED(hr) && error) std::cerr << (char*)error->GetBufferPointer() << std::endl;
+    CheckHR(hr, "SerializeRS");
+    CheckHR(ctx.device->CreateRootSignature(0, signature->GetBufferPointer(), signature->GetBufferSize(), IID_PPV_ARGS(&ctx.rootSignature)), "CreateRS");
+    
+    // Compile shaders
+    ComPtr<ID3DBlob> vs, ps, errorBlob;
+    UINT flags = 0;
+#ifdef _DEBUG
+    flags = D3DCOMPILE_DEBUG | D3DCOMPILE_SKIP_OPTIMIZATION;
+#endif
+    hr = D3DCompile(kShaderSource, strlen(kShaderSource), "shader.hlsl", nullptr, nullptr, "VSMain", "vs_5_0", flags, 0, &vs, &errorBlob);
+    if (FAILED(hr) && errorBlob) std::cerr << (char*)errorBlob->GetBufferPointer() << std::endl;
+    CheckHR(hr, "Compile VS");
+    hr = D3DCompile(kShaderSource, strlen(kShaderSource), "shader.hlsl", nullptr, nullptr, "PSMain", "ps_5_0", flags, 0, &ps, &errorBlob);
+    if (FAILED(hr) && errorBlob) std::cerr << (char*)errorBlob->GetBufferPointer() << std::endl;
+    CheckHR(hr, "Compile PS");
+    
+    // Input layout with UV
+    D3D12_INPUT_ELEMENT_DESC inputLayout[] = {
+        {"POSITION", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 0, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0},
+        {"NORMAL", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 12, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0},
+        {"TEXCOORD", 0, DXGI_FORMAT_R32G32_FLOAT, 0, 24, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0},
+        {"COLOR", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 32, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0},
+    };
+    
+    D3D12_GRAPHICS_PIPELINE_STATE_DESC psoDesc{};
+    psoDesc.InputLayout = {inputLayout, _countof(inputLayout)};
+    psoDesc.pRootSignature = ctx.rootSignature.Get();
+    psoDesc.VS = {vs->GetBufferPointer(), vs->GetBufferSize()};
+    psoDesc.PS = {ps->GetBufferPointer(), ps->GetBufferSize()};
+    psoDesc.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID;
+    psoDesc.RasterizerState.CullMode = D3D12_CULL_MODE_BACK;
+    psoDesc.RasterizerState.DepthClipEnable = TRUE;
+    psoDesc.BlendState.RenderTarget[0].RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
+    psoDesc.DepthStencilState.DepthEnable = TRUE;
+    psoDesc.DepthStencilState.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ALL;
+    psoDesc.DepthStencilState.DepthFunc = D3D12_COMPARISON_FUNC_LESS;
+    psoDesc.SampleMask = UINT_MAX;
+    psoDesc.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+    psoDesc.NumRenderTargets = 1;
+    psoDesc.RTVFormats[0] = DXGI_FORMAT_R8G8B8A8_UNORM;
+    psoDesc.DSVFormat = DXGI_FORMAT_D32_FLOAT;
+    psoDesc.SampleDesc.Count = 1;
+    CheckHR(ctx.device->CreateGraphicsPipelineState(&psoDesc, IID_PPV_ARGS(&ctx.pipelineState)), "CreatePSO");
+    
+    // Constant buffer
+    D3D12_HEAP_PROPERTIES cbHeap{}; cbHeap.Type = D3D12_HEAP_TYPE_UPLOAD;
+    D3D12_RESOURCE_DESC cbDesc{}; cbDesc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+    cbDesc.Width = sizeof(SceneConstants); cbDesc.Height = 1; cbDesc.DepthOrArraySize = 1;
+    cbDesc.MipLevels = 1; cbDesc.SampleDesc.Count = 1; cbDesc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+    CheckHR(ctx.device->CreateCommittedResource(&cbHeap, D3D12_HEAP_FLAG_NONE, &cbDesc, D3D12_RESOURCE_STATE_GENERIC_READ, nullptr, IID_PPV_ARGS(&ctx.constantBuffer)), "CB");
+    
+    ctx.pipelineReady = true;
+    std::cout << "[luma] Pipeline with textures ready" << std::endl;
+}
+
+static ComPtr<ID3D12Resource> UploadTexture(DxContext& ctx, const luma::TextureData& tex, UINT& outSrvIndex) {
+    if (tex.pixels.empty()) return nullptr;
+    
+    // Create texture resource
+    D3D12_HEAP_PROPERTIES heapProps{}; heapProps.Type = D3D12_HEAP_TYPE_DEFAULT;
+    D3D12_RESOURCE_DESC texDesc{}; texDesc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+    texDesc.Width = tex.width; texDesc.Height = tex.height;
+    texDesc.DepthOrArraySize = 1; texDesc.MipLevels = 1;
+    texDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM; texDesc.SampleDesc.Count = 1;
+    ComPtr<ID3D12Resource> texture;
+    CheckHR(ctx.device->CreateCommittedResource(&heapProps, D3D12_HEAP_FLAG_NONE, &texDesc, D3D12_RESOURCE_STATE_COPY_DEST, nullptr, IID_PPV_ARGS(&texture)), "Texture");
+    
+    // Upload buffer
+    UINT64 uploadSize;
+    ctx.device->GetCopyableFootprints(&texDesc, 0, 1, 0, nullptr, nullptr, nullptr, &uploadSize);
+    D3D12_HEAP_PROPERTIES uploadHeap{}; uploadHeap.Type = D3D12_HEAP_TYPE_UPLOAD;
+    D3D12_RESOURCE_DESC bufDesc{}; bufDesc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+    bufDesc.Width = uploadSize; bufDesc.Height = 1; bufDesc.DepthOrArraySize = 1; bufDesc.MipLevels = 1;
+    bufDesc.SampleDesc.Count = 1; bufDesc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+    ComPtr<ID3D12Resource> uploadBuf;
+    CheckHR(ctx.device->CreateCommittedResource(&uploadHeap, D3D12_HEAP_FLAG_NONE, &bufDesc, D3D12_RESOURCE_STATE_GENERIC_READ, nullptr, IID_PPV_ARGS(&uploadBuf)), "UploadBuf");
+    
+    // Map and copy
+    D3D12_PLACED_SUBRESOURCE_FOOTPRINT footprint;
+    ctx.device->GetCopyableFootprints(&texDesc, 0, 1, 0, &footprint, nullptr, nullptr, nullptr);
+    void* mapped;
+    uploadBuf->Map(0, nullptr, &mapped);
+    for (UINT y = 0; y < (UINT)tex.height; y++) {
+        memcpy((uint8_t*)mapped + y * footprint.Footprint.RowPitch, tex.pixels.data() + y * tex.width * 4, tex.width * 4);
+    }
+    uploadBuf->Unmap(0, nullptr);
+    
+    // Copy command
+    ctx.allocators[0]->Reset();
+    ctx.cmdList->Reset(ctx.allocators[0].Get(), nullptr);
+    D3D12_TEXTURE_COPY_LOCATION dst{}; dst.pResource = texture.Get(); dst.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+    D3D12_TEXTURE_COPY_LOCATION src{}; src.pResource = uploadBuf.Get(); src.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT; src.PlacedFootprint = footprint;
+    ctx.cmdList->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
+    D3D12_RESOURCE_BARRIER barrier{}; barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+    barrier.Transition.pResource = texture.Get();
+    barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_DEST;
+    barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+    barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+    ctx.cmdList->ResourceBarrier(1, &barrier);
+    ctx.cmdList->Close();
+    ID3D12CommandList* lists[] = {ctx.cmdList.Get()};
+    ctx.queue->ExecuteCommandLists(1, lists);
+    ctx.queue->Signal(ctx.fence.Get(), ctx.fenceValue);
+    ctx.fence->SetEventOnCompletion(ctx.fenceValue++, ctx.fenceEvent);
+    WaitForSingleObject(ctx.fenceEvent, INFINITE);
+    
+    // Create SRV
+    outSrvIndex = ctx.nextSrvIndex++;
+    D3D12_CPU_DESCRIPTOR_HANDLE srvHandle = ctx.srvHeap->GetCPUDescriptorHandleForHeapStart();
+    srvHandle.ptr += outSrvIndex * ctx.srvDescriptorSize;
+    D3D12_SHADER_RESOURCE_VIEW_DESC srvViewDesc{}; srvViewDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+    srvViewDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM; srvViewDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+    srvViewDesc.Texture2D.MipLevels = 1;
+    ctx.device->CreateShaderResourceView(texture.Get(), &srvViewDesc, srvHandle);
+    
+    return texture;
+}
+
+static MeshGPU CreateMeshGPU(DxContext& ctx, const luma::Mesh& mesh) {
+    MeshGPU gpu;
+    gpu.indexCount = static_cast<UINT>(mesh.indices.size());
+    const UINT vbSize = static_cast<UINT>(mesh.vertices.size() * sizeof(luma::Vertex));
+    const UINT ibSize = static_cast<UINT>(mesh.indices.size() * sizeof(uint32_t));
+    
+    D3D12_HEAP_PROPERTIES heapProps{}; heapProps.Type = D3D12_HEAP_TYPE_UPLOAD;
+    D3D12_RESOURCE_DESC bufDesc{}; bufDesc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+    bufDesc.Width = vbSize; bufDesc.Height = 1; bufDesc.DepthOrArraySize = 1; bufDesc.MipLevels = 1;
+    bufDesc.SampleDesc.Count = 1; bufDesc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+    CheckHR(ctx.device->CreateCommittedResource(&heapProps, D3D12_HEAP_FLAG_NONE, &bufDesc, D3D12_RESOURCE_STATE_GENERIC_READ, nullptr, IID_PPV_ARGS(&gpu.vertexBuffer)), "VB");
+    bufDesc.Width = ibSize;
+    CheckHR(ctx.device->CreateCommittedResource(&heapProps, D3D12_HEAP_FLAG_NONE, &bufDesc, D3D12_RESOURCE_STATE_GENERIC_READ, nullptr, IID_PPV_ARGS(&gpu.indexBuffer)), "IB");
+    
+    void* mapped;
+    gpu.vertexBuffer->Map(0, nullptr, &mapped);
+    memcpy(mapped, mesh.vertices.data(), vbSize);
+    gpu.vertexBuffer->Unmap(0, nullptr);
+    gpu.indexBuffer->Map(0, nullptr, &mapped);
+    memcpy(mapped, mesh.indices.data(), ibSize);
+    gpu.indexBuffer->Unmap(0, nullptr);
+    
+    gpu.vbv.BufferLocation = gpu.vertexBuffer->GetGPUVirtualAddress();
+    gpu.vbv.SizeInBytes = vbSize; gpu.vbv.StrideInBytes = sizeof(luma::Vertex);
+    gpu.ibv.BufferLocation = gpu.indexBuffer->GetGPUVirtualAddress();
+    gpu.ibv.SizeInBytes = ibSize; gpu.ibv.Format = DXGI_FORMAT_R32_UINT;
+    
+    // Upload texture if available
+    if (mesh.hasDiffuseTexture) {
+        gpu.texture = UploadTexture(ctx, mesh.diffuseTexture, gpu.srvIndex);
+        gpu.hasTexture = (gpu.texture != nullptr);
+    }
+    if (!gpu.hasTexture) {
+        gpu.srvIndex = ctx.defaultTextureSrvIndex;
+    }
+    
+    return gpu;
 }
 
 static void WaitForGPU(DxContext& ctx) {
-    const UINT64 fenceToWait = ctx.fenceValue;
-    ctx.queue->Signal(ctx.fence.Get(), fenceToWait);
-    ctx.fenceValue++;
-    if (ctx.fence->GetCompletedValue() < fenceToWait) {
-        ctx.fence->SetEventOnCompletion(fenceToWait, ctx.fenceEvent);
+    const UINT64 fv = ctx.fenceValue++;
+    ctx.queue->Signal(ctx.fence.Get(), fv);
+    if (ctx.fence->GetCompletedValue() < fv) {
+        ctx.fence->SetEventOnCompletion(fv, ctx.fenceEvent);
         WaitForSingleObject(ctx.fenceEvent, INFINITE);
     }
     ctx.frameIndex = ctx.swapchain->GetCurrentBackBufferIndex();
 }
 
-static void Render(DxContext& ctx, ImVec4 clear_color) {
-    if (!ctx.renderTargets[ctx.frameIndex]) {
-        std::cerr << "[luma_imgui] Null render target for frame " << ctx.frameIndex << std::endl;
-        return;
-    }
-    auto& allocator = ctx.allocators[ctx.frameIndex];
-    CheckHR(allocator->Reset(), "Allocator Reset");
-    CheckHR(ctx.cmdList->Reset(allocator.Get(), nullptr), "CommandList Reset");
-    std::cerr << "[luma_imgui] Render frame " << ctx.frameIndex << " begin" << std::endl;
-
-    // Set descriptor heaps AFTER Reset and BEFORE any draw calls
-    ID3D12DescriptorHeap* heaps[] = { ctx.srvHeap.Get() };
-    ctx.cmdList->SetDescriptorHeaps(1, heaps);
-
+static void Render(DxContext& ctx, ModelState& model, float time, float camDist) {
+    auto& alloc = ctx.allocators[ctx.frameIndex];
+    CheckHR(alloc->Reset(), "Allocator Reset");
+    CheckHR(ctx.cmdList->Reset(alloc.Get(), ctx.pipelineState.Get()), "CmdList Reset");
+    
     D3D12_RESOURCE_BARRIER barrier{};
     barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
-    barrier.Flags = D3D12_RESOURCE_BARRIER_FLAG_NONE;
     barrier.Transition.pResource = ctx.renderTargets[ctx.frameIndex].Get();
     barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_PRESENT;
     barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_RENDER_TARGET;
     barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
     ctx.cmdList->ResourceBarrier(1, &barrier);
-
+    
     D3D12_CPU_DESCRIPTOR_HANDLE rtv = ctx.rtvHeap->GetCPUDescriptorHandleForHeapStart();
     rtv.ptr += static_cast<SIZE_T>(ctx.frameIndex) * ctx.rtvDescriptorSize;
-    ctx.cmdList->ClearRenderTargetView(rtv, reinterpret_cast<float*>(&clear_color), 0, nullptr);
-    ctx.cmdList->OMSetRenderTargets(1, &rtv, FALSE, nullptr);
-    std::cerr << "[luma_imgui] RT cleared" << std::endl;
-
-    if (ImDrawData* dd = ImGui::GetDrawData()) {
-        std::cerr << "[luma_imgui] ImGui draw lists: " << dd->CmdListsCount
-                  << " TotalVtx: " << dd->TotalVtxCount
-                  << " TotalIdx: " << dd->TotalIdxCount << std::endl;
-        if (dd->CmdListsCount > 0) {
-            ImGui_ImplDX12_RenderDrawData(dd, ctx.cmdList.Get());
-            std::cerr << "[luma_imgui] ImGui draw submitted" << std::endl;
+    D3D12_CPU_DESCRIPTOR_HANDLE dsv = ctx.dsvHeap->GetCPUDescriptorHandleForHeapStart();
+    ctx.cmdList->OMSetRenderTargets(1, &rtv, FALSE, &dsv);
+    
+    const float clearColor[] = {0.05f, 0.05f, 0.08f, 1.0f};
+    ctx.cmdList->ClearRenderTargetView(rtv, clearColor, 0, nullptr);
+    ctx.cmdList->ClearDepthStencilView(dsv, D3D12_CLEAR_FLAG_DEPTH, 1.0f, 0, 0, nullptr);
+    
+    D3D12_VIEWPORT viewport = {0, 0, (float)ctx.width, (float)ctx.height, 0.0f, 1.0f};
+    D3D12_RECT scissor = {0, 0, (LONG)ctx.width, (LONG)ctx.height};
+    ctx.cmdList->RSSetViewports(1, &viewport);
+    ctx.cmdList->RSSetScissorRects(1, &scissor);
+    
+    ID3D12DescriptorHeap* heaps[] = {ctx.srvHeap.Get()};
+    ctx.cmdList->SetDescriptorHeaps(1, heaps);
+    
+    if (ctx.pipelineReady && !model.meshes.empty()) {
+        ctx.cmdList->SetGraphicsRootSignature(ctx.rootSignature.Get());
+        
+        // Camera
+        float eye[3] = {model.center[0] + sinf(time * 0.5f) * camDist, model.center[1] + camDist * 0.4f, model.center[2] + cosf(time * 0.5f) * camDist};
+        float at[3] = {model.center[0], model.center[1], model.center[2]};
+        float up[3] = {0, 1, 0};
+        float world[16], view[16], proj[16], wvp[16];
+        math::identity(world);
+        math::lookAt(view, eye, at, up);
+        math::perspective(proj, 3.14159f / 4.0f, (float)ctx.width / ctx.height, 0.01f, 1000.0f);
+        math::multiply(wvp, world, view);
+        math::multiply(wvp, wvp, proj);
+        
+        memcpy(ctx.sceneConstants.worldViewProj, wvp, sizeof(wvp));
+        memcpy(ctx.sceneConstants.world, world, sizeof(world));
+        ctx.sceneConstants.lightDir[0] = -0.5f; ctx.sceneConstants.lightDir[1] = -1.0f; ctx.sceneConstants.lightDir[2] = 0.5f;
+        ctx.sceneConstants.cameraPos[0] = eye[0]; ctx.sceneConstants.cameraPos[1] = eye[1]; ctx.sceneConstants.cameraPos[2] = eye[2];
+        ctx.sceneConstants.baseColor[0] = ctx.sceneConstants.baseColor[1] = ctx.sceneConstants.baseColor[2] = 1.0f;
+        
+        ctx.cmdList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+        ctx.cmdList->SetGraphicsRootConstantBufferView(0, ctx.constantBuffer->GetGPUVirtualAddress());
+        
+        for (const auto& mesh : model.meshes) {
+            ctx.sceneConstants.hasTexture = mesh.hasTexture ? 1.0f : 0.0f;
+            void* mapped;
+            ctx.constantBuffer->Map(0, nullptr, &mapped);
+            memcpy(mapped, &ctx.sceneConstants, sizeof(ctx.sceneConstants));
+            ctx.constantBuffer->Unmap(0, nullptr);
+            
+            D3D12_GPU_DESCRIPTOR_HANDLE srvGpu = ctx.srvHeap->GetGPUDescriptorHandleForHeapStart();
+            srvGpu.ptr += mesh.srvIndex * ctx.srvDescriptorSize;
+            ctx.cmdList->SetGraphicsRootDescriptorTable(1, srvGpu);
+            
+            ctx.cmdList->IASetVertexBuffers(0, 1, &mesh.vbv);
+            ctx.cmdList->IASetIndexBuffer(&mesh.ibv);
+            ctx.cmdList->DrawIndexedInstanced(mesh.indexCount, 1, 0, 0, 0);
         }
-    } else {
-        std::cerr << "[luma_imgui] No draw data" << std::endl;
     }
-
+    
+    // ImGui
+    if (ImDrawData* dd = ImGui::GetDrawData()) {
+        ImGui_ImplDX12_RenderDrawData(dd, ctx.cmdList.Get());
+    }
+    
     barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_RENDER_TARGET;
     barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_PRESENT;
     ctx.cmdList->ResourceBarrier(1, &barrier);
-    CheckHR(ctx.cmdList->Close(), "CommandList Close");
-
+    CheckHR(ctx.cmdList->Close(), "CmdList Close");
+    
     ID3D12CommandList* lists[] = {ctx.cmdList.Get()};
     ctx.queue->ExecuteCommandLists(1, lists);
     CheckHR(ctx.swapchain->Present(1, 0), "Present");
-    if (HRESULT reason = ctx.device->GetDeviceRemovedReason(); reason != S_OK) {
-        std::cerr << "[luma_imgui] Device removed. HR=0x" << std::hex << reason << std::dec << std::endl;
-        throw std::runtime_error("Device removed");
-    }
     WaitForGPU(ctx);
-    std::cerr << "[luma_imgui] Render frame end" << std::endl;
+}
+
+static std::string OpenFileDialog(HWND hwnd) {
+    char filename[MAX_PATH] = "";
+    OPENFILENAMEA ofn{}; ofn.lStructSize = sizeof(ofn); ofn.hwndOwner = hwnd;
+    ofn.lpstrFilter = luma::get_file_filter();
+    ofn.lpstrFile = filename; ofn.nMaxFile = MAX_PATH;
+    ofn.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST;
+    if (GetOpenFileNameA(&ofn)) return filename;
+    return "";
+}
+
+static void LoadModel(DxContext& ctx, ModelState& state, const std::string& path) {
+    auto result = luma::load_model(path);
+    if (!result) return;
+    
+    state.meshes.clear();
+    state.textureCount = 0;
+    for (const auto& mesh : result->meshes) {
+        state.meshes.push_back(CreateMeshGPU(ctx, mesh));
+        if (mesh.hasDiffuseTexture) state.textureCount++;
+    }
+    
+    state.center[0] = (result->minBounds[0] + result->maxBounds[0]) * 0.5f;
+    state.center[1] = (result->minBounds[1] + result->maxBounds[1]) * 0.5f;
+    state.center[2] = (result->minBounds[2] + result->maxBounds[2]) * 0.5f;
+    float dx = result->maxBounds[0] - result->minBounds[0];
+    float dy = result->maxBounds[1] - result->minBounds[1];
+    float dz = result->maxBounds[2] - result->minBounds[2];
+    state.radius = sqrtf(dx*dx + dy*dy + dz*dz) * 0.5f;
+    if (state.radius < 0.01f) state.radius = 1.0f;
+    
+    state.name = result->name;
+    state.totalVerts = result->totalVertices;
+    state.totalTris = result->totalTriangles;
 }
 
 static int RunApp() {
     HINSTANCE hInstance = GetModuleHandleW(nullptr);
-    // Engine state
-    luma::Scene scene;
-    scene.add_node(luma::Node{"MeshNode", "asset_mesh_hero", std::nullopt, {}});
-    scene.add_node(luma::Node{"CameraNode", {}, luma::AssetID{"asset_camera_main"}, {}});
     luma::EngineFacade engine;
-    engine.load_scene(scene);
-
-    // Win32 window
+    
     WNDCLASSEXW wc{sizeof(WNDCLASSEXW), CS_CLASSDC, WndProc, 0L, 0L, hInstance, nullptr, nullptr, nullptr, nullptr, L"LumaImGui", nullptr};
     RegisterClassExW(&wc);
-    HWND hwnd = CreateWindowW(wc.lpszClassName, L"Luma ImGui Creator", WS_OVERLAPPEDWINDOW, 100, 100, 1280, 720, nullptr, nullptr, wc.hInstance, nullptr);
-
-    DxContext ctx;
-    ctx.hwnd = hwnd;
-    RECT rc;
-    GetClientRect(hwnd, &rc);
-    ctx.width = rc.right - rc.left;
-    ctx.height = rc.bottom - rc.top;
+    HWND hwnd = CreateWindowW(wc.lpszClassName, L"Luma Creator - PBR Model Viewer", WS_OVERLAPPEDWINDOW, 100, 100, 1280, 720, nullptr, nullptr, wc.hInstance, nullptr);
+    
+    DxContext ctx; ctx.hwnd = hwnd;
+    RECT rc; GetClientRect(hwnd, &rc);
+    ctx.width = rc.right - rc.left; ctx.height = rc.bottom - rc.top;
+    
     CreateDevice(ctx);
     CreateSwapchain(ctx);
-    CreateRTV(ctx);
+    CreateHeaps(ctx);
     CreateCommands(ctx);
-
-    // ImGui init
+    CreateDefaultTexture(ctx);
+    CreatePipeline(ctx);
+    
+    // Default cube
+    ModelState model;
+    luma::Mesh cube = luma::create_cube();
+    model.meshes.push_back(CreateMeshGPU(ctx, cube));
+    model.totalVerts = cube.vertices.size();
+    model.totalTris = cube.indices.size() / 3;
+    
     IMGUI_CHECKVERSION();
     ImGui::CreateContext();
     ImGui::StyleColorsDark();
     ImGui_ImplWin32_Init(hwnd);
-    D3D12_DESCRIPTOR_HEAP_DESC heapDesc{};
-    heapDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
-    heapDesc.NumDescriptors = 64;  // ample descriptors for imgui SRVs
-    heapDesc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
-    CheckHR(ctx.device->CreateDescriptorHeap(&heapDesc, IID_PPV_ARGS(&ctx.srvHeap)), "CreateDescriptorHeap srvHeap");
-    if (!ImGui_ImplDX12_Init(ctx.device.Get(), 2, DXGI_FORMAT_R8G8B8A8_UNORM, ctx.srvHeap.Get(),
-                             ctx.srvHeap->GetCPUDescriptorHandleForHeapStart(),
-                             ctx.srvHeap->GetGPUDescriptorHandleForHeapStart())) {
-        std::cerr << "[luma_imgui] ImGui_ImplDX12_Init failed" << std::endl;
-        return 1;
-    }
-    if (!ImGui_ImplDX12_CreateDeviceObjects()) {
-        std::cerr << "[luma_imgui] ImGui_ImplDX12_CreateDeviceObjects failed" << std::endl;
-        return 1;
-    }
-    std::cerr << "[luma_imgui] ImGui initialized" << std::endl;
-
+    ImGui_ImplDX12_Init(ctx.device.Get(), 2, DXGI_FORMAT_R8G8B8A8_UNORM, ctx.srvHeap.Get(),
+        ctx.srvHeap->GetCPUDescriptorHandleForHeapStart(), ctx.srvHeap->GetGPUDescriptorHandleForHeapStart());
+    ImGui_ImplDX12_CreateDeviceObjects();
+    
     ShowWindow(hwnd, SW_SHOWDEFAULT);
     UpdateWindow(hwnd);
-
-    // UI state
-    int variant = 0;
-    std::unordered_map<std::string, std::string> params;
-    params["param0"] = "0.5";
-    bool show_demo = false;
-    uint64_t frameCounter = 0;
-
+    
+    auto startTime = std::chrono::high_resolution_clock::now();
+    float camDistMult = 2.5f;
+    bool autoRotate = true;
+    float manualTime = 0.0f;
+    
     MSG msg{};
     while (msg.message != WM_QUIT) {
         if (PeekMessage(&msg, nullptr, 0U, 0U, PM_REMOVE)) {
-            TranslateMessage(&msg);
-            DispatchMessage(&msg);
+            TranslateMessage(&msg); DispatchMessage(&msg);
             continue;
         }
-        std::cerr << "[luma_imgui] Frame #" << frameCounter << " start" << std::endl;
-
-        try {
-            ImGui_ImplDX12_NewFrame();
-            ImGui_ImplWin32_NewFrame();
-            ImGui::NewFrame();
-        } catch (...) {
-            std::cerr << "[luma_imgui] NewFrame exception" << std::endl;
-            break;
-        }
-
-        if (ImGui::Begin("Assets")) {
-            if (ImGui::Selectable("look_qt_viewport")) {
-                engine.dispatch_action({luma::ActionType::ApplyLook, "look_qt_viewport", {}, std::nullopt, 1});
+        
+        float elapsed = std::chrono::duration<float>(std::chrono::high_resolution_clock::now() - startTime).count();
+        float time = autoRotate ? elapsed : manualTime;
+        
+        ImGui_ImplDX12_NewFrame();
+        ImGui_ImplWin32_NewFrame();
+        ImGui::NewFrame();
+        
+        if (ImGui::Begin("Model")) {
+            ImGui::Text("File: %s", model.name.c_str());
+            ImGui::Separator();
+            ImGui::Text("Meshes: %zu", model.meshes.size());
+            ImGui::Text("Vertices: %zu", model.totalVerts);
+            ImGui::Text("Triangles: %zu", model.totalTris);
+            ImGui::Text("Textures: %d", model.textureCount);
+            ImGui::Separator();
+            if (ImGui::Button("Open Model...")) {
+                std::string path = OpenFileDialog(hwnd);
+                if (!path.empty()) LoadModel(ctx, model, path);
             }
-            if (ImGui::Selectable("asset_material_default")) {
-                // select material
-            }
-        }
-        ImGui::End();
-
-        if (ImGui::Begin("Inspector")) {
-            ImGui::Text("Active Camera: %s", engine.scene().active_camera() ? engine.scene().active_camera()->c_str() : "<none>");
-            ImGui::Text("Look: %s", engine.look().id.c_str());
-            if (ImGui::SliderInt("Variant", &variant, 0, 5)) {
-                engine.dispatch_action({luma::ActionType::SetMaterialVariant, "asset_material_default", "", variant, 2});
-            }
-            if (ImGui::CollapsingHeader("Params", ImGuiTreeNodeFlags_DefaultOpen)) {
-                int idx = 0;
-                for (auto& kv : params) {
-                    char buf[64];
-                    strncpy(buf, kv.second.c_str(), sizeof(buf));
-                    buf[sizeof(buf) - 1] = '\0';
-                    if (ImGui::InputText(("##v" + std::to_string(idx)).c_str(), buf, sizeof(buf))) {
-                        kv.second = buf;
-                        engine.dispatch_action({luma::ActionType::SetParameter,
-                                                "asset_material_default/" + kv.first,
-                                                kv.second,
-                                                std::nullopt,
-                                                3});
-                    }
-                    ImGui::SameLine();
-                    ImGui::Text("%s", kv.first.c_str());
-                    idx++;
-                }
-            }
-            if (ImGui::Button("Add Param")) {
-                const std::string name = "param" + std::to_string(params.size());
-                params[name] = "0";
-                engine.dispatch_action({luma::ActionType::SetParameter,
-                                        "asset_material_default/" + name,
-                                        "0",
-                                        std::nullopt,
-                                        4});
-            }
-            ImGui::Checkbox("Show ImGui Demo", &show_demo);
-        }
-        ImGui::End();
-
-        if (ImGui::Begin("Timeline")) {
-            static float t = 0.0f;
-            if (ImGui::SliderFloat("Time", &t, 0.0f, 1.0f)) {
-                engine.set_time(t);
-                engine.dispatch_action({luma::ActionType::SetParameter, "TimelineCurve", std::to_string(t), std::nullopt, 5});
-            }
-            if (ImGui::Button("Play")) {
-                engine.dispatch_action({luma::ActionType::PlayAnimation, "MeshNode", "clip_timeline", std::nullopt, 6});
+            if (ImGui::Button("Reset to Cube")) {
+                model.meshes.clear();
+                luma::Mesh cube = luma::create_cube();
+                model.meshes.push_back(CreateMeshGPU(ctx, cube));
+                model.center[0] = model.center[1] = model.center[2] = 0;
+                model.radius = 1.0f;
+                model.name = "Default Cube";
+                model.totalVerts = 24; model.totalTris = 12;
+                model.textureCount = 0;
             }
         }
         ImGui::End();
-
-        if (show_demo) ImGui::ShowDemoWindow(&show_demo);
-
+        
+        if (ImGui::Begin("Camera")) {
+            ImGui::Checkbox("Auto Rotate", &autoRotate);
+            if (!autoRotate) ImGui::SliderFloat("Rotation", &manualTime, 0, 20);
+            ImGui::SliderFloat("Distance", &camDistMult, 0.5f, 10.0f);
+        }
+        ImGui::End();
+        
+        if (ImGui::Begin("Material")) {
+            ImGui::SliderFloat("Metallic", &ctx.sceneConstants.metallic, 0, 1);
+            ImGui::SliderFloat("Roughness", &ctx.sceneConstants.roughness, 0, 1);
+        }
+        ImGui::End();
+        
         ImGui::Render();
-        ImVec4 clear_color = ImVec4(0.1f, 0.1f, 0.15f, 1.0f);
-        Render(ctx, clear_color);
-        std::cerr << "[luma_imgui] Frame #" << frameCounter << " done" << std::endl;
-        frameCounter++;
+        Render(ctx, model, time, model.radius * camDistMult);
     }
-
+    
     WaitForGPU(ctx);
     CloseHandle(ctx.fenceEvent);
     ImGui_ImplDX12_Shutdown();
@@ -393,26 +770,20 @@ static int RunApp() {
 
 static LONG WINAPI CrashFilter(_In_ struct _EXCEPTION_POINTERS* info) {
     DWORD code = info ? info->ExceptionRecord->ExceptionCode : 0;
-    std::cerr << "[luma_imgui] SEH exception caught. Code=0x" << std::hex << code << std::dec << std::endl;
-    MessageBoxA(nullptr, ("SEH exception code=0x" + std::to_string(code)).c_str(), "luma_creator_imgui", MB_OK | MB_ICONERROR);
+    std::cerr << "[luma] SEH exception. Code=0x" << std::hex << code << std::dec << std::endl;
+    MessageBoxA(nullptr, ("SEH exception code=0x" + std::to_string(code)).c_str(), "Crash", MB_OK | MB_ICONERROR);
     return EXCEPTION_EXECUTE_HANDLER;
 }
 
 int main() {
     SetUnhandledExceptionFilter(CrashFilter);
-    try {
-        return RunApp();
-    } catch (const std::exception& e) {
-        std::cerr << "[luma_imgui] std::exception: " << e.what() << std::endl;
-        MessageBoxA(nullptr, e.what(), "luma_creator_imgui", MB_OK | MB_ICONERROR);
-        return -1;
-    } catch (...) {
-        std::cerr << "[luma_imgui] Unknown exception" << std::endl;
-        MessageBoxA(nullptr, "Unknown exception", "luma_creator_imgui", MB_OK | MB_ICONERROR);
+    try { return RunApp(); }
+    catch (const std::exception& e) {
+        std::cerr << "[luma] Exception: " << e.what() << std::endl;
+        MessageBoxA(nullptr, e.what(), "Error", MB_OK | MB_ICONERROR);
         return -1;
     }
 }
 #else
 int main() { return 0; }
 #endif
-
