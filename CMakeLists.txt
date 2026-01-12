@@ -45,6 +45,7 @@ add_library(luma_core
     engine/engine_facade.cpp
     engine/asset/pipeline.cpp
     engine/asset/model_loader.cpp
+    engine/renderer/pbr_renderer.cpp
     engine/renderer/rhi/dx12_backend.cpp
     engine/renderer/rhi/metal_backend.cpp
     engine/renderer/rhi/vulkan_backend.cpp
