@@ -15,6 +15,17 @@ struct Vertex {
     float color[3];    // Fallback color (used if no texture)
 };
 
+// Skinned vertex with bone weights (for skeletal animation)
+struct SkinnedVertex {
+    float position[3];
+    float normal[3];
+    float tangent[4];  // xyz = tangent, w = handedness
+    float uv[2];       // Texture coordinates
+    float color[3];    // Fallback color (used if no texture)
+    uint32_t boneIndices[4] = {0, 0, 0, 0};  // Up to 4 bone influences
+    float boneWeights[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+};
+
 // Texture data loaded from file
 struct TextureData {
     std::vector<uint8_t> pixels;
@@ -27,6 +38,10 @@ struct TextureData {
 struct Mesh {
     std::vector<Vertex> vertices;
     std::vector<uint32_t> indices;
+    
+    // Skinned vertices (used if hasSkeleton is true)
+    std::vector<SkinnedVertex> skinnedVertices;
+    bool hasSkeleton = false;
     
     // PBR Textures (optional)
     TextureData diffuseTexture;      // Base color / Albedo

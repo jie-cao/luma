@@ -1,0 +1,137 @@
+{
+  "version": "1.0",
+  "name": "Lighting Demo",
+  "description": "Demonstrates different light types and configurations",
+  "entities": [
+    {
+      "id": 1,
+      "name": "Ground",
+      "transform": { "position": [0, 0, 0], "scale": [30, 0.1, 30] },
+      "material": { "baseColor": [0.4, 0.4, 0.4], "metallic": 0.0, "roughness": 0.8 }
+    },
+    {
+      "id": 2,
+      "name": "CenterSphere",
+      "transform": { "position": [0, 2, 0], "scale": [2, 2, 2] },
+      "material": { "baseColor": [0.9, 0.9, 0.9], "metallic": 0.0, "roughness": 0.3 }
+    },
+    {
+      "id": 3,
+      "name": "LeftSphere",
+      "transform": { "position": [-5, 1.5, 0], "scale": [1.5, 1.5, 1.5] },
+      "material": { "baseColor": [1.0, 0.86, 0.57], "metallic": 1.0, "roughness": 0.2 }
+    },
+    {
+      "id": 4,
+      "name": "RightSphere",
+      "transform": { "position": [5, 1.5, 0], "scale": [1.5, 1.5, 1.5] },
+      "material": { "baseColor": [0.97, 0.96, 0.91], "metallic": 1.0, "roughness": 0.1 }
+    },
+    {
+      "id": 5,
+      "name": "BackCube",
+      "transform": { "position": [0, 1, -5], "scale": [2, 2, 2] },
+      "material": { "baseColor": [0.8, 0.2, 0.1], "metallic": 0.0, "roughness": 0.5 }
+    },
+    {
+      "id": 6,
+      "name": "Wall",
+      "transform": { "position": [0, 5, -10], "scale": [20, 10, 0.2] },
+      "material": { "baseColor": [0.6, 0.6, 0.6], "metallic": 0.0, "roughness": 0.9 }
+    },
+    {
+      "id": 10,
+      "name": "RedLightBulb",
+      "transform": { "position": [-6, 3, 3], "scale": [0.3, 0.3, 0.3] },
+      "material": { "baseColor": [0.1, 0.1, 0.1], "emissiveColor": [1.0, 0.2, 0.1], "emissiveIntensity": 10.0 }
+    },
+    {
+      "id": 11,
+      "name": "GreenLightBulb",
+      "transform": { "position": [0, 3, 5], "scale": [0.3, 0.3, 0.3] },
+      "material": { "baseColor": [0.1, 0.1, 0.1], "emissiveColor": [0.2, 1.0, 0.3], "emissiveIntensity": 10.0 }
+    },
+    {
+      "id": 12,
+      "name": "BlueLightBulb",
+      "transform": { "position": [6, 3, 3], "scale": [0.3, 0.3, 0.3] },
+      "material": { "baseColor": [0.1, 0.1, 0.1], "emissiveColor": [0.1, 0.3, 1.0], "emissiveIntensity": 10.0 }
+    }
+  ],
+  "lights": [
+    {
+      "id": 1,
+      "name": "Sun",
+      "type": "directional",
+      "enabled": true,
+      "color": [1.0, 0.95, 0.9],
+      "intensity": 2.0,
+      "direction": [-0.3, -1.0, -0.5],
+      "castShadows": true
+    },
+    {
+      "id": 2,
+      "name": "RedPointLight",
+      "type": "point",
+      "enabled": true,
+      "color": [1.0, 0.2, 0.1],
+      "intensity": 100.0,
+      "position": [-6, 3, 3],
+      "attenuation": {
+        "constant": 1.0,
+        "linear": 0.09,
+        "quadratic": 0.032
+      }
+    },
+    {
+      "id": 3,
+      "name": "GreenPointLight",
+      "type": "point",
+      "enabled": true,
+      "color": [0.2, 1.0, 0.3],
+      "intensity": 100.0,
+      "position": [0, 3, 5],
+      "attenuation": {
+        "constant": 1.0,
+        "linear": 0.09,
+        "quadratic": 0.032
+      }
+    },
+    {
+      "id": 4,
+      "name": "BluePointLight",
+      "type": "point",
+      "enabled": true,
+      "color": [0.1, 0.3, 1.0],
+      "intensity": 100.0,
+      "position": [6, 3, 3],
+      "attenuation": {
+        "constant": 1.0,
+        "linear": 0.09,
+        "quadratic": 0.032
+      }
+    },
+    {
+      "id": 5,
+      "name": "Spotlight",
+      "type": "spot",
+      "enabled": true,
+      "color": [1.0, 1.0, 0.9],
+      "intensity": 300.0,
+      "position": [0, 8, 0],
+      "direction": [0, -1, 0],
+      "innerConeAngle": 0.2,
+      "outerConeAngle": 0.4
+    }
+  ],
+  "camera": {
+    "yaw": 0.5,
+    "pitch": -0.3,
+    "distance": 15.0,
+    "target": [0, 2, 0]
+  },
+  "postProcess": {
+    "bloom": { "enabled": true, "threshold": 0.8, "intensity": 0.6 },
+    "toneMapping": { "enabled": true, "exposure": 1.0, "method": "ACES" }
+  }
+}

@@ -6,16 +6,14 @@
 #include <vector>
 
 #include "engine/foundation/types.h"
+#include "engine/foundation/math_types.h"
 
 namespace luma {
 
-struct Vec3 {
-    float x{0.f};
-    float y{0.f};
-    float z{0.f};
-};
+// Use Vec3 from math_types.h
 
-struct Transform {
+// Legacy transform struct (separate from entity.h Transform)
+struct SceneTransform {
     Vec3 position{};
     Vec3 rotation{};
     Vec3 scale{1.f, 1.f, 1.f};
@@ -25,7 +23,7 @@ struct Node {
     std::string name;
     AssetID renderable;  // mesh/material bundle reference
     std::optional<AssetID> camera;  // camera asset, if this node is a camera
-    Transform transform;
+    SceneTransform transform;
 };
 
 class Scene {

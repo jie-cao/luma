@@ -1,0 +1,109 @@
+{
+  "version": "1.0",
+  "name": "Basic Demo Scene",
+  "description": "A simple scene demonstrating basic entity setup",
+  "entities": [
+    {
+      "id": 1,
+      "name": "Ground",
+      "parent": null,
+      "transform": {
+        "position": [0, 0, 0],
+        "rotation": [0, 0, 0, 1],
+        "scale": [20, 0.1, 20]
+      },
+      "material": {
+        "baseColor": [0.3, 0.3, 0.3],
+        "metallic": 0.0,
+        "roughness": 0.9
+      }
+    },
+    {
+      "id": 2,
+      "name": "RedCube",
+      "parent": null,
+      "transform": {
+        "position": [-3, 1, 0],
+        "rotation": [0, 0, 0, 1],
+        "scale": [1, 1, 1]
+      },
+      "material": {
+        "baseColor": [0.8, 0.2, 0.1],
+        "metallic": 0.0,
+        "roughness": 0.5
+      }
+    },
+    {
+      "id": 3,
+      "name": "GoldSphere",
+      "parent": null,
+      "transform": {
+        "position": [0, 1, 0],
+        "rotation": [0, 0, 0, 1],
+        "scale": [1, 1, 1]
+      },
+      "material": {
+        "baseColor": [1.0, 0.86, 0.57],
+        "metallic": 1.0,
+        "roughness": 0.3
+      }
+    },
+    {
+      "id": 4,
+      "name": "BlueCylinder",
+      "parent": null,
+      "transform": {
+        "position": [3, 1, 0],
+        "rotation": [0, 0, 0, 1],
+        "scale": [1, 2, 1]
+      },
+      "material": {
+        "baseColor": [0.1, 0.3, 0.8],
+        "metallic": 0.0,
+        "roughness": 0.4
+      }
+    }
+  ],
+  "lights": [
+    {
+      "id": 1,
+      "name": "Sun",
+      "type": "directional",
+      "enabled": true,
+      "color": [1.0, 0.95, 0.9],
+      "intensity": 3.0,
+      "direction": [-0.5, -1.0, -0.3]
+    },
+    {
+      "id": 2,
+      "name": "FillLight",
+      "type": "directional",
+      "enabled": true,
+      "color": [0.7, 0.8, 1.0],
+      "intensity": 1.0,
+      "direction": [0.5, -0.3, 0.5]
+    }
+  ],
+  "camera": {
+    "yaw": 0.3,
+    "pitch": -0.4,
+    "distance": 10.0,
+    "target": [0, 1, 0],
+    "fov": 45.0
+  },
+  "postProcess": {
+    "bloom": {
+      "enabled": true,
+      "threshold": 1.0,
+      "intensity": 0.5
+    },
+    "toneMapping": {
+      "enabled": true,
+      "exposure": 1.0,
+      "method": "ACES"
+    },
+    "fxaa": {
+      "enabled": true
+    }
+  }
+}

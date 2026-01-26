@@ -16,6 +16,11 @@
 
 namespace luma {
 
+// Forward declarations for animation loading
+void load_skeleton(const aiScene* scene, Model& model);
+void load_animations(const aiScene* scene, Model& model);
+void load_bone_weights(const aiMesh* aiMesh, Mesh& mesh, const Model& model);
+
 namespace {
 
 // Directory of the model file (for resolving relative texture paths)
@@ -486,6 +491,327 @@ const char* get_file_filter() {
            "OBJ (*.obj)\0*.obj;*.OBJ\0"
            "glTF (*.gltf;*.glb)\0*.gltf;*.glb;*.GLTF;*.GLB\0"
            "All Files (*.*)\0*.*\0";
+}
+
+// ===== Skeletal Animation Loading =====
+
+namespace {
+
+// Helper to convert Assimp matrix to our Mat4
+Mat4 aiMatrixToMat4(const aiMatrix4x4& m) {
+    Mat4 result;
+    // Assimp uses row-major, we use column-major
+    result.m[0] = m.a1; result.m[4] = m.a2; result.m[8]  = m.a3; result.m[12] = m.a4;
+    result.m[1] = m.b1; result.m[5] = m.b2; result.m[9]  = m.b3; result.m[13] = m.b4;
+    result.m[2] = m.c1; result.m[6] = m.c2; result.m[10] = m.c3; result.m[14] = m.c4;
+    result.m[3] = m.d1; result.m[7] = m.d2; result.m[11] = m.d3; result.m[15] = m.d4;
+    return result;
+}
+
+Vec3 aiVec3ToVec3(const aiVector3D& v) {
+    return Vec3(v.x, v.y, v.z);
+}
+
+Quat aiQuatToQuat(const aiQuaternion& q) {
+    Quat result;
+    result.x = q.x;
+    result.y = q.y;
+    result.z = q.z;
+    result.w = q.w;
+    return result;
+}
+
+// Recursively collect bones from node hierarchy
+void collectBonesFromNode(const aiNode* node, const aiScene* scene, 
+                          std::unordered_map<std::string, int>& boneMap,
+                          Skeleton& skeleton, int parentIndex = -1) {
+    std::string nodeName = node->mName.C_Str();
+    
+    // Check if this node is a bone
+    auto it = boneMap.find(nodeName);
+    int boneIndex = -1;
+    
+    if (it != boneMap.end()) {
+        boneIndex = it->second;
+    } else {
+        // Check if any mesh references this node as a bone
+        bool isBone = false;
+        for (unsigned int m = 0; m < scene->mNumMeshes && !isBone; m++) {
+            const aiMesh* mesh = scene->mMeshes[m];
+            for (unsigned int b = 0; b < mesh->mNumBones; b++) {
+                if (std::string(mesh->mBones[b]->mName.C_Str()) == nodeName) {
+                    isBone = true;
+                    break;
+                }
+            }
+        }
+        
+        if (isBone) {
+            boneIndex = skeleton.addBone(nodeName, parentIndex);
+            if (boneIndex >= 0) {
+                boneMap[nodeName] = boneIndex;
+            }
+        }
+    }
+    
+    // Update parent index for children
+    int nextParent = (boneIndex >= 0) ? boneIndex : parentIndex;
+    
+    // Process children
+    for (unsigned int i = 0; i < node->mNumChildren; i++) {
+        collectBonesFromNode(node->mChildren[i], scene, boneMap, skeleton, nextParent);
+    }
+}
+
+}  // namespace
+
+void load_skeleton(const aiScene* scene, Model& model) {
+    if (!scene->HasMeshes()) return;
+    
+    // First pass: collect all bone names from all meshes
+    std::unordered_map<std::string, aiMatrix4x4> boneOffsets;
+    
+    for (unsigned int m = 0; m < scene->mNumMeshes; m++) {
+        const aiMesh* mesh = scene->mMeshes[m];
+        for (unsigned int b = 0; b < mesh->mNumBones; b++) {
+            const aiBone* bone = mesh->mBones[b];
+            std::string boneName = bone->mName.C_Str();
+            boneOffsets[boneName] = bone->mOffsetMatrix;
+        }
+    }
+    
+    if (boneOffsets.empty()) {
+        return;  // No bones found
+    }
+    
+    std::cout << "[skeleton] Found " << boneOffsets.size() << " bones" << std::endl;
+    
+    // Create skeleton
+    model.skeleton = std::make_unique<Skeleton>();
+    
+    // Build bone map for quick lookup
+    std::unordered_map<std::string, int> boneMap;
+    
+    // Traverse node hierarchy to establish parent-child relationships
+    collectBonesFromNode(scene->mRootNode, scene, boneMap, *model.skeleton);
+    
+    // Set inverse bind matrices
+    for (const auto& [name, offset] : boneOffsets) {
+        int boneIdx = model.skeleton->findBoneByName(name);
+        if (boneIdx >= 0) {
+            model.skeleton->setInverseBindMatrix(boneIdx, aiMatrixToMat4(offset));
+        }
+    }
+    
+    std::cout << "[skeleton] Created skeleton with " << model.skeleton->getBoneCount() << " bones" << std::endl;
+}
+
+void load_bone_weights(const aiMesh* aiMesh, Mesh& mesh, const Model& model) {
+    if (!model.skeleton || aiMesh->mNumBones == 0) return;
+    
+    // Resize skinned vertices array
+    mesh.skinnedVertices.resize(aiMesh->mNumVertices);
+    mesh.hasSkeleton = true;
+    
+    // Copy base vertex data to skinned vertices
+    for (unsigned int i = 0; i < aiMesh->mNumVertices; i++) {
+        SkinnedVertex& sv = mesh.skinnedVertices[i];
+        const Vertex& v = mesh.vertices[i];
+        
+        std::copy(std::begin(v.position), std::end(v.position), std::begin(sv.position));
+        std::copy(std::begin(v.normal), std::end(v.normal), std::begin(sv.normal));
+        std::copy(std::begin(v.tangent), std::end(v.tangent), std::begin(sv.tangent));
+        std::copy(std::begin(v.uv), std::end(v.uv), std::begin(sv.uv));
+        std::copy(std::begin(v.color), std::end(v.color), std::begin(sv.color));
+    }
+    
+    // Process each bone's weights
+    for (unsigned int b = 0; b < aiMesh->mNumBones; b++) {
+        const aiBone* bone = aiMesh->mBones[b];
+        std::string boneName = bone->mName.C_Str();
+        int boneIndex = model.skeleton->findBoneByName(boneName);
+        
+        if (boneIndex < 0) continue;
+        
+        // Add this bone's influence to each affected vertex
+        for (unsigned int w = 0; w < bone->mNumWeights; w++) {
+            const aiVertexWeight& weight = bone->mWeights[w];
+            unsigned int vertexId = weight.mVertexId;
+            float weightValue = weight.mWeight;
+            
+            if (vertexId >= mesh.skinnedVertices.size()) continue;
+            
+            SkinnedVertex& sv = mesh.skinnedVertices[vertexId];
+            
+            // Find an empty slot or replace smallest weight
+            int minIdx = 0;
+            float minWeight = sv.boneWeights[0];
+            for (int i = 1; i < 4; i++) {
+                if (sv.boneWeights[i] < minWeight) {
+                    minWeight = sv.boneWeights[i];
+                    minIdx = i;
+                }
+            }
+            
+            if (weightValue > minWeight) {
+                sv.boneIndices[minIdx] = (uint32_t)boneIndex;
+                sv.boneWeights[minIdx] = weightValue;
+            }
+        }
+    }
+    
+    // Normalize weights
+    for (auto& sv : mesh.skinnedVertices) {
+        float total = sv.boneWeights[0] + sv.boneWeights[1] + sv.boneWeights[2] + sv.boneWeights[3];
+        if (total > 0.0001f) {
+            for (int i = 0; i < 4; i++) {
+                sv.boneWeights[i] /= total;
+            }
+        } else {
+            // No bone influence - bind to first bone with full weight
+            sv.boneIndices[0] = 0;
+            sv.boneWeights[0] = 1.0f;
+        }
+    }
+}
+
+void load_animations(const aiScene* scene, Model& model) {
+    if (!scene->HasAnimations() || !model.skeleton) return;
+    
+    std::cout << "[animation] Found " << scene->mNumAnimations << " animations" << std::endl;
+    
+    for (unsigned int a = 0; a < scene->mNumAnimations; a++) {
+        const aiAnimation* aiAnim = scene->mAnimations[a];
+        
+        auto clip = std::make_unique<AnimationClip>();
+        clip->name = aiAnim->mName.C_Str();
+        if (clip->name.empty()) {
+            clip->name = "Animation_" + std::to_string(a);
+        }
+        
+        clip->ticksPerSecond = (float)((aiAnim->mTicksPerSecond != 0) ? aiAnim->mTicksPerSecond : 25.0);
+        clip->duration = (float)(aiAnim->mDuration / clip->ticksPerSecond);
+        clip->looping = true;
+        
+        std::cout << "[animation] " << clip->name << ": " << clip->duration << "s, " 
+                  << aiAnim->mNumChannels << " channels" << std::endl;
+        
+        // Process each bone channel
+        for (unsigned int c = 0; c < aiAnim->mNumChannels; c++) {
+            const aiNodeAnim* nodeAnim = aiAnim->mChannels[c];
+            std::string boneName = nodeAnim->mNodeName.C_Str();
+            
+            // Skip if bone not in skeleton
+            int boneIdx = model.skeleton->findBoneByName(boneName);
+            if (boneIdx < 0) continue;
+            
+            AnimationChannel& channel = clip->addChannel(boneName);
+            channel.targetBoneIndex = boneIdx;
+            
+            // Position keyframes
+            channel.positionKeys.reserve(nodeAnim->mNumPositionKeys);
+            for (unsigned int k = 0; k < nodeAnim->mNumPositionKeys; k++) {
+                const aiVectorKey& key = nodeAnim->mPositionKeys[k];
+                VectorKeyframe kf;
+                kf.time = (float)(key.mTime / clip->ticksPerSecond);
+                kf.value = aiVec3ToVec3(key.mValue);
+                channel.positionKeys.push_back(kf);
+            }
+            
+            // Rotation keyframes
+            channel.rotationKeys.reserve(nodeAnim->mNumRotationKeys);
+            for (unsigned int k = 0; k < nodeAnim->mNumRotationKeys; k++) {
+                const aiQuatKey& key = nodeAnim->mRotationKeys[k];
+                QuatKeyframe kf;
+                kf.time = (float)(key.mTime / clip->ticksPerSecond);
+                kf.value = aiQuatToQuat(key.mValue);
+                channel.rotationKeys.push_back(kf);
+            }
+            
+            // Scale keyframes
+            channel.scaleKeys.reserve(nodeAnim->mNumScalingKeys);
+            for (unsigned int k = 0; k < nodeAnim->mNumScalingKeys; k++) {
+                const aiVectorKey& key = nodeAnim->mScalingKeys[k];
+                VectorKeyframe kf;
+                kf.time = (float)(key.mTime / clip->ticksPerSecond);
+                kf.value = aiVec3ToVec3(key.mValue);
+                channel.scaleKeys.push_back(kf);
+            }
+        }
+        
+        // Resolve bone indices
+        clip->resolveBoneIndices(*model.skeleton);
+        
+        model.animations[clip->name] = std::move(clip);
+    }
+}
+
+std::optional<Model> load_model_with_animations(const std::string& path) {
+    // Store model directory for texture loading
+    std::filesystem::path fsPath(path);
+    g_modelDir = fsPath.parent_path().string();
+    
+    Assimp::Importer importer;
+    const aiScene* scene = importer.ReadFile(path,
+        aiProcess_Triangulate |
+        aiProcess_GenNormals |
+        aiProcess_CalcTangentSpace |
+        aiProcess_JoinIdenticalVertices |
+        aiProcess_OptimizeMeshes |
+        aiProcess_LimitBoneWeights  // Limit to 4 bones per vertex
+    );
+
+    if (!scene || scene->mFlags & AI_SCENE_FLAGS_INCOMPLETE || !scene->mRootNode) {
+        std::cerr << "[model] Assimp error: " << importer.GetErrorString() << std::endl;
+        return std::nullopt;
+    }
+
+    std::cout << "[model] Loading (with animations): " << path << std::endl;
+    std::cout << "[model] Meshes: " << scene->mNumMeshes << ", Materials: " << scene->mNumMaterials;
+    if (scene->mNumAnimations > 0) {
+        std::cout << ", Animations: " << scene->mNumAnimations;
+    }
+    std::cout << std::endl;
+
+    Model model;
+    model.name = path;
+    model.minBounds[0] = model.minBounds[1] = model.minBounds[2] = std::numeric_limits<float>::max();
+    model.maxBounds[0] = model.maxBounds[1] = model.maxBounds[2] = std::numeric_limits<float>::lowest();
+
+    // Load skeleton first (needed for bone weights)
+    load_skeleton(scene, model);
+
+    // Process meshes
+    process_node(scene->mRootNode, scene, model);
+
+    // Load bone weights for each mesh
+    if (model.hasSkeleton()) {
+        for (unsigned int m = 0; m < scene->mNumMeshes && m < model.meshes.size(); m++) {
+            load_bone_weights(scene->mMeshes[m], model.meshes[m], model);
+        }
+    }
+
+    // Load animations
+    load_animations(scene, model);
+
+    if (model.meshes.empty()) {
+        std::cerr << "[model] No valid meshes found" << std::endl;
+        return std::nullopt;
+    }
+
+    // Extract filename
+    model.name = fsPath.filename().string();
+
+    std::cout << "[model] Loaded: " << model.name << std::endl;
+    std::cout << "[model] Meshes: " << model.meshes.size() 
+              << ", Vertices: " << model.totalVertices 
+              << ", Triangles: " << model.totalTriangles << std::endl;
+    if (model.hasSkeleton()) {
+        std::cout << "[model] Skeleton: " << model.skeleton->getBoneCount() << " bones, "
+                  << model.animations.size() << " animations" << std::endl;
+    }
+
+    return model;
 }
 
 }  // namespace luma

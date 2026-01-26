@@ -1,49 +1,64 @@
 # LUMA Creator
 
-实时 3D 创作平台骨架，支持 **FBX/OBJ/glTF** 等 40+ 格式模型加载和 PBR 渲染。
+跨平台实时 3D 创作平台，支持 **FBX/OBJ/glTF** 等 40+ 格式模型加载和 **PBR 渲染**。
 
 ## 功能概览
 
-- **3D 渲染**：DX12 PBR 渲染管线（Blinn-Phong 光照、深度测试）
+- **跨平台渲染**：统一的 UnifiedRenderer，支持 DX12 (Windows) 和 Metal (macOS)
+- **完整 PBR 管线**：Cook-Torrance BRDF、法线贴图、ORM 纹理、ACES 色调映射
+- **异步纹理加载**：模型几何体即时显示，纹理后台加载
 - **模型加载**：通过 Assimp 支持 **FBX、OBJ、glTF、DAE、3DS** 等 40+ 格式
 - **ImGui 界面**：
-  - Model 面板：打开模型文件（支持多格式）
-  - Camera 面板：自动/手动旋转、距离调节
+  - Model 面板：打开模型、显示加载进度
+  - Camera 面板：Maya 风格轨道相机控制
   - Material 面板：调节 Metallic/Roughness/Base Color
-- **Engine 核心**：Scene/Action/Timeline/Look，材质参数通过 Action 驱动
-- **工具**：Packager 生成 deterministic manifest + assets bin
 
 ## 环境要求
 
+### Windows
 - Windows 10/11 + MSVC 2019/2022（x64）
 - CMake ≥ 3.25 + Ninja
 - DX12 兼容 GPU
-- 网络访问（CMake FetchContent 拉取 imgui、assimp）
+
+### macOS
+- macOS 11.0 (Big Sur) 或更高
+- Xcode Command Line Tools
+- CMake ≥ 3.25
+- Metal 兼容 GPU（所有 Apple Silicon 和大部分 Intel Mac）
 
 ## 快速开始
 
-### 1. 配置与编译
-
-在 **Visual Studio Developer Command Prompt** 中：
+### Windows（DX12）
 
 ```powershell
 cd C:\code\luma
 cmake -S . -B build -G Ninja
 cmake --build build --target luma_creator_imgui
-```
-
-### 2. 运行
-
-```powershell
 .\build\luma_creator_imgui.exe
 ```
 
-### 3. 加载模型
+### macOS（Metal）
 
-1. 启动后显示默认彩色立方体
-2. 点击 **Model** 面板的 **"Open Model..."** 按钮
-3. 选择任意支持的 3D 文件（FBX、OBJ、glTF 等）
-4. 模型自动居中并调整相机
+```bash
+cd ~/code/luma
+cmake -S . -B build -G Ninja
+cmake --build build --target luma_creator_macos
+
+# 运行应用
+open build/luma_creator_macos.app
+```
+
+## 控制说明
+
+| 操作 | Windows | macOS |
+|------|---------|-------|
+| 轨道旋转 | Alt + 左键 | Option + 左键 |
+| 平移 | Alt + 中键 | Option + 中键 |
+| 缩放 | Alt + 右键 / 滚轮 | Option + 右键 / 滚轮 |
+| 重置相机 | F | F |
+| 切换网格 | G | G |
+| 自动旋转 | - | R |
+| 打开模型 | 菜单/按钮 | O |
 
 ## 支持的格式
 
@@ -58,72 +73,66 @@ cmake --build build --target luma_creator_imgui
 | STL | `.stl` | 3D 打印常用 |
 | PLY | `.ply` | 点云/扫描数据 |
 
-## 获取测试模型
-
-- [Khronos glTF Sample Models](https://github.com/KhronosGroup/glTF-Sample-Models) - glTF 测试模型
-- [Sketchfab](https://sketchfab.com) - 可下载 FBX/glTF
-- [Mixamo](https://www.mixamo.com) - 免费角色和动画（FBX）
-- [TurboSquid](https://www.turbosquid.com/Search/3D-Models/free) - 免费 FBX/OBJ 模型
-- [Polyhaven](https://polyhaven.com/models) - CC0 高质量模型
-
-## 目录结构
+## 架构概览
 
 ```
 luma/
 ├── engine/
-│   ├── foundation/     # 日志、类型
-│   ├── scene/          # Scene/Node
-│   ├── actions/        # Action 系统
-│   ├── asset/          # glTF 加载器、打包管线
+│   ├── foundation/           # 日志、类型
+│   ├── scene/                # Scene/Node
+│   ├── asset/
+│   │   ├── model_loader      # Assimp 模型加载
+│   │   └── async_texture_loader  # 异步纹理加载
 │   ├── renderer/
-│   │   ├── mesh.h      # Mesh 结构
-│   │   ├── rhi/        # DX12/Metal/Vulkan 后端
-│   │   └── render_graph/
-│   └── engine_facade.h
+│   │   ├── unified_renderer.h     # 统一渲染器接口
+│   │   ├── unified_renderer_dx12.cpp   # DX12 实现
+│   │   ├── unified_renderer_metal.mm   # Metal 实现
+│   │   ├── mesh.h                 # Mesh/Vertex 结构
+│   │   ├── shaders/
+│   │   │   └── pbr.metal          # Metal PBR 着色器
+│   │   └── rhi/                   # RHI 抽象层 (预留)
+│   └── viewport/             # 相机控制
 ├── apps/
-│   ├── creator_imgui/  # ImGui 主程序
-│   ├── demo/           # 控制台 Action 示例
-│   └── dx12_clear/     # DX12 清屏示例
-└── tools/packager/     # 打包工具
+│   ├── creator_imgui/        # Windows ImGui 主程序
+│   ├── creator_macos/        # macOS Metal 主程序
+│   └── demo/                 # 控制台示例
+└── tools/packager/           # 打包工具
 ```
 
-## 其他 Target
+## 渲染特性
 
-```powershell
-# 全部编译
-cmake --build build
+### PBR 管线
+- **Cook-Torrance BRDF**：GGX 法线分布、Smith 几何遮蔽、Fresnel-Schlick
+- **纹理支持**：Diffuse/Albedo、Normal Map、Specular/ORM
+- **色调映射**：ACES Filmic
+- **环境光**：半球环境光
 
-# DX12 清屏示例
-.\build\luma_dx12_clear.exe
-
-# 控制台 Action 示例
-.\build\luma_demo.exe
-
-# 打包工具（生成 manifest + assets）
-.\build\luma_packager.exe package_out [path\to\model.gltf]
-```
-
-## 界面说明
-
-| 面板 | 功能 |
-|------|------|
-| Model | 加载 glTF、显示当前模型名和网格数 |
-| Camera | 自动/手动旋转、相机距离、模型边界信息 |
-| Material | Metallic / Roughness / Base Color 调节 |
+### 性能优化
+- **异步纹理加载**：2 个工作线程后台解码纹理
+- **常量缓冲区环形缓冲**：避免每帧 Map/Unmap 开销 (DX12)
+- **持久化映射**：减少 CPU-GPU 同步
 
 ## 技术栈
 
 - C++20
-- DirectX 12
+- DirectX 12 / Metal
 - ImGui v1.89.9
-- Assimp v5.3.1 (支持 FBX/OBJ/glTF 等 40+ 格式)
+- Assimp v5.3.1
+- stb_image
 - CMake + Ninja
+
+## 获取测试模型
+
+- [Khronos glTF Sample Models](https://github.com/KhronosGroup/glTF-Sample-Models)
+- [Sketchfab](https://sketchfab.com)
+- [Mixamo](https://www.mixamo.com)
+- [Polyhaven](https://polyhaven.com/models)
 
 ## 后续方向
 
-- [ ] 纹理加载（Base Color / Normal / Metallic-Roughness）
+- [ ] Shader 热重载
 - [ ] 骨骼动画 (GPU Skinning)
 - [ ] 多物体场景编辑
-- [ ] Look System（光照/后处理/调色）
-- [ ] Mobile Runtime (iOS/Android)
-- [ ] Vulkan/Metal 后端
+- [ ] IBL 环境光照
+- [ ] iOS/Android Runtime
+- [ ] Vulkan 后端

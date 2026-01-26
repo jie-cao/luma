@@ -2,7 +2,9 @@
 #pragma once
 
 #include "orbit_camera.h"
-#include "engine/renderer/pbr_renderer.h"
+#include "engine/renderer/unified_renderer.h"
+#include <string>
+#include <unordered_map>
 
 namespace luma {
 
@@ -11,6 +13,42 @@ struct ViewportSettings {
     bool showGrid = true;
     bool autoRotate = false;
     float autoRotateSpeed = 0.5f;
+    
+    // View modes
+    bool wireframe = false;
+    bool orthographic = false;
+};
+
+// Camera bookmark/preset
+struct CameraPreset {
+    std::string name;
+    float yaw;
+    float pitch;
+    float distance;
+    float targetX, targetY, targetZ;
+    
+    // Standard presets
+    static CameraPreset Front() {
+        return {"Front", 0.0f, 0.0f, 2.5f, 0, 0, 0};
+    }
+    static CameraPreset Back() {
+        return {"Back", 3.14159f, 0.0f, 2.5f, 0, 0, 0};
+    }
+    static CameraPreset Left() {
+        return {"Left", 1.5708f, 0.0f, 2.5f, 0, 0, 0};
+    }
+    static CameraPreset Right() {
+        return {"Right", -1.5708f, 0.0f, 2.5f, 0, 0, 0};
+    }
+    static CameraPreset Top() {
+        return {"Top", 0.0f, 1.5f, 2.5f, 0, 0, 0};
+    }
+    static CameraPreset Bottom() {
+        return {"Bottom", 0.0f, -1.5f, 2.5f, 0, 0, 0};
+    }
+    static CameraPreset Perspective() {
+        return {"Perspective", 0.785f, 0.5f, 2.5f, 0, 0, 0};
+    }
 };
 
 // 3D Viewport controller
@@ -79,9 +117,9 @@ public:
         }
     }
     
-    // Build camera params for renderer
-    PBRRenderer::CameraParams getCameraParams() const {
-        PBRRenderer::CameraParams params;
+    // Build camera params for renderer (RHI version)
+    RHICameraParams getCameraParams() const {
+        RHICameraParams params;
         params.yaw = camera.yaw;
         params.pitch = camera.pitch;
         params.distance = camera.distance;
@@ -91,8 +129,8 @@ public:
         return params;
     }
     
-    // Render viewport content
-    void render(PBRRenderer& renderer, const LoadedModel& model) {
+    // Render viewport content (UnifiedRenderer)
+    void render(UnifiedRenderer& renderer, const RHILoadedModel& model) {
         auto camParams = getCameraParams();
         
         if (settings.showGrid) {
@@ -102,9 +140,65 @@ public:
         renderer.render(model, camParams);
     }
     
+    // === Camera Presets ===
+    
+    void applyCameraPreset(const CameraPreset& preset) {
+        camera.yaw = preset.yaw;
+        camera.pitch = preset.pitch;
+        camera.distance = preset.distance;
+        camera.targetX = preset.targetX;
+        camera.targetY = preset.targetY;
+        camera.targetZ = preset.targetZ;
+    }
+    
+    CameraPreset getCurrentPreset(const std::string& name = "Custom") const {
+        CameraPreset preset;
+        preset.name = name;
+        preset.yaw = camera.yaw;
+        preset.pitch = camera.pitch;
+        preset.distance = camera.distance;
+        preset.targetX = camera.targetX;
+        preset.targetY = camera.targetY;
+        preset.targetZ = camera.targetZ;
+        return preset;
+    }
+    
+    void savePreset(const std::string& name) {
+        savedPresets_[name] = getCurrentPreset(name);
+    }
+    
+    void loadPreset(const std::string& name) {
+        auto it = savedPresets_.find(name);
+        if (it != savedPresets_.end()) {
+            applyCameraPreset(it->second);
+        }
+    }
+    
+    bool hasPreset(const std::string& name) const {
+        return savedPresets_.find(name) != savedPresets_.end();
+    }
+    
+    const std::unordered_map<std::string, CameraPreset>& getSavedPresets() const {
+        return savedPresets_;
+    }
+    
+    void deletePreset(const std::string& name) {
+        savedPresets_.erase(name);
+    }
+    
+    // Quick views
+    void viewFront() { applyCameraPreset(CameraPreset::Front()); }
+    void viewBack() { applyCameraPreset(CameraPreset::Back()); }
+    void viewLeft() { applyCameraPreset(CameraPreset::Left()); }
+    void viewRight() { applyCameraPreset(CameraPreset::Right()); }
+    void viewTop() { applyCameraPreset(CameraPreset::Top()); }
+    void viewBottom() { applyCameraPreset(CameraPreset::Bottom()); }
+    void viewPerspective() { applyCameraPreset(CameraPreset::Perspective()); }
+    
 private:
     float lastMouseX_ = 0.0f;
     float lastMouseY_ = 0.0f;
+    std::unordered_map<std::string, CameraPreset> savedPresets_;
 };
 
 }  // namespace luma

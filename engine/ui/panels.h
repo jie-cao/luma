@@ -3,7 +3,8 @@
 
 #include "imgui.h"
 #include "engine/viewport/viewport.h"
-#include "engine/renderer/pbr_renderer.h"
+#include "engine/renderer/unified_renderer.h"
+#include "engine/scene/scene_graph.h"
 
 namespace luma {
 namespace ui {
@@ -48,11 +49,12 @@ inline std::string drawMenuBar(Viewport& viewport, bool& shouldQuit, bool& showH
 
 // Draw model info panel
 // Returns: true if user clicked "Open Model" button
-inline bool drawModelPanel(const LoadedModel& model) {
+// asyncProgress: 0.0-1.0 texture loading progress (1.0 = complete)
+inline bool drawModelPanel(const RHILoadedModel& model, float asyncProgress = 1.0f) {
     bool openClicked = false;
     
     ImGui::SetNextWindowPos(ImVec2(10, 30), ImGuiCond_FirstUseEver);
-    ImGui::SetNextWindowSize(ImVec2(260, 180), ImGuiCond_FirstUseEver);
+    ImGui::SetNextWindowSize(ImVec2(260, 200), ImGuiCond_FirstUseEver);
     
     if (ImGui::Begin("Model", nullptr, ImGuiWindowFlags_NoCollapse)) {
         if (ImGui::Button("Open Model...", ImVec2(-1, 28))) {
@@ -68,6 +70,14 @@ inline bool drawModelPanel(const LoadedModel& model) {
             ImGui::Text("Vertices:  %zu", model.totalVerts);
             ImGui::Text("Triangles: %zu", model.totalTris);
             ImGui::Text("Textures:  %d", model.textureCount);
+            
+            // Show texture loading progress
+            if (asyncProgress < 1.0f) {
+                ImGui::Spacing();
+                ImGui::Separator();
+                ImGui::TextColored(ImVec4(0.5f, 0.8f, 1.0f, 1.0f), "Loading textures...");
+                ImGui::ProgressBar(asyncProgress, ImVec2(-1, 0));
+            }
         } else {
             ImGui::TextColored(ImVec4(0.5f, 0.5f, 0.5f, 1.0f), "No model loaded");
         }
@@ -77,9 +87,155 @@ inline bool drawModelPanel(const LoadedModel& model) {
     return openClicked;
 }
 
+// Helper to draw entity tree recursively
+inline void drawEntityNode(Entity* entity, SceneGraph& scene) {
+    if (!entity) return;
+    
+    ImGuiTreeNodeFlags flags = ImGuiTreeNodeFlags_OpenOnArrow | ImGuiTreeNodeFlags_SpanAvailWidth;
+    if (entity->children.empty()) {
+        flags |= ImGuiTreeNodeFlags_Leaf;
+    }
+    if (scene.getSelectedEntity() == entity) {
+        flags |= ImGuiTreeNodeFlags_Selected;
+    }
+    if (!entity->enabled) {
+        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.5f, 0.5f, 0.5f, 1.0f));
+    }
+    
+    bool nodeOpen = ImGui::TreeNodeEx((void*)(intptr_t)entity->id, flags, "%s", entity->name.c_str());
+    
+    if (!entity->enabled) {
+        ImGui::PopStyleColor();
+    }
+    
+    // Click to select
+    if (ImGui::IsItemClicked()) {
+        scene.setSelectedEntity(entity);
+    }
+    
+    // Right-click context menu
+    if (ImGui::BeginPopupContextItem()) {
+        if (ImGui::MenuItem("Delete")) {
+            scene.destroyEntity(entity);
+            ImGui::EndPopup();
+            if (nodeOpen) ImGui::TreePop();
+            return;
+        }
+        if (ImGui::MenuItem(entity->enabled ? "Disable" : "Enable")) {
+            entity->enabled = !entity->enabled;
+        }
+        ImGui::EndPopup();
+    }
+    
+    if (nodeOpen) {
+        for (Entity* child : entity->children) {
+            drawEntityNode(child, scene);
+        }
+        ImGui::TreePop();
+    }
+}
+
+// Draw scene hierarchy panel
+// Returns true if "Add Object" was clicked
+inline bool drawSceneHierarchyPanel(SceneGraph& scene) {
+    bool addClicked = false;
+    
+    ImGui::SetNextWindowPos(ImVec2(10, 30), ImGuiCond_FirstUseEver);
+    ImGui::SetNextWindowSize(ImVec2(260, 200), ImGuiCond_FirstUseEver);
+    
+    if (ImGui::Begin("Scene Hierarchy", nullptr, ImGuiWindowFlags_NoCollapse)) {
+        if (ImGui::Button("Add Object...", ImVec2(-1, 24))) {
+            addClicked = true;
+        }
+        
+        ImGui::Separator();
+        
+        if (scene.getEntityCount() == 0) {
+            ImGui::TextColored(ImVec4(0.5f, 0.5f, 0.5f, 1.0f), "Empty scene");
+            ImGui::TextColored(ImVec4(0.5f, 0.5f, 0.5f, 1.0f), "Load a model to add objects");
+        } else {
+            // Draw root entities
+            for (Entity* root : scene.getRootEntities()) {
+                drawEntityNode(root, scene);
+            }
+        }
+    }
+    ImGui::End();
+    
+    return addClicked;
+}
+
+// Draw inspector panel for selected entity
+inline void drawInspectorPanel(SceneGraph& scene) {
+    Entity* selected = scene.getSelectedEntity();
+    
+    ImGui::SetNextWindowPos(ImVec2(10, 240), ImGuiCond_FirstUseEver);
+    ImGui::SetNextWindowSize(ImVec2(260, 280), ImGuiCond_FirstUseEver);
+    
+    if (ImGui::Begin("Inspector", nullptr, ImGuiWindowFlags_NoCollapse)) {
+        if (!selected) {
+            ImGui::TextColored(ImVec4(0.5f, 0.5f, 0.5f, 1.0f), "No object selected");
+        } else {
+            // Name
+            char nameBuf[128];
+            strncpy(nameBuf, selected->name.c_str(), sizeof(nameBuf) - 1);
+            nameBuf[sizeof(nameBuf) - 1] = '\0';
+            if (ImGui::InputText("Name", nameBuf, sizeof(nameBuf))) {
+                selected->name = nameBuf;
+            }
+            
+            ImGui::Checkbox("Enabled", &selected->enabled);
+            
+            ImGui::Separator();
+            ImGui::Text("Transform");
+            
+            // Position
+            float pos[3] = {selected->localTransform.position.x, 
+                           selected->localTransform.position.y, 
+                           selected->localTransform.position.z};
+            if (ImGui::DragFloat3("Position", pos, 0.1f)) {
+                selected->localTransform.position = {pos[0], pos[1], pos[2]};
+                selected->updateWorldMatrix();
+            }
+            
+            // Rotation (Euler degrees)
+            Vec3 eulerDeg = selected->localTransform.getEulerDegrees();
+            float rot[3] = {eulerDeg.x, eulerDeg.y, eulerDeg.z};
+            if (ImGui::DragFloat3("Rotation", rot, 1.0f)) {
+                selected->localTransform.setEulerDegrees({rot[0], rot[1], rot[2]});
+                selected->updateWorldMatrix();
+            }
+            
+            // Scale
+            float scl[3] = {selected->localTransform.scale.x, 
+                           selected->localTransform.scale.y, 
+                           selected->localTransform.scale.z};
+            if (ImGui::DragFloat3("Scale", scl, 0.01f, 0.001f, 100.0f)) {
+                selected->localTransform.scale = {scl[0], scl[1], scl[2]};
+                selected->updateWorldMatrix();
+            }
+            
+            if (ImGui::Button("Reset Transform", ImVec2(-1, 0))) {
+                selected->localTransform = Transform();
+                selected->updateWorldMatrix();
+            }
+            
+            // Model info
+            if (selected->hasModel) {
+                ImGui::Separator();
+                ImGui::Text("Model");
+                ImGui::Text("Meshes: %zu", selected->model.meshes.size());
+                ImGui::Text("Vertices: %zu", selected->model.totalVerts);
+                ImGui::Text("Triangles: %zu", selected->model.totalTris);
+            }
+        }
+    }
+    ImGui::End();
+}
+
 // Draw camera control panel
 inline void drawCameraPanel(Viewport& viewport) {
-    ImGui::SetNextWindowPos(ImVec2(10, 220), ImGuiCond_FirstUseEver);
+    ImGui::SetNextWindowPos(ImVec2(10, 530), ImGuiCond_FirstUseEver);
     ImGui::SetNextWindowSize(ImVec2(260, 180), ImGuiCond_FirstUseEver);
     
     if (ImGui::Begin("Camera", nullptr, ImGuiWindowFlags_NoCollapse)) {
