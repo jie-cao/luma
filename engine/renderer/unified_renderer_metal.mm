@@ -244,6 +244,61 @@ struct UnifiedRenderer::Impl {
     static constexpr uint32_t kMaxBones = 128;
     bool skinnedPipelineReady = false;
     
+    // === Advanced Post-Processing ===
+    
+    // SSAO
+    bool ssaoEnabled = false;
+    SSAOSettings ssaoSettings;
+    id<MTLTexture> ssaoTexture = nil;
+    id<MTLTexture> ssaoBlurTexture = nil;
+    id<MTLTexture> ssaoNoiseTexture = nil;
+    id<MTLBuffer> ssaoKernelBuffer = nil;
+    id<MTLRenderPipelineState> ssaoPipeline = nil;
+    id<MTLRenderPipelineState> ssaoBlurPipeline = nil;
+    id<MTLRenderPipelineState> ssaoApplyPipeline = nil;
+    bool ssaoReady = false;
+    
+    // SSR
+    bool ssrEnabled = false;
+    SSRSettings ssrSettings;
+    id<MTLTexture> ssrTexture = nil;
+    id<MTLRenderPipelineState> ssrPipeline = nil;
+    id<MTLRenderPipelineState> ssrBlurPipeline = nil;
+    id<MTLRenderPipelineState> ssrCompositePipeline = nil;
+    bool ssrReady = false;
+    
+    // Volumetrics
+    bool volumetricFogEnabled = false;
+    VolumetricFogSettings fogSettings;
+    bool godRaysEnabled = false;
+    GodRaySettings godRaySettings;
+    id<MTLTexture> volumetricTexture = nil;
+    id<MTLRenderPipelineState> fogPipeline = nil;
+    id<MTLRenderPipelineState> godRayPipeline = nil;
+    bool volumetricReady = false;
+    
+    // === Advanced Shadows ===
+    
+    // CSM (Cascaded Shadow Maps)
+    bool csmEnabled = false;
+    CSMSettings csmSettings;
+    CascadedShadowMap csm;
+    id<MTLTexture> csmTextures[4] = {nil, nil, nil, nil};
+    float csmViewProj[4][16];  // View-proj for each cascade
+    bool csmReady = false;
+    
+    // PCSS
+    bool pcssEnabled = false;
+    int pcssBlockerSamples = 16;
+    int pcssPCFSamples = 32;
+    float pcssLightSize = 0.02f;
+    id<MTLRenderPipelineState> pcssPipeline = nil;
+    
+    // Normal/Depth G-Buffer (needed for SSAO/SSR)
+    id<MTLTexture> gBufferNormal = nil;
+    id<MTLTexture> gBufferDepth = nil;
+    bool gBufferReady = false;
+    
     // State
     uint32_t width = 0;
     uint32_t height = 0;
@@ -2101,6 +2156,170 @@ void UnifiedRenderer::waitForGPU() {
         id<MTLCommandBuffer> cmd = [impl_->commandQueue commandBuffer];
         [cmd commit];
         [cmd waitUntilCompleted];
+    }
+}
+
+// ===== Advanced Post-Processing Implementation =====
+
+void UnifiedRenderer::setSSAOEnabled(bool enabled) {
+    if (impl_) {
+        impl_->ssaoEnabled = enabled;
+        if (enabled && !impl_->ssaoReady) {
+            // Initialize SSAO resources on first enable
+            impl_->ssaoSettings = SSAOPresets::medium();
+        }
+    }
+}
+
+bool UnifiedRenderer::isSSAOEnabled() const {
+    return impl_ ? impl_->ssaoEnabled : false;
+}
+
+void UnifiedRenderer::setSSAOSettings(const SSAOSettings& settings) {
+    if (impl_) {
+        impl_->ssaoSettings = settings;
+    }
+}
+
+const SSAOSettings& UnifiedRenderer::getSSAOSettings() const {
+    static SSAOSettings defaultSettings;
+    return impl_ ? impl_->ssaoSettings : defaultSettings;
+}
+
+void UnifiedRenderer::setSSREnabled(bool enabled) {
+    if (impl_) {
+        impl_->ssrEnabled = enabled;
+        if (enabled && !impl_->ssrReady) {
+            impl_->ssrSettings = SSRPresets::medium();
+        }
+    }
+}
+
+bool UnifiedRenderer::isSSREnabled() const {
+    return impl_ ? impl_->ssrEnabled : false;
+}
+
+void UnifiedRenderer::setSSRSettings(const SSRSettings& settings) {
+    if (impl_) {
+        impl_->ssrSettings = settings;
+    }
+}
+
+const SSRSettings& UnifiedRenderer::getSSRSettings() const {
+    static SSRSettings defaultSettings;
+    return impl_ ? impl_->ssrSettings : defaultSettings;
+}
+
+void UnifiedRenderer::setVolumetricFogEnabled(bool enabled) {
+    if (impl_) {
+        impl_->volumetricFogEnabled = enabled;
+        if (enabled && !impl_->volumetricReady) {
+            impl_->fogSettings = VolumetricPresets::lightFog();
+        }
+    }
+}
+
+bool UnifiedRenderer::isVolumetricFogEnabled() const {
+    return impl_ ? impl_->volumetricFogEnabled : false;
+}
+
+void UnifiedRenderer::setVolumetricFogSettings(const VolumetricFogSettings& settings) {
+    if (impl_) {
+        impl_->fogSettings = settings;
+    }
+}
+
+const VolumetricFogSettings& UnifiedRenderer::getVolumetricFogSettings() const {
+    static VolumetricFogSettings defaultSettings;
+    return impl_ ? impl_->fogSettings : defaultSettings;
+}
+
+void UnifiedRenderer::setGodRaysEnabled(bool enabled) {
+    if (impl_) {
+        impl_->godRaysEnabled = enabled;
+    }
+}
+
+bool UnifiedRenderer::isGodRaysEnabled() const {
+    return impl_ ? impl_->godRaysEnabled : false;
+}
+
+void UnifiedRenderer::setGodRaysSettings(const GodRaySettings& settings) {
+    if (impl_) {
+        impl_->godRaySettings = settings;
+    }
+}
+
+const GodRaySettings& UnifiedRenderer::getGodRaysSettings() const {
+    static GodRaySettings defaultSettings;
+    return impl_ ? impl_->godRaySettings : defaultSettings;
+}
+
+// ===== Advanced Shadows Implementation =====
+
+void UnifiedRenderer::setCSMEnabled(bool enabled) {
+    if (impl_) {
+        impl_->csmEnabled = enabled;
+        if (enabled && !impl_->csmReady) {
+            // Initialize CSM with defaults
+            impl_->csmSettings.numCascades = 3;
+            impl_->csmSettings.shadowMapSize = 2048;
+        }
+    }
+}
+
+bool UnifiedRenderer::isCSMEnabled() const {
+    return impl_ ? impl_->csmEnabled : false;
+}
+
+void UnifiedRenderer::setCSMSettings(const CSMSettings& settings) {
+    if (impl_) {
+        impl_->csmSettings = settings;
+        impl_->csm.settings = settings;
+    }
+}
+
+const CSMSettings& UnifiedRenderer::getCSMSettings() const {
+    static CSMSettings defaultSettings;
+    return impl_ ? impl_->csmSettings : defaultSettings;
+}
+
+void UnifiedRenderer::setPCSSEnabled(bool enabled) {
+    if (impl_) {
+        impl_->pcssEnabled = enabled;
+    }
+}
+
+bool UnifiedRenderer::isPCSSEnabled() const {
+    return impl_ ? impl_->pcssEnabled : false;
+}
+
+void UnifiedRenderer::setPCSSSettings(int blockerSamples, int pcfSamples, float lightSize) {
+    if (impl_) {
+        impl_->pcssBlockerSamples = blockerSamples;
+        impl_->pcssPCFSamples = pcfSamples;
+        impl_->pcssLightSize = lightSize;
+    }
+}
+
+void UnifiedRenderer::updateCSM(const float* cameraView, const float* cameraProj,
+                                 const float* lightDirection, float cameraNear, float cameraFar) {
+    if (!impl_ || !impl_->csmEnabled) return;
+    
+    // Create Mat4 wrappers
+    Mat4 camView, camProj;
+    memcpy(camView.m, cameraView, 64);
+    memcpy(camProj.m, cameraProj, 64);
+    Vec3 lightDir(lightDirection[0], lightDirection[1], lightDirection[2]);
+    
+    // Update CSM cascades
+    impl_->csm.update(camView, camProj, lightDir, cameraNear, cameraFar);
+    
+    // Copy cascade view-proj matrices
+    int numCascades = std::min(impl_->csmSettings.numCascades, 4);
+    for (int i = 0; i < numCascades && i < (int)impl_->csm.cascades.size(); i++) {
+        const auto& cascade = impl_->csm.cascades[i];
+        memcpy(impl_->csmViewProj[i], cascade.viewProjectionMatrix.m, 64);
     }
 }
 

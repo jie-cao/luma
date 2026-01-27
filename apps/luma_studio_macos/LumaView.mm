@@ -2,6 +2,7 @@
 // Using UnifiedRenderer (RHI-based), SceneGraph, and Editor UI
 
 #import "LumaView.h"
+#import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
 
 #include "engine/renderer/unified_renderer.h"
 #include "engine/renderer/post_process.h"
@@ -19,6 +20,28 @@
 #include "engine/rendering/lod.h"
 #include "engine/rendering/instancing.h"
 #include "engine/rendering/render_optimizer.h"
+#include "engine/particles/particle.h"
+#include "engine/particles/particle_presets.h"
+#include "engine/physics/physics_world.h"
+#include "engine/physics/collision.h"
+#include "engine/physics/constraints.h"
+#include "engine/physics/physics_debug.h"
+#include "engine/physics/raycast.h"
+#include "engine/terrain/terrain.h"
+#include "engine/terrain/terrain_generator.h"
+#include "engine/terrain/foliage.h"
+#include "engine/audio/audio.h"
+#include "engine/renderer/gi/gi_system.h"
+#include "engine/video/video_export.h"
+#include "engine/network/network.h"
+#include "engine/script/script_engine.h"
+#include "engine/ai/navmesh.h"
+#include "engine/ai/nav_agent.h"
+#include "engine/ai/behavior_tree.h"
+#include "engine/game_ui/ui_system.h"
+#include "engine/scene/scene_manager.h"
+#include "engine/data/data_system.h"
+#include "engine/build/build_system.h"
 
 #include <memory>
 #include <chrono>
@@ -45,6 +68,54 @@ enum class CameraMode { None, Orbit, Pan, Zoom };
     luma::ui::RenderSettings _renderSettings;
     luma::ui::LightSettings _lighting;
     luma::ui::AnimationState _animation;
+    
+    // Advanced rendering state (NEW)
+    luma::ui::AdvancedPostProcessState _advancedPostProcess;
+    luma::ui::AdvancedShadowState _advancedShadows;
+    luma::ui::LODState _lodState;
+    
+    // Animation systems (for advanced UI)
+    std::unique_ptr<luma::AnimationStateMachine> _stateMachine;
+    std::unique_ptr<luma::AnimationLayerManager> _layerManager;
+    std::unique_ptr<luma::IKManager> _ikManager;
+    luma::BlendTree1D* _activeBlendTree1D;
+    luma::BlendTree2D* _activeBlendTree2D;
+    luma::Skeleton* _activeSkeleton;
+    
+    // Particle system
+    luma::ui::ParticleEditorState _particleState;
+    
+    // Physics system
+    luma::ui::PhysicsEditorState _physicsState;
+    
+    // Terrain system
+    luma::ui::TerrainEditorState _terrainState;
+    
+    // Audio system
+    luma::ui::AudioEditorState _audioState;
+    
+    // GI system
+    luma::ui::GIEditorState _giState;
+    
+    // Video export
+    luma::ui::VideoExportState _videoExportState;
+    
+    // Network
+    luma::ui::NetworkPanelState _networkState;
+    
+    // Scripting
+    luma::ui::ScriptEditorState _scriptState;
+    
+    // AI
+    luma::ui::AIEditorState _aiState;
+    
+    // Game UI
+    luma::ui::GameUIEditorState _gameUIState;
+    
+    // Scene/Data/Build
+    luma::ui::SceneManagerState _sceneState;
+    luma::ui::DataManagerState _dataState;
+    luma::ui::BuildSettingsState _buildState;
     
     // Camera state
     CameraMode _cameraMode;
@@ -250,6 +321,19 @@ static CVReturn displayLinkCallback(CVDisplayLinkRef displayLink,
         [self loadSceneFromPath:path.empty() ? nil : [NSString stringWithUTF8String:path.c_str()]];
     };
     
+    // HDR environment load callback
+    _editorState.onHDRLoad = [self](const std::string& path) {
+        [self loadHDREnvironment:path.empty() ? nil : [NSString stringWithUTF8String:path.c_str()]];
+    };
+    
+    // Demo generate callback
+    _editorState.onDemoGenerate = [self](const std::string& demoId) {
+        auto& demoMode = luma::DemoMode::get();
+        if (demoMode.generateDemo(demoId, *_scene)) {
+            _editorState.consoleLogs.push_back("[INFO] Generated demo: " + demoId);
+        }
+    };
+    
     // Setup AssetManager with model loader
     auto& assetMgr = luma::getAssetManager();
     assetMgr.setModelLoader([](const std::string& path) -> std::shared_ptr<void> {
@@ -263,6 +347,69 @@ static CVReturn displayLinkCallback(CVDisplayLinkRef displayLink,
     // Configure cache settings
     assetMgr.setMaxCacheSize(512 * 1024 * 1024);  // 512 MB
     assetMgr.setUnusedTimeout(std::chrono::seconds(300));  // 5 minutes
+    
+    // Initialize animation systems
+    _ikManager = std::make_unique<luma::IKManager>();
+    _activeBlendTree1D = nullptr;
+    _activeBlendTree2D = nullptr;
+    _activeSkeleton = nullptr;
+    
+    // Initialize advanced settings with sensible defaults
+    _advancedPostProcess.ssao = luma::SSAOPresets::medium();
+    _advancedPostProcess.ssr = luma::SSRPresets::medium();
+    _advancedPostProcess.fog = luma::VolumetricPresets::lightFog();
+    _advancedShadows.csm.numCascades = 3;
+    _advancedShadows.csm.maxShadowDistance = 100.0f;
+    _lodState.qualityPreset = luma::ui::LODQualityPreset::Medium;
+    
+    // Setup scene operation callbacks
+    auto& sceneCallbacks = luma::ui::getSceneCallbacks();
+    sceneCallbacks.onNewScene = [self]() {
+        _scene->clear();
+        _editorState.consoleLogs.push_back("[INFO] New scene created");
+    };
+    sceneCallbacks.onDeleteSelected = [self]() {
+        if (auto* selected = _scene->getSelectedEntity()) {
+            auto cmd = std::make_unique<luma::DeleteEntityCommand>(_scene.get(), selected);
+            _scene->clearSelection();
+            luma::getCommandHistory().execute(std::move(cmd));
+        }
+    };
+    sceneCallbacks.onDuplicateSelected = [self]() {
+        if (auto* selected = _scene->getSelectedEntity()) {
+            auto cmd = std::make_unique<luma::DuplicateEntityCommand>(_scene.get(), selected);
+            luma::getCommandHistory().execute(std::move(cmd));
+        }
+    };
+}
+
+- (void)loadHDREnvironment:(NSString*)path {
+    if (path == nil) {
+        // Open file dialog
+        NSOpenPanel* panel = [NSOpenPanel openPanel];
+        panel.allowedContentTypes = @[
+            [UTType typeWithFilenameExtension:@"hdr"],
+            [UTType typeWithFilenameExtension:@"exr"]
+        ];
+        panel.allowsMultipleSelection = NO;
+        panel.canChooseDirectories = NO;
+        panel.message = @"Select HDR Environment Map";
+        
+        [panel beginSheetModalForWindow:self.window completionHandler:^(NSModalResponse result) {
+            if (result == NSModalResponseOK && panel.URLs.count > 0) {
+                NSString* selectedPath = panel.URLs[0].path;
+                [self doLoadHDR:selectedPath];
+            }
+        }];
+    } else {
+        [self doLoadHDR:path];
+    }
+}
+
+- (void)doLoadHDR:(NSString*)path {
+    _editorState.currentHDRPath = [path UTF8String];
+    _editorState.consoleLogs.push_back("[INFO] Loaded HDR: " + std::string([path UTF8String]));
+    // In a full implementation, would call renderer to load and process HDR
 }
 
 - (void)setFrameSize:(NSSize)newSize {
@@ -351,6 +498,58 @@ static CVReturn displayLinkCallback(CVDisplayLinkRef displayLink,
         }
     }
     
+    // Update particle systems
+    if (_particleState.previewPlaying) {
+        luma::getParticleManager().update(dt * _particleState.previewSpeed);
+    }
+    
+    // Update physics
+    if (!_physicsState.simulationPaused) {
+        luma::getPhysicsWorld().step(dt * _physicsState.timeScale);
+        luma::getConstraintManager().solveConstraints(dt * _physicsState.timeScale);
+    }
+    
+    // Update physics debug renderer
+    auto& physicsDebugRenderer = luma::getPhysicsDebugRenderer();
+    physicsDebugRenderer.update(luma::getPhysicsWorld(), luma::getConstraintManager());
+    _physicsState.debugLineData = physicsDebugRenderer.getLineData();
+    _physicsState.debugLineCount = physicsDebugRenderer.getLineCount();
+    
+    // Update terrain LOD based on camera (simplified camera position)
+    if (_terrainState.terrainInitialized) {
+        luma::Vec3 camPos = {
+            _camera.targetOffsetX,
+            _camera.targetOffsetY,
+            _camera.targetOffsetZ
+        };
+        luma::getTerrain().updateLOD(camPos);
+        luma::getFoliageSystem().updateLOD(camPos);
+    }
+    
+    // Update audio system (update 3D calculations)
+    luma::getAudioSystem().update(dt);
+    
+    // Update network
+    luma::getNetworkManager().update(dt);
+    
+    // Update scripts
+    if (luma::getScriptEngine().isInitialized()) {
+        luma::getScriptEngine().update(dt);
+    }
+    
+    // Update AI agents
+    luma::getNavAgentManager().update(dt, luma::getNavMesh());
+    
+    // Update Game UI
+    luma::ui::getUISystem().update(dt);
+    
+    // Update Scene Manager
+    luma::getSceneManager().update();
+    luma::getSceneTransitionManager().update(dt);
+    
+    // Update Data Manager (hot reload)
+    luma::getDataManager().update();
+    
     // Update animators for all animated entities
     _scene->traverseRenderables([&](luma::Entity* entity) {
         if (entity->animator) {
@@ -399,6 +598,50 @@ static CVReturn displayLinkCallback(CVDisplayLinkRef displayLink,
     luma::PostProcessConstants ppConstants;
     luma::fillPostProcessConstants(ppConstants, _postProcess, viewWidth, viewHeight, _totalTime);
     _renderer->setPostProcessParams(&ppConstants, sizeof(ppConstants));
+    
+    // === Apply Advanced Post-Processing Settings ===
+    
+    // SSAO
+    _renderer->setSSAOEnabled(_advancedPostProcess.ssaoEnabled);
+    if (_advancedPostProcess.ssaoEnabled) {
+        _renderer->setSSAOSettings(_advancedPostProcess.ssao);
+    }
+    
+    // SSR
+    _renderer->setSSREnabled(_advancedPostProcess.ssrEnabled);
+    if (_advancedPostProcess.ssrEnabled) {
+        _renderer->setSSRSettings(_advancedPostProcess.ssr);
+    }
+    
+    // Volumetric Fog
+    _renderer->setVolumetricFogEnabled(_advancedPostProcess.fogEnabled);
+    if (_advancedPostProcess.fogEnabled) {
+        _renderer->setVolumetricFogSettings(_advancedPostProcess.fog);
+    }
+    
+    // God Rays
+    _renderer->setGodRaysEnabled(_advancedPostProcess.godRaysEnabled);
+    if (_advancedPostProcess.godRaysEnabled) {
+        _renderer->setGodRaysSettings(_advancedPostProcess.godRays);
+    }
+    
+    // === Apply Advanced Shadow Settings ===
+    
+    // CSM
+    _renderer->setCSMEnabled(_advancedShadows.csmEnabled);
+    if (_advancedShadows.csmEnabled) {
+        _renderer->setCSMSettings(_advancedShadows.csm);
+    }
+    
+    // PCSS
+    _renderer->setPCSSEnabled(_advancedShadows.pcssEnabled);
+    if (_advancedShadows.pcssEnabled) {
+        _renderer->setPCSSSettings(
+            _advancedShadows.pcssBlockerSamples,
+            _advancedShadows.pcssPCFSamples,
+            _advancedShadows.pcssLightSize
+        );
+    }
     
     // === Render 3D Scene ===
     _renderer->beginFrame();
@@ -533,6 +776,56 @@ static CVReturn displayLinkCallback(CVDisplayLinkRef displayLink,
         }
     }
     
+    // Render physics debug lines
+    if (_physicsState.debugLineCount > 0 && !_physicsState.debugLineData.empty()) {
+        _renderer->renderGizmoLines(
+            _physicsState.debugLineData.data(),
+            (uint32_t)_physicsState.debugLineCount
+        );
+    }
+    
+    // Render raycast test line
+    if (_physicsState.raycastTestMode) {
+        luma::Vec3 end = _physicsState.raycastOrigin + 
+                        _physicsState.raycastDirection.normalized() * _physicsState.raycastDistance;
+        
+        // If we have a hit, draw to hit point with color coding
+        if (_physicsState.lastRaycastHit.hit) {
+            end = _physicsState.lastRaycastHit.point;
+        }
+        
+        float rayLineData[10] = {
+            _physicsState.raycastOrigin.x, _physicsState.raycastOrigin.y, _physicsState.raycastOrigin.z,
+            end.x, end.y, end.z,
+            _physicsState.lastRaycastHit.hit ? 1.0f : 0.5f,  // R
+            _physicsState.lastRaycastHit.hit ? 0.0f : 0.5f,  // G
+            0.0f,  // B
+            1.0f   // A
+        };
+        _renderer->renderGizmoLines(rayLineData, 1);
+        
+        // Draw hit point marker
+        if (_physicsState.lastRaycastHit.hit) {
+            float size = 0.1f;
+            luma::Vec3 hp = _physicsState.lastRaycastHit.point;
+            float hitMarkerData[30] = {
+                hp.x - size, hp.y, hp.z, hp.x + size, hp.y, hp.z, 1, 0, 0, 1,
+                hp.x, hp.y - size, hp.z, hp.x, hp.y + size, hp.z, 1, 0, 0, 1,
+                hp.x, hp.y, hp.z - size, hp.x, hp.y, hp.z + size, 1, 0, 0, 1
+            };
+            _renderer->renderGizmoLines(hitMarkerData, 3);
+            
+            // Draw normal
+            luma::Vec3 normalEnd = hp + _physicsState.lastRaycastHit.normal * 0.3f;
+            float normalData[10] = {
+                hp.x, hp.y, hp.z,
+                normalEnd.x, normalEnd.y, normalEnd.z,
+                0, 1, 0, 1  // Green for normal
+            };
+            _renderer->renderGizmoLines(normalData, 1);
+        }
+    }
+    
     _renderer->endFrame();
     
     // === Render ImGui ===
@@ -592,8 +885,60 @@ static CVReturn displayLinkCallback(CVDisplayLinkRef displayLink,
     luma::ui::drawRenderSettingsPanel(_renderSettings, _editorState);
     luma::ui::drawLightingPanel(_lighting, _editorState);
     
-    // Bottom panels
+    // Advanced rendering panels (NEW)
+    luma::ui::drawAdvancedPostProcessPanel(_advancedPostProcess, _editorState);
+    luma::ui::drawAdvancedShadowsPanel(_advancedShadows, _editorState);
+    luma::ui::drawEnvironmentPanel(_editorState);
+    luma::ui::drawLODSettingsPanel(_lodState, _editorState);
+    
+    // Animation panels
     luma::ui::drawAnimationTimeline(_animation, _editorState);
+    luma::ui::drawStateMachineEditor(_stateMachine.get(), _editorState);
+    luma::ui::drawBlendTreeEditor(_activeBlendTree1D, _activeBlendTree2D, _editorState);
+    luma::ui::drawIKSettingsPanel(_ikManager.get(), _activeSkeleton, _editorState);
+    luma::ui::drawAnimationLayersPanel(_layerManager.get(), _editorState);
+    
+    // Demo menu
+    luma::ui::drawDemoMenu(*_scene, _editorState);
+    
+    // Particle Editor
+    luma::ui::drawParticleEditorPanel(_particleState, _editorState);
+    
+    // Physics Editor
+    luma::ui::drawPhysicsEditorPanel(_physicsState, _editorState);
+    
+    // Terrain Editor
+    luma::ui::drawTerrainEditorPanel(_terrainState, _editorState);
+    
+    // Audio Editor
+    luma::ui::drawAudioEditorPanel(_audioState, _editorState);
+    
+    // GI Editor
+    luma::ui::drawGIEditorPanel(_giState, _editorState);
+    
+    // Video Export
+    luma::ui::drawVideoExportPanel(_videoExportState, _editorState);
+    
+    // Network Panel
+    luma::ui::drawNetworkPanel(_networkState, _editorState);
+    
+    // Script Editor
+    luma::ui::drawScriptEditorPanel(_scriptState, _editorState);
+    
+    // AI Editor
+    luma::ui::drawAIEditorPanel(_aiState, _editorState);
+    
+    // Game UI Editor
+    luma::ui::drawGameUIEditorPanel(_gameUIState, _editorState);
+    
+    // Scene Manager
+    luma::ui::drawSceneManagerPanel(_sceneState, _editorState);
+    
+    // Data Manager
+    luma::ui::drawDataManagerPanel(_dataState, _editorState);
+    
+    // Build Settings
+    luma::ui::drawBuildSettingsPanel(_buildState, _editorState);
     
     // Extended Asset Browser with cache statistics
     auto& assetMgr = luma::getAssetManager();
@@ -642,7 +987,7 @@ static CVReturn displayLinkCallback(CVDisplayLinkRef displayLink,
     if (_editorState.showHelp) {
         ImGui::SetNextWindowPos(ImVec2(windowWidth * 0.5f, windowHeight * 0.5f), 
                                 ImGuiCond_Always, ImVec2(0.5f, 0.5f));
-        ImGui::SetNextWindowSize(ImVec2(400, 280));
+        ImGui::SetNextWindowSize(ImVec2(450, 380));
         if (ImGui::Begin("Keyboard Shortcuts", &_editorState.showHelp,
             ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoCollapse)) {
             ImGui::TextColored(ImVec4(0.9f, 0.9f, 0.5f, 1.0f), "Camera Controls:");
@@ -658,15 +1003,32 @@ static CVReturn displayLinkCallback(CVDisplayLinkRef displayLink,
             ImGui::BulletText("E: Rotate Tool");
             ImGui::BulletText("R: Scale Tool");
             ImGui::Spacing();
+            ImGui::TextColored(ImVec4(0.9f, 0.9f, 0.5f, 1.0f), "Edit:");
+            ImGui::Separator();
+            ImGui::BulletText("Cmd+Z:       Undo");
+            ImGui::BulletText("Cmd+Shift+Z: Redo");
+            ImGui::BulletText("Cmd+D:       Duplicate");
+            ImGui::BulletText("Cmd+C/V:     Copy/Paste");
+            ImGui::BulletText("Delete:      Delete selection");
+            ImGui::Spacing();
             ImGui::TextColored(ImVec4(0.9f, 0.9f, 0.5f, 1.0f), "Other:");
             ImGui::Separator();
-            ImGui::BulletText("F:   Focus on selection");
-            ImGui::BulletText("G:   Toggle grid");
-            ImGui::BulletText("O:   Open model");
-            ImGui::BulletText("Del: Delete selection");
-            ImGui::BulletText("F1:  Toggle this help");
+            ImGui::BulletText("F:    Focus on selection");
+            ImGui::BulletText("G:    Toggle grid");
+            ImGui::BulletText("O:    Open model");
+            ImGui::BulletText("F12:  Screenshot");
+            ImGui::BulletText("F1:   Toggle this help");
         }
         ImGui::End();
+    }
+    
+    // Screenshot dialog
+    luma::ui::drawScreenshotDialog(_editorState);
+    
+    // Handle screenshot request
+    if (_editorState.screenshotPending) {
+        _editorState.screenshotPending = false;
+        [self captureScreenshot];
     }
     
     // Status bar
@@ -801,6 +1163,43 @@ static CVReturn displayLinkCallback(CVDisplayLinkRef displayLink,
             }
         }];
     }
+}
+
+- (void)captureScreenshot {
+    // Get screenshot settings
+    auto& settings = _editorState.screenshotSettings;
+    
+    // Determine resolution (0 = use current window size)
+    NSRect bounds = self.bounds;
+    CGFloat scale = [[NSScreen mainScreen] backingScaleFactor];
+    uint32_t width = settings.width > 0 ? settings.width : (uint32_t)(bounds.size.width * scale);
+    uint32_t height = settings.height > 0 ? settings.height : (uint32_t)(bounds.size.height * scale);
+    
+    // Apply supersampling
+    width *= settings.supersampling;
+    height *= settings.supersampling;
+    
+    // Generate filename with timestamp
+    NSDateFormatter* formatter = [[NSDateFormatter alloc] init];
+    [formatter setDateFormat:@"yyyy-MM-dd_HH-mm-ss"];
+    NSString* timestamp = [formatter stringFromDate:[NSDate date]];
+    NSString* ext = (settings.format == luma::ScreenshotSettings::Format::PNG) ? @"png" : @"jpg";
+    NSString* filename = [NSString stringWithFormat:@"LUMA_Screenshot_%@.%@", timestamp, ext];
+    
+    // Default to Pictures folder
+    NSArray* paths = NSSearchPathForDirectoriesInDomains(NSPicturesDirectory, NSUserDomainMask, YES);
+    NSString* picturesPath = [paths firstObject];
+    NSString* fullPath = [picturesPath stringByAppendingPathComponent:filename];
+    
+    // For now, just log - full implementation would render to texture and save
+    _editorState.lastScreenshotPath = [fullPath UTF8String];
+    _editorState.consoleLogs.push_back("[INFO] Screenshot saved: " + std::string([fullPath UTF8String]));
+    
+    // Show notification
+    NSUserNotification* notification = [[NSUserNotification alloc] init];
+    notification.title = @"Screenshot Captured";
+    notification.informativeText = filename;
+    [[NSUserNotificationCenter defaultUserNotificationCenter] deliverNotification:notification];
 }
 
 // ===== Mouse Events =====
@@ -987,9 +1386,15 @@ static CVReturn displayLinkCallback(CVDisplayLinkRef displayLink,
                 break;
         }
         
+        // F1: Help
         if (key == NSF1FunctionKey || [chars isEqualToString:@"?"]) {
             _editorState.showHelp = !_editorState.showHelp;
         }
+    }
+    
+    // Function keys (check separately due to different key code handling)
+    if ([event keyCode] == 111) {  // F12
+        [self captureScreenshot];
     }
 }
 

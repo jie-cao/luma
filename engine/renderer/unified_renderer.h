@@ -3,6 +3,10 @@
 #pragma once
 
 #include "engine/renderer/mesh.h"
+#include "engine/rendering/ssao.h"
+#include "engine/rendering/ssr.h"
+#include "engine/rendering/volumetrics.h"
+#include "engine/rendering/advanced_shadows.h"
 #include <string>
 #include <vector>
 #include <memory>
@@ -193,6 +197,48 @@ public:
     
     // Get current frame time for animated effects (film grain, etc.)
     float getFrameTime() const;
+    
+    // === Advanced Post-Processing ===
+    
+    // SSAO (Screen Space Ambient Occlusion)
+    void setSSAOEnabled(bool enabled);
+    bool isSSAOEnabled() const;
+    void setSSAOSettings(const SSAOSettings& settings);
+    const SSAOSettings& getSSAOSettings() const;
+    
+    // SSR (Screen Space Reflections)
+    void setSSREnabled(bool enabled);
+    bool isSSREnabled() const;
+    void setSSRSettings(const SSRSettings& settings);
+    const SSRSettings& getSSRSettings() const;
+    
+    // Volumetric Effects
+    void setVolumetricFogEnabled(bool enabled);
+    bool isVolumetricFogEnabled() const;
+    void setVolumetricFogSettings(const VolumetricFogSettings& settings);
+    const VolumetricFogSettings& getVolumetricFogSettings() const;
+    
+    void setGodRaysEnabled(bool enabled);
+    bool isGodRaysEnabled() const;
+    void setGodRaysSettings(const GodRaySettings& settings);
+    const GodRaySettings& getGodRaysSettings() const;
+    
+    // === Advanced Shadows ===
+    
+    // Cascaded Shadow Maps
+    void setCSMEnabled(bool enabled);
+    bool isCSMEnabled() const;
+    void setCSMSettings(const CSMSettings& settings);
+    const CSMSettings& getCSMSettings() const;
+    
+    // PCSS (Percentage Closer Soft Shadows)
+    void setPCSSEnabled(bool enabled);
+    bool isPCSSEnabled() const;
+    void setPCSSSettings(int blockerSamples, int pcfSamples, float lightSize);
+    
+    // Update CSM for current frame (call before shadow passes)
+    void updateCSM(const float* cameraView, const float* cameraProj, 
+                   const float* lightDirection, float cameraNear, float cameraFar);
     
     // === Accessors ===
     uint32_t getWidth() const;

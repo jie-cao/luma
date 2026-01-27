@@ -432,6 +432,11 @@ public:
     float globalWeight = 1.0f;
     bool enabled = true;
     
+    // Get total chain count for UI
+    size_t getChainCount() const {
+        return twoBoneIKs.size() + lookAtIKs.size() + footIKs.size() + fabrikChains.size();
+    }
+    
     // Solve all IK
     void solve(Skeleton& skeleton) {
         if (!enabled || globalWeight <= 0.0f) return;

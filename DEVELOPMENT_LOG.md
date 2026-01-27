@@ -1068,6 +1068,1417 @@ Scene ──▶ HDR Target (RGBA16F) ──▶ Bloom Threshold ──▶ Blur H 
   - three_point - 三点照明
 - [x] DemoMenuState (Help 菜单集成)
 
+### 15.4 UI 功能完善 ✅
+
+**新增 UI 面板 (`engine/ui/editor_ui.h`):**
+
+| 面板 | 功能 |
+|------|------|
+| **Advanced Post-Process** | SSAO 设置、SSR 设置、体积雾、God Rays |
+| **Advanced Shadows** | CSM 级联设置、PCSS 软阴影 |
+| **Environment** | HDR 环境贴图加载、IBL 强度/旋转 |
+| **State Machine Editor** | 参数管理、状态列表、转换编辑 |
+| **Blend Tree Editor** | 1D/2D 混合树可视化、参数控制 |
+| **IK Settings** | IK 链管理、目标/权重控制 |
+| **Animation Layers** | 图层权重、混合模式、骨骼蒙版 |
+| **LOD Settings** | 质量预设、LOD 偏差、调试颜色 |
+| **Demo Menu** | 10 种演示场景一键生成 |
+
+**新增状态结构:**
+- `AdvancedPostProcessState` - SSAO/SSR/Volumetrics 设置
+- `AdvancedShadowState` - CSM/PCSS 设置
+- `LODState` - LOD 质量设置
+
+**菜单更新:**
+- Window 菜单重组 (Panels / Rendering / Animation 分组)
+- Help 菜单添加 Demo Scenes 入口
+- File 菜单完善 (New/Open/Save 回调连接)
+- Edit 菜单完善 (Delete/Duplicate 回调连接)
+
+**功能完善:**
+- 截图功能 (F12 快捷键, 设置对话框)
+- HDR 环境加载 (文件对话框)
+- 快捷键帮助面板扩展 (新增 Cmd+Z/D/C/V, F12)
+- SceneCallbacks 系统 (跨模块回调)
+
+### 15.5 高级渲染系统连接 ✅
+
+**UnifiedRenderer 新增 API (`engine/renderer/unified_renderer.h`):**
+
+| API | 功能 |
+|-----|------|
+| `setSSAOEnabled/Settings` | SSAO 开关和参数 |
+| `setSSREnabled/Settings` | SSR 开关和参数 |
+| `setVolumetricFogEnabled/Settings` | 体积雾开关和参数 |
+| `setGodRaysEnabled/Settings` | God Rays 开关和参数 |
+| `setCSMEnabled/Settings` | CSM 级联阴影开关和参数 |
+| `setPCSSEnabled/Settings` | PCSS 软阴影开关和参数 |
+| `updateCSM` | 每帧更新 CSM 级联 |
+
+**Metal Shader 实现 (`engine/renderer/shaders/advanced_post_process.metal`):**
+- SSAO: 半球采样、深度重建、模糊
+- SSR: 射线行进、二分搜索细化、边缘淡出
+- Volumetric Fog: Henyey-Greenstein 相位函数、高度衰减
+- God Rays: 屏幕空间光线、Poisson 采样
+- CSM: 级联选择、PCF 采样、PCSS 软阴影
+
+**Impl 状态 (`unified_renderer_metal.mm`):**
+- `ssaoEnabled`, `ssaoSettings`, `ssaoTexture`, `ssaoPipeline` 等
+- `ssrEnabled`, `ssrSettings`, `ssrTexture`, `ssrPipeline` 等
+- `fogEnabled`, `fogSettings`, `volumetricTexture`, `fogPipeline` 等
+- `csmEnabled`, `csmSettings`, `csmTextures[4]`, `csmViewProj[4]` 等
+- `pcssEnabled`, `pcssBlockerSamples`, `pcssPCFSamples`, `pcssLightSize`
+
+**LumaView 连接 (`LumaView.mm`):**
+- 每帧同步 UI 设置到渲染器
+- SSAO/SSR/Volumetrics/GodRays 设置
+- CSM/PCSS 阴影设置
+
+---
+
+## Phase 16: 粒子系统 ✅
+
+### 16.1 核心数据结构 (`engine/particles/particle.h`)
+
+**Particle 结构:**
+- position, velocity, color, size
+- startColor/endColor, startSize/endSize
+- rotation, angularVelocity
+- life/maxLife/age
+
+**EmissionShape 枚举:**
+- Point, Sphere, Hemisphere, Cone, Box, Circle, Edge, Mesh
+
+**ParticleEmitter:**
+- 发射率控制 (emissionRate, maxParticles)
+- 形状参数 (EmissionShapeParams)
+- 初始值范围 (life, speed, size, color, rotation)
+- 物理 (gravity, drag)
+- 爆发 (ParticleBurst)
+- 纹理动画 (textureRows/Cols)
+
+**ParticleSystem:**
+- 多发射器管理
+- 位置/旋转
+- 播放控制 (play/stop/pause)
+
+**ParticleManager:**
+- 全局单例管理
+- 系统创建/销毁
+- 每帧更新
+
+### 16.2 模块系统 (`engine/particles/particle_modules.h`)
+
+| 模块 | 功能 |
+|------|------|
+| ColorOverLifetimeModule | 颜色渐变曲线 |
+| SizeOverLifetimeModule | 大小曲线 |
+| VelocityOverLifetimeModule | 线性/轨道/径向速度 |
+| ForceFieldModule | 方向/点/漩涡/湍流力场 |
+| NoiseModule | 噪声扰动 |
+| RotationOverLifetimeModule | 角速度曲线 |
+| LimitVelocityModule | 速度限制 |
+| CollisionModule | 地面碰撞/反弹 |
+| SubEmitterModule | 子发射器触发 |
+| TrailModule | 拖尾效果 |
+| TextureSheetModule | 纹理动画 |
+
+**辅助类:**
+- ColorGradient - 颜色渐变
+- FloatCurve - 浮点曲线
+- GradientKey<T> - 关键帧
+
+### 16.3 GPU 渲染 (`engine/renderer/shaders/particle.metal`)
+
+**Vertex Shaders:**
+- `particleVertex` - 公告板粒子
+- `particleVertexStretched` - 速度拉伸粒子
+- `trailVertex` - 拖尾渲染
+
+**Fragment Shaders:**
+- `particleFragment` - 纹理粒子 + 软粒子淡出
+- `particleFragmentAdditive` - 加法混合
+- `particleFragmentCircle` - 圆形程序化粒子
+- `particleFragmentStar` - 星形/火花粒子
+- `particleFragmentSmoke` - 烟雾粒子 (噪声)
+- `particleFragmentFire` - 火焰粒子
+
+**Uniform 结构:**
+- ParticleUniforms (viewProj, camera, texture sheet, soft distance)
+- ParticleData (position, size, color, rotation, frame)
+
+### 16.4 预设效果 (`engine/particles/particle_presets.h`)
+
+| 类别 | 预设 |
+|------|------|
+| **火焰** | fire, fireWithSparks |
+| **烟雾** | smoke, campfireSmoke, steam |
+| **爆炸** | explosion, explosionWithSmoke |
+| **魔法** | magicSparkle, magicAura, magicOrb, portal |
+| **天气** | rain, heavyRain, snow, blizzard |
+| **特效** | sparks, weldingSparks, dust, waterSplash, bloodSplash |
+| **环境** | fallingLeaves, fireflies, confetti |
+
+**复合效果:**
+- createFireWithSparks() - 火焰 + 火星
+- createExplosion() - 爆炸 + 烟雾
+- createMagicOrb() - 核心 + 环绕粒子
+- createPortal() - 环形 + 漩涡
+
+### 16.5 编辑器 UI (`engine/ui/editor_ui.h`)
+
+**ParticleEditorState:**
+- selectedSystem, selectedEmitterIndex
+- previewPlaying, previewSpeed
+
+**drawParticleEditorPanel:**
+- 系统列表 (创建/删除/重命名)
+- 从预设创建
+- 预览控制 (Play/Pause/Restart/Stop)
+- 发射器 Tab 切换
+- 属性编辑:
+  - Emission (rate, max, looping, bursts)
+  - Shape (type, parameters)
+  - Lifetime
+  - Velocity (speed, gravity, drag)
+  - Size (start/end)
+  - Color (start/end, gradient)
+  - Rotation
+  - Rendering (billboard, stretch, sort, texture sheet)
+
+**菜单集成:**
+- Window → Rendering → Particle Editor
+
+### 16.6 应用集成 (`LumaView.mm`)
+
+- 添加 ParticleEditorState 实例变量
+- 每帧调用 ParticleManager::update()
+- 绘制 drawParticleEditorPanel()
+
+---
+
+## Phase 17: 物理系统 ✅
+
+### 17.1 核心数据结构 (`engine/physics/physics_world.h`)
+
+**PhysicsWorld:**
+- 刚体管理 (createBody/destroyBody)
+- 固定时间步进 (step/fixedStep)
+- 重力和全局设置 (PhysicsSettings)
+- 碰撞回调 (CollisionCallback, TriggerCallback)
+- 查询接口 (raycast, queryAABB, querySphere)
+
+**RigidBody:**
+- 类型: Static, Dynamic, Kinematic
+- 质量和惯性张量
+- 位置/旋转/速度
+- 力/扭矩/冲量
+- 材质 (restitution, friction)
+- 阻尼 (linear/angular damping)
+- 休眠系统
+
+**Collider:**
+- 形状类型: Sphere, Box, Capsule, Plane, Mesh, Compound
+- 本地偏移和旋转
+- 触发器模式
+- 碰撞层和蒙版
+
+**AABB:**
+- 边界盒结构
+- expand/intersects/contains
+
+### 17.2 碰撞检测 (`engine/physics/collision.h`)
+
+**Broadphase:**
+- AABB 相交测试
+- 碰撞对生成 (broadphasePairs)
+
+**Narrowphase:**
+- Sphere vs Sphere
+- Sphere vs Box
+- Sphere vs Plane
+- Box vs Box (SAT)
+- Box vs Plane
+- Capsule vs Sphere
+
+**SAT 辅助:**
+- projectOntoAxis
+- axisOverlap
+
+**GJK 支持函数:**
+- supportSphere
+- supportBox
+
+### 17.3 碰撞响应
+
+**冲量求解:**
+- 相对速度计算
+- 弹性系数 (restitution)
+- 法向冲量
+- 摩擦冲量 (Coulomb friction)
+
+**位置校正:**
+- 穿透深度校正
+- Baumgarte stabilization
+
+**迭代求解:**
+- velocityIterations (默认 8)
+- positionIterations (默认 3)
+
+### 17.4 约束系统 (`engine/physics/constraints.h`)
+
+| 约束类型 | 功能 |
+|----------|------|
+| DistanceConstraint | 固定距离 (绳索) |
+| BallSocketConstraint | 球窝关节 (3DOF) |
+| HingeConstraint | 铰链关节 (1DOF) + 限制 + 电机 |
+| SliderConstraint | 滑块关节 (1DOF) + 限制 |
+| FixedConstraint | 焊接约束 (0DOF) |
+| SpringConstraint | 弹簧 (stiffness/damping) |
+
+**ConstraintManager:**
+- 约束创建/销毁
+- 每帧求解
+- 断裂检测 (breakForce)
+
+### 17.5 编辑器 UI (`engine/ui/editor_ui.h`)
+
+**PhysicsEditorState:**
+- selectedBody, selectedConstraint
+- 调试可视化选项
+- 模拟控制 (pause/step/reset)
+
+**drawPhysicsEditorPanel:**
+- 模拟控制 (Pause/Resume/Step/Reset)
+- 时间缩放
+- 世界设置 (重力/迭代次数/休眠)
+- 调试可视化开关
+- 刚体创建 (类型/形状选择)
+- 刚体列表 (选择/检查)
+- 刚体属性编辑 (质量/速度/材质/阻尼)
+- 碰撞器编辑 (大小/触发器)
+- 约束创建和管理
+
+**菜单集成:**
+- Window → Rendering → Physics Editor
+
+### 17.6 应用集成 (`LumaView.mm`)
+
+- PhysicsEditorState 实例变量
+- 每帧调用 PhysicsWorld::step()
+- 每帧调用 ConstraintManager::solveConstraints()
+- 绘制 drawPhysicsEditorPanel()
+
+### 17.7 调试渲染 (`engine/physics/physics_debug.h`) ✅
+
+**PhysicsDebugRenderer:**
+- 碰撞器可视化 (Sphere/Box/Capsule/Plane)
+- 颜色编码 (Static=灰, Dynamic=绿, Kinematic=蓝, Sleeping=紫, Trigger=黄)
+- AABB 边界框显示
+- 接触点和法向量显示
+- 约束连接线和锚点显示
+- 弹簧卷曲可视化
+- 线性/角速度矢量显示
+
+**DebugColors:**
+- StaticCollider, DynamicCollider, KinematicCollider
+- SleepingCollider, TriggerCollider
+- AABB, ContactPoint, ContactNormal
+- LinearVelocity, AngularVelocity
+- ConstraintOK, ConstraintStressed, ConstraintBroken
+
+### 17.8 精确射线检测 (`engine/physics/raycast.h`) ✅
+
+**Ray 结构:**
+- origin, direction (归一化)
+- getPoint(t) 获取射线上点
+
+**RaycastHit 结果:**
+- hit, distance, point, normal
+- body, collider 引用
+
+**精确形状射线检测:**
+| 形状 | 算法 |
+|------|------|
+| Sphere | 二次方程求解 |
+| Box (OBB) | 本地空间 AABB slab 测试 |
+| Capsule | 圆柱 + 两端半球组合 |
+| Plane | 平面方程求解 |
+
+**高级查询:**
+- `raycast()` - 单射线最近命中
+- `raycastAll()` - 返回所有命中
+- `sphereCast()` - 球体扫掠
+- `boxCast()` - 盒子扫掠
+
+**便捷函数:**
+- `physicsRaycast(origin, direction, maxDistance, layerMask)`
+- `physicsRaycastAll(...)`
+- `physicsSphereCast(...)`
+
+**UI 集成:**
+- 射线测试面板 (原点/方向/距离)
+- 命中结果显示 (距离/点/法线/刚体ID)
+- 射线可视化 (红=命中, 灰=未命中)
+- 命中点标记和法向量显示
+
+---
+
+## Phase 18: 地形系统 ✅
+
+### 18.1 地形核心 (`engine/terrain/terrain.h`)
+
+**Heightmap:**
+- 宽度/高度、数据存储
+- `getHeight(x, y)`, `setHeight(x, y, h)`
+- `sampleBilinear(u, v)` - 双线性插值
+- `getNormal(x, y)` - 法线计算
+- `normalize()` - 归一化
+
+**Splatmap:**
+- 4 层纹理权重 (MAX_LAYERS = 4)
+- `getWeight/setWeight(layer, x, y)`
+- `normalizeAt(x, y)` - 权重归一化
+
+**TerrainLayer:**
+- name, diffuseTexture, normalTexture
+- tint, metallic, roughness, tileScale
+- 高度混合 (minHeight, maxHeight, blendSharpness)
+- 坡度混合 (minSlope, maxSlope)
+
+**TerrainChunk:**
+- 分块管理 (chunkX, chunkZ)
+- LOD 级别控制
+- `generateMesh()` - 从高度图生成网格
+- TerrainMeshData (vertices, indices)
+
+**Terrain:**
+- TerrainSettings (分辨率、大小、高度缩放)
+- `getHeightAt(worldX, worldZ)` - 世界坐标查询
+- `getNormalAt(worldX, worldZ)`
+- `updateLOD(cameraPos)` - LOD 更新
+- `autoGenerateSplatmap()` - 自动材质分配
+
+### 18.2 地形生成 (`engine/terrain/terrain_generator.h`)
+
+**PerlinNoise:**
+- 2D/3D Perlin 噪声实现
+- fade/lerp/grad 辅助函数
+- 512 元素置换表
+
+**FractalNoiseSettings:**
+- octaves, frequency, amplitude
+- lacunarity, persistence
+- exponent, ridged, ridgeOffset
+
+**FractalNoise:**
+- 多倍频叠加
+- 脊状噪声支持
+- 指数曲线映射
+
+**HydraulicErosion:**
+- 水滴侵蚀模拟
+- ErosionSettings (iterations, lifetime, inertia 等)
+- 沉积/侵蚀刷
+- 高度梯度计算
+
+**预设:**
+| 预设 | 特点 |
+|------|------|
+| Flat | 平坦、低振幅 |
+| Hills | 起伏丘陵 |
+| Mountains | 高山、脊状噪声 |
+| Islands | 岛屿、指数衰减 |
+| Canyon | 峡谷、低指数 |
+
+### 18.3 植被系统 (`engine/terrain/foliage.h`)
+
+**FoliageInstance:**
+- position, rotation, scale
+- color (色彩变化)
+- windPhase (风动画相位)
+
+**FoliageLayerSettings:**
+- density, densityVariation
+- minScale, maxScale, rotation
+- baseColor, colorVariation
+- 高度/坡度/图层约束
+- LOD 距离、剔除距离
+- 风强度/频率
+- 公告板/网格模式
+
+**FoliagePatch:**
+- 分块实例管理
+- LOD 级别
+- 可见性剔除
+
+**FoliageLayer:**
+- `generateInstances()` - 根据地形生成实例
+- `updateLOD()` - 基于相机更新
+
+**FoliageSystem:**
+- 多图层管理
+- `generateAll()`, `updateLOD()`
+
+**预设:**
+| 预设 | 密度 | 特点 |
+|------|------|------|
+| Grass | 20/m² | 基础草地 |
+| TallGrass | 5/m² | 高草 |
+| Flowers | 2/m² | 花朵、颜色变化大 |
+| Rocks | 0.5/m² | 岩石、坡度区域 |
+| Trees | 0.1/m² | 树木、大剔除距离 |
+
+### 18.4 地形编辑器 UI
+
+**TerrainEditorState:**
+- noiseSettings, erosionSettings
+- seed, presets
+- brushMode/Radius/Strength
+- selectedFoliageLayer
+
+**drawTerrainEditorPanel:**
+- 生成设置 (预设/噪声参数/侵蚀)
+- 地形设置 (分辨率/大小/高度)
+- 材质图层编辑
+- 植被图层管理
+- 笔刷工具 (抬升/降低/平滑/展平/绘制)
+
+**菜单集成:**
+- Window → Rendering → Terrain Editor
+
+### 18.5 应用集成 (`LumaView.mm`)
+
+- TerrainEditorState 实例变量
+- 每帧调用 Terrain::updateLOD()
+- 每帧调用 FoliageSystem::updateLOD()
+- 绘制 drawTerrainEditorPanel()
+
+---
+
+## Phase 19: 音频系统 ✅
+
+### 19.1 音频核心 (`engine/audio/audio.h`)
+
+**AudioFormat:**
+- Mono8, Mono16, Stereo8, Stereo16
+- MonoFloat, StereoFloat
+
+**AudioClip:**
+- name, data, sampleRate, channels, bitsPerSample
+- `getDuration()` - 获取时长
+- `loadFromMemory()` - 从内存加载
+- `generateSineWave()` - 生成正弦波测试音
+- `generateWhiteNoise()` - 生成白噪声
+
+**AudioSourceSettings:**
+- 播放: volume, pitch, loop, playOnAwake, priority
+- 3D: spatialize, minDistance, maxDistance
+- 衰减: rolloff (Linear/Logarithmic/Custom), rolloffFactor
+- 多普勒: dopplerLevel
+- 空间: spread, reverbZoneMix
+
+**AudioSource:**
+- `setClip()`, `setPosition()`, `setVelocity()`
+- `play()`, `pause()`, `unpause()`, `stop()`
+- `getState()`, `getTime()`, `setTime()`
+- computedVolume, computedPanL/R (3D 计算结果)
+
+**AudioListener:**
+- position, velocity
+- forward, up (方向向量)
+- `getRight()` - 计算右向量
+- volume (监听器音量)
+
+### 19.2 3D 空间音频
+
+**距离衰减:**
+- Linear: `1 - (d - minDist) / (maxDist - minDist)`
+- Logarithmic: `minDist / (minDist + factor * (d - minDist))`
+
+**立体声平移:**
+- 计算声源相对监听器方向
+- 与 right 向量点积得到左右平衡
+- Constant power panning (等功率平移)
+
+**多普勒效应:**
+- `shift = (c + vL) / (c + vS)`
+- c = 343 m/s (声速)
+- 限制范围 0.5 - 2.0
+
+### 19.3 音频混合器
+
+**AudioMixerGroup:**
+- name, volume, mute, solo
+- parentIndex (层级关系)
+- 效果: lowPassEnabled, lowPassCutoff, reverbEnabled, reverbMix
+
+**AudioMixer:**
+- 预设组: Master, Music, SFX, Ambient, UI
+- `addGroup()`, `getGroup()`, `getGroupByName()`
+- `getEffectiveVolume()` - 计算继承后的音量
+
+### 19.4 音频系统 (AudioSystem)
+
+**初始化:**
+- `initialize(sampleRate, channels, bufferSize)`
+- 默认: 44100Hz, 2 channels, 4096 samples
+
+**资源管理:**
+- `createClip()`, `getClip()`
+- `createSource()`, `destroySource()`
+
+**全局控制:**
+- masterVolume, muted
+- `pauseAll()`, `unpauseAll()`, `stopAll()`
+
+**更新:**
+- `update(dt)` - 更新所有 3D 计算
+- `mixAudio(buffer, frameCount)` - 音频混合回调
+
+**便捷函数:**
+- `playOneShot(clip, position, volume)` - 一次性播放
+
+### 19.5 音频编辑器 UI
+
+**AudioEditorState:**
+- selectedSourceIndex, selectedClipIndex, selectedMixerGroup
+- testToneFrequency, testToneDuration
+- showSourceGizmos, showListenerGizmo
+
+**drawAudioEditorPanel:**
+- 主控制 (Master Volume, Mute, Stop All)
+- 监听器设置 (位置/方向/音量)
+- 混合器面板 (分组/音量/Mute/Solo/效果)
+- 音源列表 (创建/选择/删除)
+- 音源详情 (播放控制/设置/3D 参数)
+- 测试音生成 (正弦波/白噪声/位置播放)
+
+**菜单集成:**
+- Window → Rendering → Audio Editor
+
+### 19.6 应用集成 (`LumaView.mm`)
+
+- AudioEditorState 实例变量
+- 每帧调用 AudioSystem::update(dt)
+- 绘制 drawAudioEditorPanel()
+
+---
+
+## Phase 20: 全局光照系统 ✅
+
+### 20.1 球谐函数 (`engine/renderer/gi/spherical_harmonics.h`)
+
+**SHConstants:**
+- L2 球谐函数常数 (9 系数)
+- kC0-kC4: 归一化常数
+- kA0-kA2: 辐照度转换常数
+- kIrr*: 预计算辐照度系数
+
+**SHCoefficients:**
+- 9 个 RGB 系数存储
+- `addSample(direction, radiance)` - 添加辐射样本
+- `scale(s)`, `add(other)`, `lerp(a, b, t)`
+- `evaluateIrradiance(normal)` - 计算法向辐照度
+- `evaluateBasis(dir, basis)` - 计算基函数
+- 静态构造: `fromDirectionalLight()`, `fromAmbient()`, `fromSkyGradient()`
+
+**SHSampleGenerator:**
+- `generateSamples(count)` - 球面斐波那契均匀分布
+- 返回方向、基函数、立体角
+
+**SHGPUData:**
+- GPU 对齐数据格式 (4-float padding)
+- `fromSHCoefficients()` - 转换为 GPU 格式
+
+### 20.2 光照探针 (`engine/renderer/gi/light_probe.h`)
+
+**LightProbe:**
+- position, SHCoefficients
+- `evaluateIrradiance(normal)` - 查询辐照度
+- dirty/valid 状态标记
+
+**LightProbeGroup:**
+- 非规则探针组管理
+- `addProbe()`, `removeProbe()`, `clear()`
+- `findNearestProbes(position, maxCount)` - 最近探针查找
+- 逆距离加权 (IDW) 插值
+- `interpolateSH(position)` - SH 插值
+
+**LightProbeGrid:**
+- 规则 3D 网格探针存储
+- `initialize(min, max, resX, resY, resZ)`
+- `getProbe(x, y, z)`, `getCell(pos)`
+- `sampleSH(position)` - 三线性插值
+
+### 20.3 反射探针 (`engine/renderer/gi/reflection_probe.h`)
+
+**ReflectionProbeSettings:**
+- resolution, mipLevels, hdr
+- nearClip, farClip, layerMask
+- realtime/baked, refreshRate
+- boxProjection, blendDistance
+
+**ReflectionProbe:**
+- name, position
+- shape: Box/Sphere
+- boxSize, boxOffset / sphereRadius
+- influenceRadius, priority, intensity
+- `containsPoint()`, `calculateBlendWeight()`
+- `boxProjectReflection()` - 视差校正
+- gpuCubemapHandle
+
+**ReflectionProbeManager:**
+- 预创建 Skybox 探针 (最低优先级)
+- `createProbe()`, `removeProbe()`
+- `findProbesForPoint(position, maxCount)` - 按优先级排序
+- `getDirtyProbes()`, `markAllDirty()`
+
+### 20.4 GI 系统 (`engine/renderer/gi/gi_system.h`)
+
+**GISettings:**
+- lightProbes/reflectionProbes 启用开关
+- ambientSkyColor, ambientGroundColor, ambientIntensity
+- bounces, raysPerSample, rayLength (烘焙)
+
+**GISystem:**
+- `initializeLightProbeGrid()` - 初始化探针网格
+- `addLightProbeGroup()` - 添加探针组
+- `sampleIndirectDiffuse(position, normal)` - 采样间接光
+- `getAmbientSH()` - 获取环境 SH
+
+**烘焙系统:**
+- LightInfo (Directional/Point/Spot)
+- RayTraceCallback - 自定义射线追踪
+- `bakeLightProbe()` - 烘焙单个探针
+- `bakeAllLightProbes()` - 烘焙网格
+- `bakeAllLightProbeGroups()` - 烘焙所有组
+- 半球余弦采样、多次弹射
+
+**GPU 数据导出:**
+- GPUProbeData 结构
+- `exportGPUData()` - 导出所有探针 SH
+
+### 20.5 GI 编辑器 UI
+
+**GIEditorState:**
+- gridMin/Max, gridResolution
+- bakeProgress/Total
+- selectedLightProbeGroup, selectedReflectionProbe
+- visualization 选项
+
+**drawGIEditorPanel:**
+- GI 设置 (开关/强度/环境色)
+- 光照探针网格 (初始化/分辨率)
+- 光照探针组 (添加/管理)
+- 反射探针列表 (创建/选择)
+- 反射探针详情 (位置/形状/优先级/分辨率)
+- 烘焙控制 (参数/进度/执行)
+- 预览 (位置/法线/辐照度)
+- 可视化选项
+
+**菜单集成:**
+- Window → Rendering → GI Editor
+
+### 20.6 应用集成 (`LumaView.mm`)
+
+- GIEditorState 实例变量
+- 绘制 drawGIEditorPanel()
+
+---
+
+## Phase 21: 视频导出系统 ✅
+
+### 21.1 核心结构 (`engine/video/video_export.h`)
+
+**VideoFormat:**
+- MP4_H264, MP4_H265, WebM_VP9, AVI_MJPEG
+- GIF
+- ImageSequence_PNG/JPG/TGA
+
+**VideoQuality:**
+- Low, Medium, High, Lossless
+
+**FrameData:**
+- pixels (RGBA/RGB), width, height, channels
+- `convertToRGB()`, `flipVertical()`
+
+**VideoExportSettings:**
+- 输出: path, format, quality
+- 分辨率: width, height, matchViewport
+- 时间线: frameRate, startTime, endTime
+- 编码: bitrate, keyframeInterval
+
+### 21.2 编码器
+
+**IVideoEncoder 接口:**
+- `initialize()`, `encodeFrame()`, `finalize()`
+- `getProgress()`, `getError()`
+
+**ImageSequenceEncoder:**
+- TGA 写入 (BGR/BGRA)
+- PNG 占位 (降级到 TGA)
+
+**FFmpegEncoder:**
+- 管道到 FFmpeg 进程
+- 自动构建命令行参数
+- 支持多种编解码器
+
+**GIFEncoder:**
+- GIF89a 格式
+- Netscape 循环扩展
+- 简化 LZW (灰度)
+
+### 21.3 录制管理器
+
+**RecordingState:**
+- Idle, Preparing, Recording, Paused, Finalizing, Complete, Error
+
+**RecordingManager:**
+- `startRecording()`, `stopRecording()`
+- `pauseRecording()`, `resumeRecording()`
+- `captureFrame()` - 渲染循环中调用
+- 进度/完成回调
+- 估算文件大小和剩余时间
+
+### 21.4 编辑器 UI
+
+**VideoExportState:**
+- settings, formatIndex, qualityIndex
+- resolutionPreset
+- recordStartTime, avgFrameTime
+
+**drawVideoExportPanel:**
+- 输出设置 (格式/质量/路径)
+- 分辨率 (预设/自定义)
+- 时间线 (帧率/起止时间)
+- 高级选项 (码率/关键帧)
+- 录制控制 (开始/暂停/停止)
+- 进度条和状态显示
+
+---
+
+## Phase 22: 网络系统 ✅
+
+### 22.1 核心结构 (`engine/network/network.h`)
+
+**NetworkRole:**
+- None, Client, Server, Host
+
+**NetworkMessageType:**
+- Connect/Disconnect/Heartbeat
+- StateUpdate/StateFull/StateRequest
+- RPC/RPCResponse
+- EntitySpawn/Destroy/Ownership
+- ScriptRPC/ScriptStateSync
+
+**NetworkMessage:**
+- 写入: `writeByte/UInt16/UInt32/Float/String/Vec3/Bytes`
+- 读取: `readByte/UInt16/UInt32/Float/String/Vec3/Bytes`
+- `serialize()`, `deserialize()`
+
+### 22.2 连接管理
+
+**NetworkConnection:**
+- id, state, address, port
+- lastHeartbeat, roundTripTime
+- bytesSent/Received, packets统计
+- username, userId
+
+**ConnectionState:**
+- Disconnected, Connecting, Connected, Disconnecting
+
+### 22.3 RPC 系统
+
+**RPCDefinition:**
+- name, id
+- serverOnly, clientOnly, requiresOwnership
+- Handler 回调
+
+**NetworkPeer 基类:**
+- `send()`, `broadcast()`
+- `registerRPC()`, `callRPC()`
+- 消息处理器注册
+- 连接回调
+
+### 22.4 服务器/客户端
+
+**NetworkServer:**
+- `start()`, `stop()`, `update()`
+- `acceptConnection()`, `disconnectClient()`
+- 心跳发送和超时检测
+
+**NetworkClient:**
+- `start()`, `stop()`, `update()`
+- `isConnected()`, `getConnectionState()`
+- 自动连接请求
+
+**NetworkManager (单例):**
+- `startServer()`, `startClient()`, `startHost()`
+- `isServer()`, `isClient()`, `isHost()`
+- 便捷 RPC 调用
+
+---
+
+## Phase 23: Lua 脚本系统 ✅
+
+### 23.1 脚本值 (`engine/script/script_engine.h`)
+
+**ScriptValueType:**
+- Nil, Boolean, Number, String
+- Table, Function, UserData
+- Vec3, Quat
+
+**ScriptValue:**
+- 联合体存储各类型
+- 类型检查: `isNil/Bool/Number/String/Table/Vec3/Quat`
+- 网络序列化: `serialize()`, `deserialize()`
+
+### 23.2 脚本属性和 RPC
+
+**ScriptProperty:**
+- name, value
+- networked (网络同步)
+- serverAuthority (服务器权威)
+- dirty (已修改标记)
+
+**ScriptRPCDef:**
+- name
+- serverOnly, clientOnly, ownerOnly
+- luaFuncRef (Lua 函数引用)
+
+### 23.3 脚本类和实例
+
+**ScriptClass:**
+- name, sourceFile, sourceCode
+- properties[], rpcs[]
+- Lua 回调引用: onStart, onUpdate, onDestroy
+- 网络回调: onNetworkSpawn, onNetworkDespawn
+
+**ScriptInstance:**
+- scriptClass, entityId
+- networkId, ownerConnection
+- propertyValues
+- instanceRef (Lua 表引用)
+- `hasAuthority()` - 权威性检查
+
+### 23.4 脚本引擎
+
+**ScriptEngine:**
+- `initialize()`, `shutdown()`
+- `loadScript()`, `loadScriptString()`
+- `registerClass()`, `getClass()`
+- `createInstance()`, `destroyInstance()`
+- `update(dt)` - 调用所有实例的 onUpdate
+
+**函数调用:**
+- `callFunction(name, args, results)`
+- `callMethod(instance, method, args, results)`
+
+**网络集成:**
+- `setNetworkEnabled()`
+- `callRPC()` - 发送网络 RPC
+- `handleNetworkRPC()` - 处理传入 RPC
+- `syncNetworkedProperties()` - 同步属性
+
+**API 绑定:**
+- `bindVec3()`, `bindQuat()`
+- `bindInput()`, `bindEntity()`
+- `bindNetwork()`, `bindDebug()`
+
+### 23.5 网络+脚本整合设计
+
+```lua
+-- 示例脚本
+PlayerController = {
+    -- 网络同步属性
+    networked = {
+        health = { default = 100, authority = "server" },
+        position = { default = Vec3(0,0,0), authority = "owner" }
+    },
+    
+    -- 服务端 RPC
+    ServerRPC = {
+        takeDamage = function(self, amount)
+            self.health = self.health - amount
+        end
+    },
+    
+    -- 客户端 RPC
+    ClientRPC = {
+        playEffect = function(self, effectName)
+            -- 播放特效
+        end
+    },
+    
+    onUpdate = function(self, dt)
+        if Network.hasAuthority(self) then
+            -- 只有权威者更新
+        end
+    end
+}
+```
+
+### 23.6 编辑器 UI
+
+**NetworkPanelState:**
+- serverAddress, serverPort
+- selectedConnection, showStats
+
+**drawNetworkPanel:**
+- 角色状态显示
+- 连接设置 (地址/端口)
+- 启动按钮 (Server/Host/Client)
+- 服务器: 客户端列表、踢人
+- 客户端: 连接状态、RTT
+
+**ScriptEditorState:**
+- selectedClass/Instance
+- newClassName, codeBuffer
+- consoleLog, consoleInput
+
+**drawScriptEditorPanel:**
+- 脚本类列表
+- 属性/RPC 编辑
+- 网络集成开关
+- Lua 控制台
+- API 参考
+
+### 23.7 应用集成 (`LumaView.mm`)
+
+- NetworkPanelState, ScriptEditorState 实例
+- 每帧: NetworkManager::update(), ScriptEngine::update()
+- 绘制 Network 和 Script 面板
+
+---
+
+## Phase 24: AI/寻路系统 ✅
+
+### 24.1 NavMesh (`engine/ai/navmesh.h`)
+
+**NavPoly:**
+- indices[] (最多6顶点)
+- neighbors[] (相邻多边形)
+- center, normal, area
+- flags, areaType
+
+**NavEdge:**
+- polyA, polyB
+- start, end, width
+
+**NavMeshBuildSettings:**
+- Agent: height, radius, maxClimb, maxSlope
+- Voxelization: cellSize, cellHeight
+- Region: minArea, mergeArea
+- Polygon: maxEdgeLen, maxSimplificationError
+
+**NavMesh:**
+- `build(vertices, indices)` - 从几何体构建
+- `buildFromHeightmap()` - 从高度图构建
+- `addPolygon()`, `connectPolygons()`
+- `findNearestPoly()` - 找最近多边形
+- `getClosestPointOnPoly()` - 多边形上最近点
+- `isPointInPoly()` - 点在多边形内测试
+- `raycast()` - 射线检测
+
+### 24.2 A* 寻路
+
+**NavNode:**
+- polyIndex, position
+- gCost (起点代价), hCost (启发式)
+- parentIndex, edgeIndex
+
+**NavPath:**
+- points[] (PathPoint)
+- totalLength
+- `getPositionAtDistance()` - 按距离获取位置
+
+**NavPathfinder:**
+- `findPath(start, end, outPath)` - A* 搜索
+- `findPath(..., areaCosts)` - 带区域代价
+- `smoothPath()` - 路径平滑 (视线检测)
+- 启发式: 欧几里得距离
+- 支持自定义迭代上限和权重
+
+### 24.3 NavAgent (`engine/ai/nav_agent.h`)
+
+**NavAgentState:**
+- Idle, Moving, Waiting, Stuck, Arrived
+
+**NavAgentSettings:**
+- speed, acceleration, angularSpeed
+- stoppingDistance, radius, height
+- avoidObstacles, avoidancePriority
+- pathUpdateInterval, autoRepath
+
+**NavAgent:**
+- `setDestination()` - 设置目标
+- `stop()`, `resume()` - 控制
+- `update(dt, navMesh)` - 每帧更新
+- `move(direction, dt)` - 手动移动
+- `getRemainingDistance()` - 剩余距离
+- 回调: onPathComplete
+
+**NavAgentManager:**
+- `createAgent()`, `destroyAgent()`
+- `update(dt, navMesh)` - 更新所有Agent
+- `getAgentById()`, `getAgentCount()`
+
+### 24.4 行为树 (`engine/ai/behavior_tree.h`)
+
+**BTStatus:**
+- Invalid, Success, Failure, Running
+
+**复合节点:**
+| 类型 | 说明 |
+|------|------|
+| Sequence | 顺序执行，失败即停 |
+| Selector | 选择执行，成功即停 |
+| Parallel | 并行执行 |
+| RandomSelector | 随机选择子节点 |
+
+**装饰节点:**
+| 类型 | 说明 |
+|------|------|
+| Inverter | 反转结果 |
+| Succeeder | 总是成功 |
+| Repeater | 重复N次/-1无限 |
+| Limiter | 限制执行次数 |
+
+**叶节点:**
+| 类型 | 说明 |
+|------|------|
+| Action | 自定义函数 |
+| Condition | 条件检查 |
+| Wait | 等待时间 |
+| Log | 调试日志 |
+
+**Blackboard:**
+- `set<T>(key, value)`, `get<T>(key)`
+- `has(key)`, `remove(key)`
+
+**BTBuilder (Fluent API):**
+```cpp
+BTBuilder()
+    .selector()
+        .sequence("Attack")
+            .condition(inRange("target", 2.0f))
+            .action(attackTarget)
+        .end()
+        .sequence("Chase")
+            .condition(hasTarget)
+            .action(moveTo("target"))
+        .end()
+        .action(patrol)
+    .end()
+.build();
+```
+
+**预定义动作 (BTActions):**
+- `moveTo(targetKey)` - 移动到目标
+- `inRange(targetKey, range)` - 距离检查
+- `checkBool(key, expected)` - 黑板值检查
+- `setValue(key, value)` - 设置黑板值
+
+### 24.5 AI 编辑器 UI
+
+**AIEditorState:**
+- navMeshSettings, navMeshBuilt
+- selectedAgent, agentTestDestination
+- pathStart/End, testPath
+
+**drawAIEditorPanel:**
+- NavMesh 设置和构建
+- Agent 列表和详情
+- 路径测试 (起点/终点/可视化)
+- 行为树参考
+
+**菜单集成:**
+- Window → Rendering → AI Editor
+
+### 24.6 应用集成 (`LumaView.mm`)
+
+- AIEditorState 实例
+- 每帧: NavAgentManager::update(dt, navMesh)
+- 绘制 drawAIEditorPanel()
+
+---
+
+## Phase 25: 游戏UI系统 ✅
+
+### 25.1 UI Core (`engine/game_ui/ui_core.h`)
+
+**基础类型:**
+- UIRect (x, y, width, height, contains, intersects)
+- UIColor (r, g, b, a, 预定义颜色)
+- UIMargin (left, right, top, bottom)
+- UIPivot (x, y 归一化)
+- UIAnchor (9点锚定 + Stretch)
+
+**UIEvent:**
+- PointerDown/Up/Move/Enter/Exit
+- Click, DoubleClick
+- DragStart/Drag/DragEnd
+- Scroll, KeyDown/Up, TextInput
+- Focus/Blur
+
+**UIWidget:**
+- 位置/大小/锚点/枢轴
+- visible/enabled/interactive
+- 层级 (addChild/removeChild/parent)
+- 事件监听 (addEventListener, onClick, onHover)
+- hitTest/hitTestRecursive
+- updateLayout() 计算 worldRect
+
+**UICanvas:**
+- 根容器, screenSize
+- handleEvent() 分发事件
+- 焦点/悬停/按下状态管理
+
+### 25.2 UI Widgets (`engine/game_ui/ui_widgets.h`)
+
+| 控件 | 特性 |
+|------|------|
+| **UIPanel** | 背景色、边框、圆角 |
+| **UILabel** | 文本、字体、对齐、阴影 |
+| **UIImage** | 纹理、UV、9-slice、填充模式 |
+| **UIButton** | 文本、图标、状态颜色(Normal/Hover/Pressed/Disabled) |
+| **UICheckbox** | checked状态、toggle() |
+| **UISlider** | value/min/max、step、方向 |
+| **UIProgressBar** | value、动画、显示百分比 |
+| **UIInputField** | 文本输入、placeholder、密码模式、maxLength |
+| **UIDropdown** | 选项列表、展开/收起 |
+| **UIScrollView** | 滚动内容、惯性、滚动条 |
+| **UIListView** | 数据列表、选择、itemCreator |
+
+### 25.3 UI Layout (`engine/game_ui/ui_layout.h`)
+
+| 布局 | 说明 |
+|------|------|
+| **UIHorizontalLayout** | 水平排列, childAlign |
+| **UIVerticalLayout** | 垂直排列, childAlign |
+| **UIGridLayout** | 网格, columns, cellSize |
+| **UIStackLayout** | 堆叠(重叠) |
+| **UIFlowLayout** | 流式(自动换行) |
+| **UIAnchorLayout** | 锚点布局 |
+
+**通用属性:**
+- padding, spacing
+- childAlign (Start/Center/End/Stretch)
+- fitContent (自动尺寸)
+
+### 25.4 UI System (`engine/game_ui/ui_system.h`)
+
+**UIRenderCommand:**
+- Rect, RoundedRect, Text, Image, Line, Clip
+
+**IUIRenderer:**
+- drawRect, drawRoundedRect, drawText, drawImage
+- pushClip/popClip
+
+**UIWidgetDrawer:**
+- draw(widget) 递归渲染所有控件
+
+**UISystem:**
+- createCanvas/getCanvas/removeCanvas
+- update(dt) 更新所有画布
+- handleEvent() 事件分发
+- render(renderer) 渲染所有画布
+
+**UIFactory:**
+```cpp
+auto panel = UIFactory::createPanel("MyPanel");
+auto button = UIFactory::createButton("Click Me");
+auto slider = UIFactory::createSlider();
+auto vbox = UIFactory::createVBox();
+```
+
+### 25.5 Game UI 编辑器
+
+**GameUIEditorState:**
+- selectedCanvas, selectedWidgetId
+- widgetTypeToCreate
+- showPreview, previewScale
+
+**drawGameUIEditorPanel:**
+- Canvas 管理 (创建/删除/可见性)
+- Widget 层级树
+- Widget 创建 (所有类型)
+- Widget 属性编辑 (位置/大小/锚点/颜色)
+- 类型特定属性 (Label文本, Button颜色, Slider范围等)
+
+**菜单入口:** Window → Rendering → Game UI Editor
+
+### 25.6 应用集成 (`LumaView.mm`)
+
+- GameUIEditorState 实例
+- 每帧: UISystem::update(dt)
+- 绘制 drawGameUIEditorPanel()
+
+---
+
+## Phase 26: 场景管理系统 ✅
+
+### 26.1 场景管理 (`engine/scene/scene_manager.h`)
+
+**SceneState:**
+- Unloaded, Loading, Loaded, Active, Unloading
+
+**SceneLoadMode:**
+- Single (卸载其他场景)
+- Additive (保留现有场景)
+
+**SceneObject:**
+- id, name, prefabPath
+- position, rotation, scale
+- active, parentId
+- componentData (序列化数据)
+
+**SceneData:**
+- 对象列表, 环境设置 (ambient, skybox)
+- 光照 (DirectionalLight)
+- NavMesh引用, 依赖资源
+
+**SceneManager:**
+- `loadScene(path, mode)` - 同步加载
+- `loadSceneAsync(path, mode, callbacks)` - 异步加载
+- `preloadScene(path)` - 预加载
+- `activatePreloadedScene(path)` - 激活预加载场景
+- `createScene(name)` - 创建新场景
+- `saveScene(scene, path)` - 保存场景
+- `unloadScene()`, `unloadAllScenes()`
+
+**SceneTransition:**
+- 类型: None, Fade, Crossfade, SlideLeft/Right/Up/Down
+- duration, color, progress
+- `getFadeOpacity()` - 渐变不透明度
+
+**SceneTransitionManager:**
+- `transitionTo(path, type, duration)` - 带过渡切换场景
+- 自动预加载 + 中点切换
+
+---
+
+## Phase 27: 数据驱动系统 ✅
+
+### 27.1 配置表 (`engine/data/data_system.h`)
+
+**ConfigValue:**
+- 支持: bool, int64_t, double, string, string[], double[]
+
+**ConfigTable:**
+- `setBool/Int/Float/String()` - 设置值
+- `getBool/Int/Float/String()` - 获取值 (带默认值)
+- `parseFromString()` - 从 key=value 格式解析
+- `serializeToString()` - 序列化
+
+### 27.2 本地化
+
+**Localization:**
+- `setLanguage(code)` - 切换语言
+- `loadStrings(language, strings)` - 加载字符串
+- `get(key)` - 获取本地化字符串
+- `format(key, args...)` - 格式化字符串
+- 自动回退到英语
+
+### 27.3 文件监控
+
+**FileWatcher:**
+- `addWatch(path, callback)` - 添加监控
+- `update()` - 检查文件变化
+- 基于修改时间检测
+
+### 27.4 数据管理器
+
+**DataManager:**
+- `loadConfig(name)` - 加载配置表
+- `reloadConfig(name)` - 重载配置
+- `addConfigListener()` - 配置变化监听
+- `loadLanguage(code)` - 加载语言文件
+- `localize(key)` / `localizeFormat(key, args)`
+- 热重载支持
+
+**便捷宏:**
+```cpp
+LOC("key")                    // 获取本地化字符串
+LOC_FMT("key", arg1, arg2)    // 格式化
+CONFIG("name")->getInt("key") // 获取配置
+```
+
+---
+
+## Phase 28: 打包/发布系统 ✅
+
+### 28.1 资源打包 (`engine/build/build_system.h`)
+
+**AssetBundleEntry:**
+- sourcePath, bundlePath
+- offset, size, originalSize
+- crc32, compressed
+
+**AssetBundler:**
+- `addAsset(source, bundlePath)` - 添加资源
+- `addDirectory(dir, filter)` - 添加目录
+- `build(outputPath, compress)` - 构建包
+- `buildManifest()` - 生成清单
+
+### 28.2 构建配置
+
+**BuildPlatform:**
+- Windows, macOS, iOS, Android, Linux, WebGL
+
+**BuildConfig:**
+- Debug, Development, Release
+
+**BuildSettings:**
+- projectName, version, buildNumber
+- platform, config
+- outputDir, assetsDir
+- compressAssets, stripDebugInfo
+- bundleIdentifier (iOS/macOS/Android)
+- teamId (iOS), keystorePath (Android)
+
+### 28.3 构建管线
+
+**BuildPipeline:**
+- 可配置步骤列表
+- 默认步骤: Validate → Clean → CreateDirectories → CopyAssets → BundleAssets → WriteMetadata
+- `addStep()`, `insertStepBefore()`, `removeStep()`
+- 进度回调支持
+
+**BuildResult:**
+- success, outputPath, errorMessage
+- warnings, buildTimeMs, totalSize
+- stepResults (每步结果)
+
+**BuildManager:**
+- `build(progressCallback)` - 执行构建
+- `buildForPlatform(platform)` - 指定平台构建
+- 预设: `useDebugPreset()`, `useDevelopmentPreset()`, `useReleasePreset()`
+
+### 28.4 编辑器面板
+
+**Scene Manager Panel:**
+- 当前场景信息
+- 已加载场景列表
+- 加载/预加载/卸载操作
+- 场景过渡设置
+
+**Data Manager Panel:**
+- 配置表加载/编辑/保存
+- 本地化语言切换
+- 热重载状态
+
+**Build Settings Panel:**
+- 项目信息编辑
+- 平台/配置选择
+- 路径设置
+- 构建选项
+- 一键构建 + 进度显示
+- 构建结果显示
+
+**菜单入口:** Window → Rendering → Scene Manager / Data Manager / Build Settings
+
 ---
 
 ## 📝 旧计划（已整合到路线图）

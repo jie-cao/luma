@@ -9,6 +9,8 @@
 namespace luma {
 
 // ===== Ray =====
+#ifndef LUMA_RAY_DEFINED
+#define LUMA_RAY_DEFINED
 struct Ray {
     Vec3 origin;
     Vec3 direction;  // Should be normalized
@@ -19,9 +21,16 @@ struct Ray {
     Vec3 at(float t) const {
         return origin + direction * t;
     }
+    
+    Vec3 getPoint(float t) const {  // Alias for at()
+        return at(t);
+    }
 };
+#endif  // LUMA_RAY_DEFINED
 
 // ===== Axis-Aligned Bounding Box =====
+#ifndef LUMA_AABB_DEFINED
+#define LUMA_AABB_DEFINED
 struct AABB {
     Vec3 min{std::numeric_limits<float>::max(), std::numeric_limits<float>::max(), std::numeric_limits<float>::max()};
     Vec3 max{std::numeric_limits<float>::lowest(), std::numeric_limits<float>::lowest(), std::numeric_limits<float>::lowest()};
@@ -55,6 +64,19 @@ struct AABB {
         expand(other.max);
     }
     
+    bool intersects(const AABB& other) const {
+        if (max.x < other.min.x || min.x > other.max.x) return false;
+        if (max.y < other.min.y || min.y > other.max.y) return false;
+        if (max.z < other.min.z || min.z > other.max.z) return false;
+        return true;
+    }
+    
+    bool contains(const Vec3& point) const {
+        return point.x >= min.x && point.x <= max.x &&
+               point.y >= min.y && point.y <= max.y &&
+               point.z >= min.z && point.z <= max.z;
+    }
+    
     // Transform AABB by matrix (results in larger AABB)
     AABB transformed(const Mat4& m) const {
         AABB result;
@@ -78,6 +100,7 @@ struct AABB {
         return result;
     }
 };
+#endif  // LUMA_AABB_DEFINED
 
 // ===== Ray-AABB Intersection =====
 // Returns true if ray intersects AABB, and sets t to hit distance

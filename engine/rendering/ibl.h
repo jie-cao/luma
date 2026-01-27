@@ -500,12 +500,6 @@ private:
     }
 };
 
-// ===== IBL Settings =====
-struct IBLSettings {
-    float diffuseIntensity = 1.0f;
-    float specularIntensity = 1.0f;
-    float exposure = 1.0f;
-    bool enabled = true;
-};
+// Note: IBLSettings is defined in unified_renderer.h
 
 }  // namespace luma

@@ -12,10 +12,42 @@
 #include "engine/editor/gizmo.h"
 #include "engine/editor/command.h"
 #include "engine/animation/animation.h"
+#include "engine/animation/animation_layer.h"
+#include "engine/animation/blend_tree.h"
+#include "engine/animation/state_machine.h"
+#include "engine/animation/ik_system.h"
 #include "engine/export/screenshot.h"
 #include "engine/lighting/light.h"
 #include "engine/rendering/lod.h"
 #include "engine/rendering/instancing.h"
+#include "engine/rendering/ssao.h"
+#include "engine/rendering/ssr.h"
+#include "engine/rendering/volumetrics.h"
+#include "engine/rendering/advanced_shadows.h"
+#include "engine/rendering/ibl.h"
+#include "engine/editor/demo_mode.h"
+#include "engine/particles/particle.h"
+#include "engine/particles/particle_presets.h"
+#include "engine/physics/physics_world.h"
+#include "engine/physics/collision.h"
+#include "engine/physics/constraints.h"
+#include "engine/physics/physics_debug.h"
+#include "engine/physics/raycast.h"
+#include "engine/terrain/terrain.h"
+#include "engine/terrain/terrain_generator.h"
+#include "engine/terrain/foliage.h"
+#include "engine/audio/audio.h"
+#include "engine/renderer/gi/gi_system.h"
+#include "engine/video/video_export.h"
+#include "engine/network/network.h"
+#include "engine/script/script_engine.h"
+#include "engine/ai/navmesh.h"
+#include "engine/ai/nav_agent.h"
+#include "engine/ai/behavior_tree.h"
+#include "engine/game_ui/ui_system.h"
+#include "engine/scene/scene_manager.h"
+#include "engine/data/data_system.h"
+#include "engine/build/build_system.h"
 #include <string>
 #include <vector>
 #include <functional>
@@ -26,7 +58,7 @@ namespace ui {
 
 // ===== Editor State =====
 struct EditorState {
-    // Window visibility
+    // Window visibility - Basic
     bool showHierarchy = true;
     bool showInspector = true;
     bool showAssetBrowser = true;
@@ -40,6 +72,30 @@ struct EditorState {
     bool showShaderStatus = true;
     bool showScreenshotDialog = false;
     
+    // Window visibility - Advanced (NEW)
+    bool showAdvancedPostProcess = false;
+    bool showAdvancedShadows = false;
+    bool showEnvironment = false;
+    bool showStateMachineEditor = false;
+    bool showBlendTreeEditor = false;
+    bool showIKSettings = false;
+    bool showAnimationLayers = false;
+    bool showLODSettings = false;
+    bool showDemoMenu = false;
+    bool showParticleEditor = false;
+    bool showPhysicsEditor = false;
+    bool showTerrainEditor = false;
+    bool showAudioEditor = false;
+    bool showGIEditor = false;
+    bool showVideoExport = false;
+    bool showNetworkPanel = false;
+    bool showScriptEditor = false;
+    bool showAIEditor = false;
+    bool showGameUIEditor = false;
+    bool showSceneManager = false;
+    bool showDataManager = false;
+    bool showBuildSettings = false;
+    
     // Gizmo
     GizmoMode gizmoMode = GizmoMode::Translate;
     bool gizmoLocalSpace = false;
@@ -52,11 +108,26 @@ struct EditorState {
     std::string currentAssetPath = ".";
     std::string selectedAsset;
     
-    // Animation
+    // Animation - Basic
     bool animationPlaying = false;
     float animationTime = 0.0f;
     float animationSpeed = 1.0f;
     std::string currentClip;
+    
+    // Animation - State Machine Editor
+    int selectedStateIndex = -1;
+    int selectedTransitionIndex = -1;
+    std::string newStateName;
+    std::string newParameterName;
+    int newParameterType = 0;
+    
+    // Animation - Blend Tree Editor
+    int selectedBlendTreeMotion = -1;
+    float blendTreeParam1 = 0.0f;
+    float blendTreeParam2 = 0.0f;
+    
+    // Animation - IK
+    int selectedIKChain = -1;
     
     // Console
     std::vector<std::string> consoleLogs;
@@ -78,10 +149,56 @@ struct EditorState {
     
     bool showOptimizationStats = false;
     
+    // Environment / IBL
+    std::string currentHDRPath;
+    float iblIntensity = 1.0f;
+    float iblRotation = 0.0f;
+    
     // Callbacks
     std::function<void(const std::string&)> onModelLoad;
     std::function<void(const std::string&)> onSceneSave;
     std::function<void(const std::string&)> onSceneLoad;
+    std::function<void(const std::string&)> onHDRLoad;
+    std::function<void(const std::string&)> onDemoGenerate;
+};
+
+// ===== Advanced Settings Structures =====
+struct AdvancedPostProcessState {
+    // SSAO
+    SSAOSettings ssao;
+    bool ssaoEnabled = false;
+    
+    // SSR
+    SSRSettings ssr;
+    bool ssrEnabled = false;
+    
+    // Volumetrics
+    VolumetricFogSettings fog;
+    bool fogEnabled = false;
+    
+    GodRaySettings godRays;
+    bool godRaysEnabled = false;
+};
+
+struct AdvancedShadowState {
+    // CSM
+    CSMSettings csm;
+    bool csmEnabled = true;
+    
+    // PCSS
+    bool pcssEnabled = false;
+    int pcssBlockerSamples = 16;
+    int pcssPCFSamples = 32;
+    float pcssLightSize = 0.02f;
+};
+
+enum class LODQualityPreset { Low, Medium, High, Ultra };
+
+struct LODState {
+    LODQualityPreset qualityPreset = LODQualityPreset::Medium;
+    float lodBias = 1.0f;
+    float maxDistance = 1000.0f;
+    bool showLODDebug = false;
 };
 
 // ===== Icons (using Unicode symbols) =====
@@ -101,26 +218,39 @@ namespace Icons {
     constexpr const char* EyeOff = "\xE2\x80\x95";       // ―
 }
 
+// ===== Callback wrapper for scene operations =====
+struct SceneCallbacks {
+    std::function<void()> onNewScene;
+    std::function<void()> onDeleteSelected;
+    std::function<void()> onDuplicateSelected;
+};
+
+inline SceneCallbacks& getSceneCallbacks() {
+    static SceneCallbacks callbacks;
+    return callbacks;
+}
+
 // ===== Main Menu Bar =====
 inline void drawMainMenuBar(EditorState& state, Viewport& viewport, bool& shouldQuit) {
     if (ImGui::BeginMainMenuBar()) {
         // File Menu
         if (ImGui::BeginMenu("File")) {
             if (ImGui::MenuItem("New Scene", "Ctrl+N")) {
-                // TODO: New scene
+                auto& cb = getSceneCallbacks();
+                if (cb.onNewScene) cb.onNewScene();
             }
             if (ImGui::MenuItem("Open Scene...", "Ctrl+O")) {
-                // TODO: Open scene dialog
+                if (state.onSceneLoad) state.onSceneLoad("");
             }
             if (ImGui::MenuItem("Save Scene", "Ctrl+S")) {
                 if (state.onSceneSave) state.onSceneSave("");
             }
             if (ImGui::MenuItem("Save Scene As...", "Ctrl+Shift+S")) {
-                // TODO: Save as dialog
+                if (state.onSceneSave) state.onSceneSave("");  // Will show dialog if path empty
             }
             ImGui::Separator();
             if (ImGui::MenuItem("Import Model...")) {
-                // TODO: Import dialog
+                if (state.onModelLoad) state.onModelLoad("");
             }
             ImGui::Separator();
             if (ImGui::MenuItem("Screenshot", "F12")) {
@@ -156,10 +286,12 @@ inline void drawMainMenuBar(EditorState& state, Viewport& viewport, bool& should
             
             ImGui::Separator();
             if (ImGui::MenuItem("Delete", "Delete")) {
-                // TODO: Delete selected
+                auto& cb = getSceneCallbacks();
+                if (cb.onDeleteSelected) cb.onDeleteSelected();
             }
             if (ImGui::MenuItem("Duplicate", "Ctrl+D")) {
-                // TODO: Duplicate selected
+                auto& cb = getSceneCallbacks();
+                if (cb.onDuplicateSelected) cb.onDuplicateSelected();
             }
             ImGui::Separator();
             ImGui::MenuItem("History Panel", nullptr, &state.showHistory);
@@ -238,8 +370,67 @@ inline void drawMainMenuBar(EditorState& state, Viewport& viewport, bool& should
         
         // Window Menu
         if (ImGui::BeginMenu("Window")) {
+            ImGui::Text("Panels");
+            ImGui::Separator();
+            ImGui::MenuItem("Hierarchy", nullptr, &state.showHierarchy);
+            ImGui::MenuItem("Inspector", nullptr, &state.showInspector);
+            ImGui::MenuItem("Asset Browser", nullptr, &state.showAssetBrowser);
+            ImGui::MenuItem("Console", nullptr, &state.showConsole);
+            ImGui::MenuItem("Statistics", nullptr, &state.showStats);
+            
+            ImGui::Separator();
+            ImGui::Text("Rendering");
+            ImGui::Separator();
+            ImGui::MenuItem("Post-Processing", nullptr, &state.showPostProcess);
+            ImGui::MenuItem("Advanced Post-Process", nullptr, &state.showAdvancedPostProcess);
+            ImGui::MenuItem("Advanced Shadows", nullptr, &state.showAdvancedShadows);
+            ImGui::MenuItem("Environment / IBL", nullptr, &state.showEnvironment);
+            ImGui::MenuItem("Lighting", nullptr, &state.showLighting);
+            ImGui::MenuItem("LOD Settings", nullptr, &state.showLODSettings);
+            ImGui::MenuItem("Particle Editor", nullptr, &state.showParticleEditor);
+            ImGui::MenuItem("Physics Editor", nullptr, &state.showPhysicsEditor);
+            ImGui::MenuItem("Terrain Editor", nullptr, &state.showTerrainEditor);
+            ImGui::MenuItem("Audio Editor", nullptr, &state.showAudioEditor);
+            ImGui::MenuItem("GI Editor", nullptr, &state.showGIEditor);
+            ImGui::MenuItem("Video Export", nullptr, &state.showVideoExport);
+            ImGui::MenuItem("Network", nullptr, &state.showNetworkPanel);
+            ImGui::MenuItem("Script Editor", nullptr, &state.showScriptEditor);
+            ImGui::MenuItem("AI Editor", nullptr, &state.showAIEditor);
+            ImGui::MenuItem("Game UI Editor", nullptr, &state.showGameUIEditor);
+            ImGui::MenuItem("Scene Manager", nullptr, &state.showSceneManager);
+            ImGui::MenuItem("Data Manager", nullptr, &state.showDataManager);
+            ImGui::Separator();
+            ImGui::MenuItem("Build Settings", nullptr, &state.showBuildSettings);
+            
+            ImGui::Separator();
+            ImGui::Text("Animation");
+            ImGui::Separator();
+            ImGui::MenuItem("Timeline", nullptr, &state.showAnimationTimeline);
+            ImGui::MenuItem("State Machine Editor", nullptr, &state.showStateMachineEditor);
+            ImGui::MenuItem("Blend Tree Editor", nullptr, &state.showBlendTreeEditor);
+            ImGui::MenuItem("Animation Layers", nullptr, &state.showAnimationLayers);
+            ImGui::MenuItem("IK Settings", nullptr, &state.showIKSettings);
+            
+            ImGui::Separator();
             if (ImGui::MenuItem("Reset Layout")) {
-                // TODO: Reset window positions
+                state.showHierarchy = true;
+                state.showInspector = true;
+                state.showPostProcess = true;
+                state.showStats = true;
+            }
+            ImGui::EndMenu();
+        }
+        
+        // Help Menu
+        if (ImGui::BeginMenu("Help")) {
+            if (ImGui::MenuItem("Demo Scenes...")) {
+                state.showDemoMenu = true;
+            }
+            ImGui::Separator();
+            ImGui::MenuItem("Keyboard Shortcuts", "F1", &state.showHelp);
+            ImGui::Separator();
+            if (ImGui::MenuItem("About LUMA Studio")) {
+                // Show about dialog
             }
             ImGui::EndMenu();
         }
@@ -2100,6 +2291,3938 @@ inline void drawAssetBrowserExtended(EditorState& state, const AssetCacheStats* 
             ImGui::EndTabBar();
         }
     }
+    ImGui::End();
+}
+
+// ===== Advanced Post-Processing Panel =====
+inline void drawAdvancedPostProcessPanel(AdvancedPostProcessState& state, EditorState& editorState) {
+    if (!editorState.showAdvancedPostProcess) return;
+    
+    ImGui::SetNextWindowSize(ImVec2(320, 500), ImGuiCond_FirstUseEver);
+    if (ImGui::Begin("Advanced Post-Processing", &editorState.showAdvancedPostProcess)) {
+        
+        // SSAO Section
+        if (ImGui::CollapsingHeader("SSAO (Ambient Occlusion)", ImGuiTreeNodeFlags_DefaultOpen)) {
+            ImGui::Checkbox("Enable SSAO", &state.ssaoEnabled);
+            if (state.ssaoEnabled) {
+                ImGui::Indent();
+                
+                // Presets
+                const char* presets[] = { "Low", "Medium", "High", "Ultra", "Custom" };
+                static int currentPreset = 1;
+                if (ImGui::Combo("Preset", &currentPreset, presets, 5)) {
+                    switch (currentPreset) {
+                        case 0: state.ssao = SSAOPresets::low(); break;
+                        case 1: state.ssao = SSAOPresets::medium(); break;
+                        case 2: state.ssao = SSAOPresets::high(); break;
+                        case 3: state.ssao = SSAOPresets::ultra(); break;
+                    }
+                }
+                
+                ImGui::SliderInt("Samples", &state.ssao.sampleCount, 8, 64);
+                ImGui::SliderFloat("Radius", &state.ssao.radius, 0.1f, 2.0f, "%.2f");
+                ImGui::SliderFloat("Bias", &state.ssao.bias, 0.001f, 0.1f, "%.3f");
+                ImGui::SliderFloat("Intensity", &state.ssao.intensity, 0.5f, 3.0f, "%.2f");
+                ImGui::SliderFloat("Power", &state.ssao.power, 1.0f, 4.0f, "%.1f");
+                ImGui::Checkbox("Half Resolution", &state.ssao.halfResolution);
+                ImGui::Checkbox("Enable Blur", &state.ssao.enableBlur);
+                if (state.ssao.enableBlur) {
+                    ImGui::SliderInt("Blur Passes", &state.ssao.blurPasses, 1, 4);
+                }
+                
+                ImGui::Unindent();
+            }
+        }
+        
+        ImGui::Separator();
+        
+        // SSR Section
+        if (ImGui::CollapsingHeader("SSR (Screen Space Reflections)")) {
+            ImGui::Checkbox("Enable SSR", &state.ssrEnabled);
+            if (state.ssrEnabled) {
+                ImGui::Indent();
+                
+                // Presets
+                const char* presets[] = { "Low", "Medium", "High", "Custom" };
+                static int currentPreset = 1;
+                if (ImGui::Combo("Preset##SSR", &currentPreset, presets, 4)) {
+                    switch (currentPreset) {
+                        case 0: state.ssr = SSRPresets::low(); break;
+                        case 1: state.ssr = SSRPresets::medium(); break;
+                        case 2: state.ssr = SSRPresets::high(); break;
+                    }
+                }
+                
+                ImGui::SliderInt("Max Steps", &state.ssr.maxSteps, 16, 256);
+                ImGui::SliderInt("Binary Steps", &state.ssr.binarySearchSteps, 0, 16);
+                ImGui::SliderFloat("Max Distance", &state.ssr.maxDistance, 10.0f, 500.0f);
+                ImGui::SliderFloat("Thickness", &state.ssr.thickness, 0.1f, 2.0f);
+                ImGui::SliderFloat("Roughness Threshold", &state.ssr.roughnessThreshold, 0.0f, 1.0f);
+                ImGui::SliderFloat("Fade Start", &state.ssr.fadeStart, 0.0f, 1.0f);
+                ImGui::Checkbox("Half Resolution##SSR", &state.ssr.halfResolution);
+                
+                ImGui::Unindent();
+            }
+        }
+        
+        ImGui::Separator();
+        
+        // Volumetric Fog Section
+        if (ImGui::CollapsingHeader("Volumetric Fog")) {
+            ImGui::Checkbox("Enable Fog", &state.fogEnabled);
+            if (state.fogEnabled) {
+                ImGui::Indent();
+                
+                // Presets
+                const char* presets[] = { "Light Fog", "Dense Fog", "Ground Fog", "Custom" };
+                static int currentPreset = 0;
+                if (ImGui::Combo("Preset##Fog", &currentPreset, presets, 4)) {
+                    switch (currentPreset) {
+                        case 0: state.fog = VolumetricPresets::lightFog(); break;
+                        case 1: state.fog = VolumetricPresets::denseFog(); break;
+                        case 2: state.fog = VolumetricPresets::groundFog(); break;
+                    }
+                }
+                
+                ImGui::SliderFloat("Density", &state.fog.density, 0.001f, 0.5f, "%.3f");
+                ImGui::ColorEdit3("Albedo", &state.fog.albedo.x);
+                ImGui::SliderFloat("Scattering", &state.fog.scattering, 0.0f, 1.0f);
+                ImGui::SliderFloat("Absorption", &state.fog.absorption, 0.0f, 1.0f);
+                ImGui::SliderFloat("Height Falloff", &state.fog.heightFalloff, 0.0f, 0.5f);
+                ImGui::SliderFloat("Height Offset", &state.fog.heightOffset, -100.0f, 100.0f);
+                ImGui::SliderInt("Steps", &state.fog.steps, 16, 128);
+                
+                ImGui::Unindent();
+            }
+        }
+        
+        ImGui::Separator();
+        
+        // God Rays Section
+        if (ImGui::CollapsingHeader("God Rays")) {
+            ImGui::Checkbox("Enable God Rays", &state.godRaysEnabled);
+            if (state.godRaysEnabled) {
+                ImGui::Indent();
+                
+                ImGui::DragFloat3("Light Position", &state.godRays.lightPosition.x, 1.0f);
+                ImGui::ColorEdit3("Light Color", &state.godRays.lightColor.x);
+                ImGui::SliderInt("Samples##GodRay", &state.godRays.samples, 32, 200);
+                ImGui::SliderFloat("Density##GodRay", &state.godRays.density, 0.5f, 2.0f);
+                ImGui::SliderFloat("Weight", &state.godRays.weight, 0.001f, 0.05f, "%.3f");
+                ImGui::SliderFloat("Decay", &state.godRays.decay, 0.9f, 1.0f, "%.3f");
+                ImGui::SliderFloat("Exposure##GodRay", &state.godRays.exposure, 0.1f, 2.0f);
+                
+                ImGui::Unindent();
+            }
+        }
+    }
+    ImGui::End();
+}
+
+// ===== Advanced Shadows Panel =====
+inline void drawAdvancedShadowsPanel(AdvancedShadowState& state, EditorState& editorState) {
+    if (!editorState.showAdvancedShadows) return;
+    
+    ImGui::SetNextWindowSize(ImVec2(300, 400), ImGuiCond_FirstUseEver);
+    if (ImGui::Begin("Advanced Shadows", &editorState.showAdvancedShadows)) {
+        
+        // CSM Section
+        if (ImGui::CollapsingHeader("Cascaded Shadow Maps", ImGuiTreeNodeFlags_DefaultOpen)) {
+            ImGui::Checkbox("Enable CSM", &state.csmEnabled);
+            if (state.csmEnabled) {
+                ImGui::Indent();
+                
+                ImGui::SliderInt("Cascade Count", &state.csm.numCascades, 1, 4);
+                ImGui::SliderFloat("Max Shadow Distance", &state.csm.maxShadowDistance, 50.0f, 500.0f);
+                ImGui::SliderInt("Shadow Map Size", &state.csm.shadowMapSize, 512, 4096);
+                
+                ImGui::Separator();
+                ImGui::Text("Cascade Splits:");
+                for (int i = 0; i < state.csm.numCascades; i++) {
+                    ImGui::PushID(i);
+                    char label[32];
+                    snprintf(label, sizeof(label), "Split %d", i);
+                    ImGui::SliderFloat(label, &state.csm.cascadeSplits[i], 0.0f, 1.0f);
+                    ImGui::PopID();
+                }
+                
+                ImGui::Separator();
+                ImGui::Checkbox("Stabilize Cascades", &state.csm.stabilizeCascades);
+                ImGui::SliderFloat("Blend Width", &state.csm.cascadeBlendWidth, 0.0f, 0.5f);
+                ImGui::SliderFloat("Constant Bias", &state.csm.constantBias, 0.0f, 0.01f, "%.4f");
+                ImGui::SliderFloat("Slope Bias", &state.csm.slopeBias, 0.0f, 5.0f);
+                
+                ImGui::Unindent();
+            }
+        }
+        
+        ImGui::Separator();
+        
+        // PCSS Section
+        if (ImGui::CollapsingHeader("PCSS (Soft Shadows)")) {
+            ImGui::Checkbox("Enable PCSS", &state.pcssEnabled);
+            if (state.pcssEnabled) {
+                ImGui::Indent();
+                
+                ImGui::SliderInt("Blocker Samples", &state.pcssBlockerSamples, 8, 64);
+                ImGui::SliderInt("PCF Samples", &state.pcssPCFSamples, 16, 128);
+                ImGui::SliderFloat("Light Size", &state.pcssLightSize, 0.001f, 0.1f, "%.3f");
+                ImGui::Text("(Larger = softer shadows)");
+                
+                ImGui::Unindent();
+            }
+        }
+        
+        ImGui::Separator();
+        
+        // Debug
+        if (ImGui::CollapsingHeader("Debug")) {
+            static bool showCascades = false;
+            ImGui::Checkbox("Visualize Cascades", &showCascades);
+            if (showCascades) {
+                ImGui::TextColored(ImVec4(1, 0, 0, 1), "Cascade 0 (Near)");
+                ImGui::TextColored(ImVec4(0, 1, 0, 1), "Cascade 1");
+                ImGui::TextColored(ImVec4(0, 0, 1, 1), "Cascade 2");
+                ImGui::TextColored(ImVec4(1, 1, 0, 1), "Cascade 3 (Far)");
+            }
+        }
+    }
+    ImGui::End();
+}
+
+// ===== Environment / IBL Panel =====
+inline void drawEnvironmentPanel(EditorState& state) {
+    if (!state.showEnvironment) return;
+    
+    ImGui::SetNextWindowSize(ImVec2(300, 250), ImGuiCond_FirstUseEver);
+    if (ImGui::Begin("Environment", &state.showEnvironment)) {
+        
+        // HDR Environment Map
+        if (ImGui::CollapsingHeader("HDR Environment", ImGuiTreeNodeFlags_DefaultOpen)) {
+            ImGui::Text("Current: %s", state.currentHDRPath.empty() ? "(None)" : 
+                        std::filesystem::path(state.currentHDRPath).filename().string().c_str());
+            
+            if (ImGui::Button("Load HDR...")) {
+                // In real implementation, open file dialog
+                if (state.onHDRLoad) {
+                    state.onHDRLoad("");  // Empty string triggers file dialog
+                }
+            }
+            ImGui::SameLine();
+            if (ImGui::Button("Clear")) {
+                state.currentHDRPath = "";
+            }
+            
+            ImGui::Separator();
+            
+            ImGui::SliderFloat("Intensity", &state.iblIntensity, 0.0f, 5.0f);
+            ImGui::SliderFloat("Rotation", &state.iblRotation, 0.0f, 360.0f, "%.0f deg");
+        }
+        
+        ImGui::Separator();
+        
+        // Built-in Environments
+        if (ImGui::CollapsingHeader("Quick Presets")) {
+            if (ImGui::Button("Studio", ImVec2(80, 0))) {
+                // Apply studio lighting preset
+            }
+            ImGui::SameLine();
+            if (ImGui::Button("Outdoor", ImVec2(80, 0))) {
+                // Apply outdoor preset
+            }
+            ImGui::SameLine();
+            if (ImGui::Button("Night", ImVec2(80, 0))) {
+                // Apply night preset
+            }
+        }
+    }
+    ImGui::End();
+}
+
+// ===== Animation State Machine Editor =====
+inline void drawStateMachineEditor(AnimationStateMachine* sm, EditorState& state) {
+    if (!state.showStateMachineEditor) return;
+    if (!sm) {
+        ImGui::SetNextWindowSize(ImVec2(500, 400), ImGuiCond_FirstUseEver);
+        if (ImGui::Begin("Animation State Machine", &state.showStateMachineEditor)) {
+            ImGui::TextColored(ImVec4(0.5f, 0.5f, 0.5f, 1), "No state machine selected");
+            ImGui::Text("Select an animated entity with a state machine.");
+        }
+        ImGui::End();
+        return;
+    }
+    
+    ImGui::SetNextWindowSize(ImVec2(600, 500), ImGuiCond_FirstUseEver);
+    if (ImGui::Begin("Animation State Machine", &state.showStateMachineEditor)) {
+        
+        // Parameters Section
+        if (ImGui::CollapsingHeader("Parameters", ImGuiTreeNodeFlags_DefaultOpen)) {
+            auto params = sm->getParameterNames();
+            
+            for (const auto& name : params) {
+                ImGui::PushID(name.c_str());
+                auto type = sm->getParameterType(name);
+                
+                switch (type) {
+                    case ParameterType::Float: {
+                        float val = sm->getFloat(name);
+                        if (ImGui::SliderFloat(name.c_str(), &val, 0.0f, 1.0f)) {
+                            sm->setFloat(name, val);
+                        }
+                        break;
+                    }
+                    case ParameterType::Int: {
+                        int val = sm->getInt(name);
+                        if (ImGui::SliderInt(name.c_str(), &val, 0, 10)) {
+                            sm->setInt(name, val);
+                        }
+                        break;
+                    }
+                    case ParameterType::Bool: {
+                        bool val = sm->getBool(name);
+                        if (ImGui::Checkbox(name.c_str(), &val)) {
+                            sm->setBool(name, val);
+                        }
+                        break;
+                    }
+                    case ParameterType::Trigger: {
+                        ImGui::Text("%s", name.c_str());
+                        ImGui::SameLine();
+                        if (ImGui::Button("Fire")) {
+                            sm->setTrigger(name);
+                        }
+                        break;
+                    }
+                }
+                ImGui::PopID();
+            }
+            
+            ImGui::Separator();
+            
+            // Add new parameter
+            ImGui::InputText("##NewParam", &state.newParameterName[0], 64);
+            ImGui::SameLine();
+            const char* types[] = { "Float", "Int", "Bool", "Trigger" };
+            ImGui::SetNextItemWidth(80);
+            ImGui::Combo("##ParamType", &state.newParameterType, types, 4);
+            ImGui::SameLine();
+            if (ImGui::Button("Add Parameter")) {
+                if (!state.newParameterName.empty()) {
+                    sm->addParameter(state.newParameterName, static_cast<ParameterType>(state.newParameterType));
+                    state.newParameterName.clear();
+                }
+            }
+        }
+        
+        ImGui::Separator();
+        
+        // States Section
+        if (ImGui::CollapsingHeader("States", ImGuiTreeNodeFlags_DefaultOpen)) {
+            ImGui::Text("Current State: %s", sm->getCurrentStateName().c_str());
+            
+            ImGui::BeginChild("StateList", ImVec2(0, 150), true);
+            auto stateNames = sm->getStateNames();
+            for (size_t i = 0; i < stateNames.size(); i++) {
+                bool isSelected = (state.selectedStateIndex == static_cast<int>(i));
+                bool isCurrent = (stateNames[i] == sm->getCurrentStateName());
+                
+                if (isCurrent) {
+                    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.4f, 0.8f, 0.4f, 1.0f));
+                }
+                
+                if (ImGui::Selectable(stateNames[i].c_str(), isSelected)) {
+                    state.selectedStateIndex = static_cast<int>(i);
+                }
+                
+                if (isCurrent) {
+                    ImGui::PopStyleColor();
+                }
+            }
+            ImGui::EndChild();
+            
+            // Add new state
+            ImGui::InputText("##NewState", &state.newStateName[0], 64);
+            ImGui::SameLine();
+            if (ImGui::Button("Add State")) {
+                if (!state.newStateName.empty()) {
+                    sm->createState(state.newStateName);
+                    state.newStateName.clear();
+                }
+            }
+        }
+        
+        ImGui::Separator();
+        
+        // State Details
+        if (state.selectedStateIndex >= 0) {
+            auto stateNames = sm->getStateNames();
+            if (state.selectedStateIndex < static_cast<int>(stateNames.size())) {
+                std::string stateName = stateNames[state.selectedStateIndex];
+                ImGui::Text("Selected State: %s", stateName.c_str());
+                
+                if (ImGui::Button("Set as Default")) {
+                    sm->setDefaultState(stateName);
+                }
+                ImGui::SameLine();
+                if (ImGui::Button("Force Transition")) {
+                    sm->forceState(stateName);
+                }
+            }
+        }
+    }
+    ImGui::End();
+}
+
+// ===== Blend Tree Editor =====
+inline void drawBlendTreeEditor(BlendTree1D* tree1D, BlendTree2D* tree2D, EditorState& state) {
+    if (!state.showBlendTreeEditor) return;
+    
+    ImGui::SetNextWindowSize(ImVec2(400, 350), ImGuiCond_FirstUseEver);
+    if (ImGui::Begin("Blend Tree Editor", &state.showBlendTreeEditor)) {
+        
+        if (tree1D) {
+            ImGui::Text("1D Blend Tree: %s", tree1D->parameterName.c_str());
+            
+            // Parameter slider
+            float param = tree1D->getParameter(tree1D->parameterName);
+            if (ImGui::SliderFloat("Parameter", &param, 0.0f, 1.0f)) {
+                tree1D->setParameter(tree1D->parameterName, param);
+            }
+            
+            ImGui::Separator();
+            
+            // Motion list
+            ImGui::Text("Motions:");
+            ImGui::BeginChild("Motions1D", ImVec2(0, 150), true);
+            for (size_t i = 0; i < tree1D->motions.size(); i++) {
+                auto& motion = tree1D->motions[i];
+                ImGui::PushID(static_cast<int>(i));
+                
+                bool selected = (state.selectedBlendTreeMotion == static_cast<int>(i));
+                if (ImGui::Selectable(("Motion " + std::to_string(i)).c_str(), selected)) {
+                    state.selectedBlendTreeMotion = static_cast<int>(i);
+                }
+                ImGui::SameLine(150);
+                ImGui::Text("Threshold: %.2f", motion.threshold);
+                
+                ImGui::PopID();
+            }
+            ImGui::EndChild();
+            
+            // Visualization
+            ImGui::Text("Blend Visualization:");
+            ImVec2 size = ImVec2(ImGui::GetContentRegionAvail().x, 30);
+            ImVec2 pos = ImGui::GetCursorScreenPos();
+            ImDrawList* drawList = ImGui::GetWindowDrawList();
+            
+            drawList->AddRectFilled(pos, ImVec2(pos.x + size.x, pos.y + size.y), 
+                                    IM_COL32(40, 40, 40, 255));
+            
+            // Draw motion markers
+            for (const auto& motion : tree1D->motions) {
+                float x = pos.x + motion.threshold * size.x;
+                drawList->AddLine(ImVec2(x, pos.y), ImVec2(x, pos.y + size.y), 
+                                  IM_COL32(100, 150, 255, 255), 2.0f);
+            }
+            
+            // Draw current position
+            float currentX = pos.x + param * size.x;
+            drawList->AddTriangleFilled(
+                ImVec2(currentX - 5, pos.y + size.y),
+                ImVec2(currentX + 5, pos.y + size.y),
+                ImVec2(currentX, pos.y + size.y - 10),
+                IM_COL32(255, 200, 50, 255));
+            
+            ImGui::Dummy(size);
+        }
+        else if (tree2D) {
+            ImGui::Text("2D Blend Tree");
+            ImGui::Text("X: %s, Y: %s", tree2D->parameterX.c_str(), tree2D->parameterY.c_str());
+            
+            // Parameter sliders
+            if (ImGui::SliderFloat("X Parameter", &state.blendTreeParam1, -1.0f, 1.0f)) {
+                tree2D->setParameter(tree2D->parameterX, state.blendTreeParam1);
+            }
+            if (ImGui::SliderFloat("Y Parameter", &state.blendTreeParam2, -1.0f, 1.0f)) {
+                tree2D->setParameter(tree2D->parameterY, state.blendTreeParam2);
+            }
+            
+            ImGui::Separator();
+            
+            // 2D Visualization
+            ImGui::Text("Blend Space:");
+            ImVec2 size = ImVec2(200, 200);
+            ImVec2 pos = ImGui::GetCursorScreenPos();
+            ImDrawList* drawList = ImGui::GetWindowDrawList();
+            
+            // Background
+            drawList->AddRectFilled(pos, ImVec2(pos.x + size.x, pos.y + size.y), 
+                                    IM_COL32(30, 30, 30, 255));
+            drawList->AddRect(pos, ImVec2(pos.x + size.x, pos.y + size.y), 
+                              IM_COL32(60, 60, 60, 255));
+            
+            // Grid lines
+            drawList->AddLine(ImVec2(pos.x + size.x/2, pos.y), 
+                              ImVec2(pos.x + size.x/2, pos.y + size.y), 
+                              IM_COL32(60, 60, 60, 255));
+            drawList->AddLine(ImVec2(pos.x, pos.y + size.y/2), 
+                              ImVec2(pos.x + size.x, pos.y + size.y/2), 
+                              IM_COL32(60, 60, 60, 255));
+            
+            // Motion points
+            for (const auto& motion : tree2D->motions) {
+                float x = pos.x + (motion.positionX + 1.0f) * 0.5f * size.x;
+                float y = pos.y + (1.0f - (motion.positionY + 1.0f) * 0.5f) * size.y;
+                drawList->AddCircleFilled(ImVec2(x, y), 6.0f, IM_COL32(100, 150, 255, 255));
+            }
+            
+            // Current position
+            float cx = pos.x + (state.blendTreeParam1 + 1.0f) * 0.5f * size.x;
+            float cy = pos.y + (1.0f - (state.blendTreeParam2 + 1.0f) * 0.5f) * size.y;
+            drawList->AddCircleFilled(ImVec2(cx, cy), 8.0f, IM_COL32(255, 200, 50, 255));
+            
+            ImGui::Dummy(size);
+        }
+        else {
+            ImGui::TextColored(ImVec4(0.5f, 0.5f, 0.5f, 1), "No blend tree selected");
+        }
+    }
+    ImGui::End();
+}
+
+// ===== IK Settings Panel =====
+inline void drawIKSettingsPanel(IKManager* ikManager, Skeleton* skeleton, EditorState& state) {
+    if (!state.showIKSettings) return;
+    
+    ImGui::SetNextWindowSize(ImVec2(300, 400), ImGuiCond_FirstUseEver);
+    if (ImGui::Begin("IK Settings", &state.showIKSettings)) {
+        
+        if (!ikManager) {
+            ImGui::TextColored(ImVec4(0.5f, 0.5f, 0.5f, 1), "No IK manager available");
+            ImGui::End();
+            return;
+        }
+        
+        // Chain list
+        if (ImGui::CollapsingHeader("IK Chains", ImGuiTreeNodeFlags_DefaultOpen)) {
+            ImGui::BeginChild("IKChains", ImVec2(0, 150), true);
+            
+            size_t chainCount = ikManager->getChainCount();
+            for (size_t i = 0; i < chainCount; i++) {
+                ImGui::PushID(static_cast<int>(i));
+                
+                bool selected = (state.selectedIKChain == static_cast<int>(i));
+                std::string label = "Chain " + std::to_string(i);
+                
+                if (ImGui::Selectable(label.c_str(), selected)) {
+                    state.selectedIKChain = static_cast<int>(i);
+                }
+                
+                ImGui::PopID();
+            }
+            
+            ImGui::EndChild();
+            
+            // Add IK chain
+            if (skeleton && ImGui::Button("Add Two-Bone IK")) {
+                // Would show bone selection dialog
+            }
+            ImGui::SameLine();
+            if (ImGui::Button("Add Look-At")) {
+                // Would show bone selection dialog
+            }
+        }
+        
+        ImGui::Separator();
+        
+        // Selected chain properties
+        if (state.selectedIKChain >= 0 && state.selectedIKChain < static_cast<int>(ikManager->getChainCount())) {
+            ImGui::Text("Chain %d Properties:", state.selectedIKChain);
+            
+            // Target position
+            static Vec3 targetPos = {0, 0, 0};
+            ImGui::DragFloat3("Target", &targetPos.x, 0.1f);
+            
+            // Weight
+            static float weight = 1.0f;
+            ImGui::SliderFloat("Weight", &weight, 0.0f, 1.0f);
+            
+            // Pole target (for two-bone)
+            static Vec3 poleTarget = {0, 0, 1};
+            ImGui::DragFloat3("Pole Target", &poleTarget.x, 0.1f);
+            
+            ImGui::Separator();
+            
+            // Apply button
+            if (ImGui::Button("Apply IK")) {
+                // Apply IK with current settings
+            }
+            ImGui::SameLine();
+            if (ImGui::Button("Reset")) {
+                // Reset to bind pose
+            }
+        }
+    }
+    ImGui::End();
+}
+
+// ===== Animation Layers Panel =====
+inline void drawAnimationLayersPanel(AnimationLayerManager* layerManager, EditorState& state) {
+    if (!state.showAnimationLayers) return;
+    
+    ImGui::SetNextWindowSize(ImVec2(320, 350), ImGuiCond_FirstUseEver);
+    if (ImGui::Begin("Animation Layers", &state.showAnimationLayers)) {
+        
+        if (!layerManager) {
+            ImGui::TextColored(ImVec4(0.5f, 0.5f, 0.5f, 1), "No animation layer manager");
+            ImGui::End();
+            return;
+        }
+        
+        size_t layerCount = layerManager->getLayerCount();
+        
+        for (size_t i = 0; i < layerCount; i++) {
+            auto* layer = layerManager->getLayer(static_cast<int>(i));
+            if (!layer) continue;
+            
+            ImGui::PushID(static_cast<int>(i));
+            
+            bool open = ImGui::CollapsingHeader(layer->name.c_str(), 
+                                                 ImGuiTreeNodeFlags_DefaultOpen);
+            
+            if (open) {
+                ImGui::Indent();
+                
+                // Weight
+                ImGui::SliderFloat("Weight", &layer->weight, 0.0f, 1.0f);
+                
+                // Blend mode
+                const char* blendModes[] = { "Override", "Additive", "Multiply" };
+                int blendMode = static_cast<int>(layer->blendMode);
+                if (ImGui::Combo("Blend Mode", &blendMode, blendModes, 3)) {
+                    layer->blendMode = static_cast<AnimationBlendMode>(blendMode);
+                }
+                
+                // Mask info
+                if (layer->mask.isEmpty()) {
+                    ImGui::TextColored(ImVec4(0.5f, 0.5f, 0.5f, 1), "Mask: Full Body");
+                } else {
+                    ImGui::Text("Mask: %zu bones", layer->mask.getBoneCount());
+                }
+                
+                // Clip info
+                ImGui::Text("Clip: %s", layer->currentClip ? layer->currentClip->name.c_str() : "None");
+                
+                ImGui::Unindent();
+            }
+            
+            ImGui::PopID();
+        }
+        
+        ImGui::Separator();
+        
+        // Add layer
+        if (ImGui::Button("Add Layer")) {
+            layerManager->createLayer("NewLayer");
+        }
+    }
+    ImGui::End();
+}
+
+// ===== LOD Settings Panel =====
+inline void drawLODSettingsPanel(LODState& lodState, EditorState& editorState) {
+    if (!editorState.showLODSettings) return;
+    
+    ImGui::SetNextWindowSize(ImVec2(280, 300), ImGuiCond_FirstUseEver);
+    if (ImGui::Begin("LOD Settings", &editorState.showLODSettings)) {
+        
+        // Quality preset
+        const char* presets[] = { "Low", "Medium", "High", "Ultra" };
+        int preset = static_cast<int>(lodState.qualityPreset);
+        if (ImGui::Combo("Quality Preset", &preset, presets, 4)) {
+            lodState.qualityPreset = static_cast<LODQualityPreset>(preset);
+        }
+        
+        ImGui::Separator();
+        
+        // Manual settings
+        ImGui::Text("Manual Settings:");
+        ImGui::SliderFloat("LOD Bias", &lodState.lodBias, 0.5f, 2.0f);
+        ImGui::Text("(Lower = more detail, Higher = less)");
+        
+        ImGui::SliderFloat("Max Distance", &lodState.maxDistance, 100.0f, 2000.0f);
+        
+        ImGui::Separator();
+        
+        // Debug
+        ImGui::Checkbox("Show LOD Debug Colors", &lodState.showLODDebug);
+        if (lodState.showLODDebug) {
+            ImGui::TextColored(ImVec4(0, 1, 0, 1), "LOD 0 - Green");
+            ImGui::TextColored(ImVec4(1, 1, 0, 1), "LOD 1 - Yellow");
+            ImGui::TextColored(ImVec4(1, 0.5f, 0, 1), "LOD 2 - Orange");
+            ImGui::TextColored(ImVec4(1, 0, 0, 1), "LOD 3 - Red");
+        }
+        
+        ImGui::Separator();
+        
+        // Statistics
+        if (ImGui::CollapsingHeader("Statistics")) {
+            auto& manager = getLODManager();
+            ImGui::Text("Global LOD Bias: %.2f", manager.getGlobalLODBias());
+            ImGui::Text("Max LOD Level: %d", manager.getMaxLODLevel());
+            // Could add more stats here
+        }
+    }
+    ImGui::End();
+}
+
+// ===== Demo Menu =====
+inline void drawDemoMenu(SceneGraph& scene, EditorState& state) {
+    if (!state.showDemoMenu) return;
+    
+    ImGui::SetNextWindowSize(ImVec2(350, 400), ImGuiCond_FirstUseEver);
+    if (ImGui::Begin("Demo Scenes", &state.showDemoMenu)) {
+        ImGui::TextWrapped("Select a demo to generate. This will replace the current scene.");
+        ImGui::Separator();
+        
+        auto& demoMode = DemoMode::get();
+        auto demos = demoMode.getAvailableDemos();
+        
+        std::string currentCategory;
+        
+        for (const auto& demo : demos) {
+            // Category header
+            if (demo.category != currentCategory) {
+                if (!currentCategory.empty()) {
+                    ImGui::Separator();
+                }
+                ImGui::TextColored(ImVec4(0.6f, 0.8f, 1.0f, 1.0f), "%s", demo.category.c_str());
+                currentCategory = demo.category;
+            }
+            
+            // Demo button
+            ImGui::PushID(demo.id.c_str());
+            if (ImGui::Button(demo.name.c_str(), ImVec2(150, 0))) {
+                demoMode.generateDemo(demo.id, scene);
+                state.consoleLogs.push_back("[INFO] Generated demo: " + demo.name);
+            }
+            ImGui::SameLine();
+            ImGui::TextColored(ImVec4(0.5f, 0.5f, 0.5f, 1), "%s", demo.description.c_str());
+            ImGui::PopID();
+        }
+        
+        ImGui::Separator();
+        ImGui::TextColored(ImVec4(0.4f, 0.4f, 0.4f, 1), 
+                          "Demos are also available in Help > Demos menu");
+    }
+    ImGui::End();
+}
+
+// ===== Particle Editor State =====
+struct ParticleEditorState {
+    ParticleSystem* selectedSystem = nullptr;
+    int selectedEmitterIndex = -1;
+    int selectedPresetIndex = -1;
+    
+    // Emission shape editor
+    int shapeType = 0;
+    
+    // Color gradient editor
+    std::vector<std::pair<float, Vec4>> colorKeys;
+    
+    // Preview controls
+    bool previewPlaying = true;
+    float previewSpeed = 1.0f;
+};
+
+// ===== Particle Editor Panel =====
+inline void drawParticleEditorPanel(ParticleEditorState& particleState, EditorState& state) {
+    if (!state.showParticleEditor) return;
+    
+    ImGui::SetNextWindowSize(ImVec2(400, 600), ImGuiCond_FirstUseEver);
+    if (!ImGui::Begin("Particle Editor", &state.showParticleEditor)) {
+        ImGui::End();
+        return;
+    }
+    
+    auto& manager = getParticleManager();
+    
+    // === System List ===
+    if (ImGui::CollapsingHeader("Particle Systems", ImGuiTreeNodeFlags_DefaultOpen)) {
+        // System list
+        const auto& systems = manager.getSystems();
+        for (size_t i = 0; i < systems.size(); i++) {
+            bool selected = (particleState.selectedSystem == systems[i].get());
+            if (ImGui::Selectable(systems[i]->getName().c_str(), selected)) {
+                particleState.selectedSystem = systems[i].get();
+                particleState.selectedEmitterIndex = 0;
+            }
+        }
+        
+        // Create new system
+        ImGui::Separator();
+        if (ImGui::Button("+ New System")) {
+            particleState.selectedSystem = manager.createSystem("New Particle System");
+            particleState.selectedSystem->addEmitter();
+            particleState.selectedEmitterIndex = 0;
+        }
+        ImGui::SameLine();
+        
+        // Create from preset
+        static int presetIdx = 0;
+        auto presets = ParticlePresets::getAllPresetNames();
+        if (ImGui::Button("+ From Preset")) {
+            if (presetIdx >= 0 && presetIdx < (int)presets.size()) {
+                particleState.selectedSystem = manager.createSystem(presets[presetIdx].second);
+                auto& emitter = particleState.selectedSystem->addEmitter();
+                emitter.setSettings(ParticlePresets::getPreset(presets[presetIdx].first));
+                particleState.selectedEmitterIndex = 0;
+            }
+        }
+        ImGui::SameLine();
+        
+        std::vector<const char*> presetNames;
+        for (const auto& p : presets) presetNames.push_back(p.second.c_str());
+        ImGui::SetNextItemWidth(120);
+        ImGui::Combo("##PresetSelect", &presetIdx, presetNames.data(), (int)presetNames.size());
+    }
+    
+    // No system selected
+    if (!particleState.selectedSystem) {
+        ImGui::Text("Select or create a particle system");
+        ImGui::End();
+        return;
+    }
+    
+    ParticleSystem* sys = particleState.selectedSystem;
+    
+    // === Preview Controls ===
+    ImGui::Separator();
+    if (ImGui::Button(particleState.previewPlaying ? "Pause" : "Play")) {
+        particleState.previewPlaying = !particleState.previewPlaying;
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("Restart")) {
+        sys->play();
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("Stop")) {
+        sys->stop(true);
+    }
+    ImGui::SameLine();
+    ImGui::SetNextItemWidth(100);
+    ImGui::SliderFloat("Speed", &particleState.previewSpeed, 0.1f, 3.0f);
+    
+    // Stats
+    ImGui::Text("Particles: %zu", sys->getTotalParticleCount());
+    
+    // === Emitter Tabs ===
+    ImGui::Separator();
+    if (ImGui::BeginTabBar("EmitterTabs")) {
+        for (size_t i = 0; i < sys->getEmitterCount(); i++) {
+            char tabName[32];
+            snprintf(tabName, sizeof(tabName), "Emitter %zu", i + 1);
+            
+            if (ImGui::BeginTabItem(tabName)) {
+                particleState.selectedEmitterIndex = (int)i;
+                ImGui::EndTabItem();
+            }
+        }
+        
+        // Add emitter button
+        if (ImGui::TabItemButton("+", ImGuiTabItemFlags_Trailing)) {
+            sys->addEmitter();
+        }
+        
+        ImGui::EndTabBar();
+    }
+    
+    // === Emitter Settings ===
+    if (particleState.selectedEmitterIndex >= 0 && 
+        particleState.selectedEmitterIndex < (int)sys->getEmitterCount()) {
+        
+        ParticleEmitter* emitter = sys->getEmitter(particleState.selectedEmitterIndex);
+        ParticleEmitterSettings& settings = emitter->getSettings();
+        
+        // --- Emission ---
+        if (ImGui::CollapsingHeader("Emission", ImGuiTreeNodeFlags_DefaultOpen)) {
+            ImGui::SliderFloat("Rate", &settings.emissionRate, 0.0f, 1000.0f);
+            ImGui::SliderInt("Max Particles", &settings.maxParticles, 1, 10000);
+            ImGui::Checkbox("Looping", &settings.looping);
+            if (!settings.looping) {
+                ImGui::SliderFloat("Duration", &settings.duration, 0.1f, 30.0f);
+            }
+            ImGui::SliderFloat("Start Delay", &settings.startDelay, 0.0f, 5.0f);
+            
+            // Bursts
+            ImGui::Separator();
+            ImGui::Text("Bursts");
+            for (size_t bi = 0; bi < settings.bursts.size(); bi++) {
+                auto& burst = settings.bursts[bi];
+                ImGui::PushID((int)bi);
+                
+                ImGui::SliderFloat("Time", &burst.time, 0.0f, settings.duration);
+                ImGui::SliderInt("Min Count", &burst.minCount, 1, 500);
+                ImGui::SliderInt("Max Count", &burst.maxCount, burst.minCount, 500);
+                ImGui::SliderInt("Cycles", &burst.cycles, -1, 10);
+                if (burst.cycles != 1) {
+                    ImGui::SliderFloat("Interval", &burst.interval, 0.1f, 5.0f);
+                }
+                
+                if (ImGui::Button("Remove")) {
+                    settings.bursts.erase(settings.bursts.begin() + bi);
+                    bi--;
+                }
+                ImGui::PopID();
+                ImGui::Separator();
+            }
+            if (ImGui::Button("+ Add Burst")) {
+                ParticleBurst newBurst;
+                newBurst.minCount = 10;
+                newBurst.maxCount = 20;
+                settings.bursts.push_back(newBurst);
+            }
+        }
+        
+        // --- Shape ---
+        if (ImGui::CollapsingHeader("Shape")) {
+            const char* shapes[] = { "Point", "Sphere", "Hemisphere", "Cone", "Box", "Circle", "Edge" };
+            int shapeIdx = static_cast<int>(settings.shape.shape);
+            if (ImGui::Combo("Shape", &shapeIdx, shapes, 7)) {
+                settings.shape.shape = static_cast<EmissionShape>(shapeIdx);
+            }
+            
+            switch (settings.shape.shape) {
+                case EmissionShape::Sphere:
+                case EmissionShape::Hemisphere:
+                    ImGui::SliderFloat("Radius", &settings.shape.radius, 0.01f, 10.0f);
+                    ImGui::SliderFloat("Thickness", &settings.shape.radiusThickness, 0.0f, 1.0f);
+                    break;
+                    
+                case EmissionShape::Cone:
+                    ImGui::SliderFloat("Angle", &settings.shape.coneAngle, 0.0f, 90.0f);
+                    ImGui::SliderFloat("Radius", &settings.shape.coneRadius, 0.01f, 5.0f);
+                    ImGui::SliderFloat("Length", &settings.shape.coneLength, 0.1f, 10.0f);
+                    break;
+                    
+                case EmissionShape::Box:
+                    ImGui::DragFloat3("Size", &settings.shape.boxSize.x, 0.1f, 0.01f, 100.0f);
+                    break;
+                    
+                case EmissionShape::Circle:
+                    ImGui::SliderFloat("Radius", &settings.shape.radius, 0.01f, 10.0f);
+                    ImGui::SliderFloat("Arc", &settings.shape.arcAngle, 0.0f, 360.0f);
+                    break;
+                    
+                case EmissionShape::Edge:
+                    ImGui::SliderFloat("Length", &settings.shape.radius, 0.1f, 10.0f);
+                    break;
+                    
+                default:
+                    break;
+            }
+            
+            ImGui::Checkbox("Randomize Direction", &settings.shape.randomizeDirection);
+            ImGui::SliderFloat("Direction Spread", &settings.shape.directionalSpread, 0.0f, 1.0f);
+        }
+        
+        // --- Lifetime ---
+        if (ImGui::CollapsingHeader("Lifetime")) {
+            ImGui::SliderFloat("Life Min", &settings.startLife.min, 0.1f, 20.0f);
+            ImGui::SliderFloat("Life Max", &settings.startLife.max, settings.startLife.min, 20.0f);
+        }
+        
+        // --- Velocity ---
+        if (ImGui::CollapsingHeader("Velocity")) {
+            ImGui::SliderFloat("Speed Min", &settings.startSpeed.min, 0.0f, 50.0f);
+            ImGui::SliderFloat("Speed Max", &settings.startSpeed.max, settings.startSpeed.min, 50.0f);
+            
+            ImGui::Separator();
+            ImGui::Text("Physics");
+            ImGui::SliderFloat("Gravity", &settings.gravityMultiplier, -2.0f, 2.0f);
+            ImGui::SliderFloat("Drag", &settings.drag, 0.0f, 5.0f);
+        }
+        
+        // --- Size ---
+        if (ImGui::CollapsingHeader("Size")) {
+            ImGui::SliderFloat("Start Size Min", &settings.startSize.min, 0.01f, 5.0f);
+            ImGui::SliderFloat("Start Size Max", &settings.startSize.max, settings.startSize.min, 5.0f);
+            ImGui::SliderFloat("End Size Min", &settings.endSize.min, 0.0f, 5.0f);
+            ImGui::SliderFloat("End Size Max", &settings.endSize.max, settings.endSize.min, 5.0f);
+        }
+        
+        // --- Color ---
+        if (ImGui::CollapsingHeader("Color")) {
+            ImGui::ColorEdit4("Start Color", &settings.startColor.x);
+            ImGui::ColorEdit4("End Color", &settings.endColor.x);
+            ImGui::Checkbox("Use Gradient", &settings.useColorGradient);
+        }
+        
+        // --- Rotation ---
+        if (ImGui::CollapsingHeader("Rotation")) {
+            ImGui::SliderFloat("Start Rotation Min", &settings.startRotation.min, 0.0f, 360.0f);
+            ImGui::SliderFloat("Start Rotation Max", &settings.startRotation.max, settings.startRotation.min, 360.0f);
+            ImGui::SliderFloat("Angular Velocity Min", &settings.angularVelocity.min, -360.0f, 360.0f);
+            ImGui::SliderFloat("Angular Velocity Max", &settings.angularVelocity.max, settings.angularVelocity.min, 360.0f);
+        }
+        
+        // --- Rendering ---
+        if (ImGui::CollapsingHeader("Rendering")) {
+            ImGui::Checkbox("Billboard", &settings.billboard);
+            ImGui::Checkbox("Stretch with Velocity", &settings.stretchWithVelocity);
+            if (settings.stretchWithVelocity) {
+                ImGui::SliderFloat("Stretch Amount", &settings.velocityStretch, 0.0f, 2.0f);
+            }
+            
+            const char* sortModes[] = { "None", "By Distance", "By Age" };
+            ImGui::Combo("Sort Mode", &settings.sortMode, sortModes, 3);
+            
+            // Texture sheet
+            ImGui::Separator();
+            ImGui::Text("Texture Sheet");
+            ImGui::SliderInt("Rows", &settings.textureRows, 1, 16);
+            ImGui::SliderInt("Columns", &settings.textureCols, 1, 16);
+            ImGui::Checkbox("Animate", &settings.animateTexture);
+            if (settings.animateTexture) {
+                ImGui::SliderFloat("Anim Speed", &settings.textureAnimSpeed, 1.0f, 60.0f);
+            }
+        }
+        
+        // --- World Space ---
+        ImGui::Separator();
+        ImGui::Checkbox("World Space", &settings.worldSpace);
+        
+        // Apply preset to this emitter
+        ImGui::Separator();
+        if (ImGui::Button("Apply Preset...")) {
+            ImGui::OpenPopup("ApplyPresetPopup");
+        }
+        
+        if (ImGui::BeginPopup("ApplyPresetPopup")) {
+            auto presets = ParticlePresets::getAllPresetNames();
+            for (const auto& preset : presets) {
+                if (ImGui::MenuItem(preset.second.c_str())) {
+                    emitter->setSettings(ParticlePresets::getPreset(preset.first));
+                }
+            }
+            ImGui::EndPopup();
+        }
+        
+        // Delete emitter
+        ImGui::SameLine();
+        if (sys->getEmitterCount() > 1) {
+            if (ImGui::Button("Delete Emitter")) {
+                sys->removeEmitter(particleState.selectedEmitterIndex);
+                particleState.selectedEmitterIndex = std::max(0, particleState.selectedEmitterIndex - 1);
+            }
+        }
+    }
+    
+    // Delete system
+    ImGui::Separator();
+    if (ImGui::Button("Delete System")) {
+        manager.destroySystem(sys);
+        particleState.selectedSystem = nullptr;
+        particleState.selectedEmitterIndex = -1;
+    }
+    
+    ImGui::End();
+}
+
+// ===== Physics Editor State =====
+struct PhysicsEditorState {
+    RigidBody* selectedBody = nullptr;
+    Constraint* selectedConstraint = nullptr;
+    
+    // Creation mode
+    int createBodyType = 1;  // 0=Static, 1=Dynamic, 2=Kinematic
+    int createColliderType = 1;  // 0=Sphere, 1=Box, 2=Capsule
+    
+    // Debug visualization
+    bool showColliders = true;
+    bool showAABBs = false;
+    bool showContacts = true;
+    bool showConstraints = true;
+    bool showVelocities = false;
+    float velocityScale = 0.2f;
+    
+    // Simulation control
+    bool simulationPaused = false;
+    float timeScale = 1.0f;
+    
+    // Raycast testing
+    bool raycastTestMode = false;
+    Vec3 raycastOrigin = {0, 5, 0};
+    Vec3 raycastDirection = {0, -1, 0};
+    float raycastDistance = 100.0f;
+    RaycastHit lastRaycastHit;
+    
+    // Debug lines storage (for rendering)
+    std::vector<float> debugLineData;
+    size_t debugLineCount = 0;
+};
+
+// ===== Physics Editor Panel =====
+inline void drawPhysicsEditorPanel(PhysicsEditorState& physicsState, EditorState& state) {
+    if (!state.showPhysicsEditor) return;
+    
+    ImGui::SetNextWindowSize(ImVec2(400, 550), ImGuiCond_FirstUseEver);
+    if (!ImGui::Begin("Physics Editor", &state.showPhysicsEditor)) {
+        ImGui::End();
+        return;
+    }
+    
+    auto& world = getPhysicsWorld();
+    auto& constraints = getConstraintManager();
+    
+    // === Simulation Control ===
+    if (ImGui::CollapsingHeader("Simulation", ImGuiTreeNodeFlags_DefaultOpen)) {
+        if (ImGui::Button(physicsState.simulationPaused ? "Resume" : "Pause")) {
+            physicsState.simulationPaused = !physicsState.simulationPaused;
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Step")) {
+            world.step(1.0f / 60.0f);
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Reset")) {
+            world.clear();
+            constraints.clear();
+            physicsState.selectedBody = nullptr;
+            physicsState.selectedConstraint = nullptr;
+        }
+        
+        ImGui::SliderFloat("Time Scale", &physicsState.timeScale, 0.0f, 2.0f);
+        
+        // Stats
+        ImGui::Text("Bodies: %zu", world.getBodyCount());
+        ImGui::Text("Contacts: %zu", world.getCollisions().size());
+        ImGui::Text("Constraints: %zu", constraints.getConstraints().size());
+    }
+    
+    // === World Settings ===
+    if (ImGui::CollapsingHeader("World Settings")) {
+        auto& settings = world.getSettings();
+        
+        ImGui::DragFloat3("Gravity", &settings.gravity.x, 0.1f);
+        ImGui::SliderInt("Velocity Iterations", &settings.velocityIterations, 1, 20);
+        ImGui::SliderInt("Position Iterations", &settings.positionIterations, 1, 10);
+        ImGui::SliderFloat("Fixed Timestep", &settings.fixedTimeStep, 0.001f, 0.033f, "%.4f");
+        ImGui::Checkbox("Enable Sleeping", &settings.enableSleeping);
+        if (settings.enableSleeping) {
+            ImGui::SliderFloat("Sleep Threshold", &settings.sleepThreshold, 0.001f, 0.1f);
+            ImGui::SliderFloat("Sleep Time", &settings.sleepTime, 0.1f, 2.0f);
+        }
+        ImGui::SliderFloat("Default Friction", &settings.defaultFriction, 0.0f, 1.0f);
+        ImGui::SliderFloat("Default Restitution", &settings.defaultRestitution, 0.0f, 1.0f);
+    }
+    
+    // === Debug Visualization ===
+    if (ImGui::CollapsingHeader("Debug Visualization")) {
+        auto& debugRenderer = getPhysicsDebugRenderer();
+        
+        if (ImGui::Checkbox("Show Colliders", &physicsState.showColliders)) {
+            debugRenderer.setDrawColliders(physicsState.showColliders);
+        }
+        if (ImGui::Checkbox("Show AABBs", &physicsState.showAABBs)) {
+            debugRenderer.setDrawAABBs(physicsState.showAABBs);
+        }
+        if (ImGui::Checkbox("Show Contacts", &physicsState.showContacts)) {
+            debugRenderer.setDrawContacts(physicsState.showContacts);
+        }
+        if (ImGui::Checkbox("Show Constraints", &physicsState.showConstraints)) {
+            debugRenderer.setDrawConstraints(physicsState.showConstraints);
+        }
+        if (ImGui::Checkbox("Show Velocities", &physicsState.showVelocities)) {
+            debugRenderer.setDrawVelocities(physicsState.showVelocities);
+        }
+        if (physicsState.showVelocities) {
+            if (ImGui::SliderFloat("Velocity Scale", &physicsState.velocityScale, 0.05f, 1.0f)) {
+                debugRenderer.setVelocityScale(physicsState.velocityScale);
+            }
+        }
+        
+        ImGui::Text("Debug Lines: %zu", physicsState.debugLineCount);
+    }
+    
+    // === Raycast Testing ===
+    if (ImGui::CollapsingHeader("Raycast Testing")) {
+        ImGui::Checkbox("Enable Raycast Test", &physicsState.raycastTestMode);
+        
+        if (physicsState.raycastTestMode) {
+            ImGui::DragFloat3("Origin", &physicsState.raycastOrigin.x, 0.1f);
+            ImGui::DragFloat3("Direction", &physicsState.raycastDirection.x, 0.01f);
+            ImGui::DragFloat("Max Distance", &physicsState.raycastDistance, 1.0f, 0.1f, 1000.0f);
+            
+            if (ImGui::Button("Cast Ray")) {
+                RaycastOptions options;
+                options.maxDistance = physicsState.raycastDistance;
+                physicsState.lastRaycastHit = PhysicsRaycaster::raycast(
+                    world, 
+                    Ray(physicsState.raycastOrigin, physicsState.raycastDirection.normalized()),
+                    options
+                );
+            }
+            
+            ImGui::Separator();
+            if (physicsState.lastRaycastHit.hit) {
+                ImGui::TextColored(ImVec4(0, 1, 0, 1), "HIT!");
+                ImGui::Text("Distance: %.3f", physicsState.lastRaycastHit.distance);
+                ImGui::Text("Point: (%.2f, %.2f, %.2f)", 
+                    physicsState.lastRaycastHit.point.x,
+                    physicsState.lastRaycastHit.point.y,
+                    physicsState.lastRaycastHit.point.z);
+                ImGui::Text("Normal: (%.2f, %.2f, %.2f)",
+                    physicsState.lastRaycastHit.normal.x,
+                    physicsState.lastRaycastHit.normal.y,
+                    physicsState.lastRaycastHit.normal.z);
+                if (physicsState.lastRaycastHit.body) {
+                    ImGui::Text("Body ID: %u", physicsState.lastRaycastHit.body->getId());
+                }
+            } else {
+                ImGui::TextColored(ImVec4(0.5f, 0.5f, 0.5f, 1), "No hit");
+            }
+        }
+    }
+    
+    // === Create Body ===
+    if (ImGui::CollapsingHeader("Create Body")) {
+        const char* bodyTypes[] = { "Static", "Dynamic", "Kinematic" };
+        ImGui::Combo("Body Type", &physicsState.createBodyType, bodyTypes, 3);
+        
+        const char* colliderTypes[] = { "Sphere", "Box", "Capsule", "Plane" };
+        ImGui::Combo("Collider Type", &physicsState.createColliderType, colliderTypes, 4);
+        
+        if (ImGui::Button("Create Body")) {
+            RigidBodyType type = static_cast<RigidBodyType>(physicsState.createBodyType);
+            RigidBody* body = world.createBody(type);
+            
+            auto collider = std::make_shared<Collider>(static_cast<ColliderType>(physicsState.createColliderType));
+            
+            switch (physicsState.createColliderType) {
+                case 0: // Sphere
+                    collider->asSphere().radius = 0.5f;
+                    break;
+                case 1: // Box
+                    collider->asBox().halfExtents = Vec3(0.5f, 0.5f, 0.5f);
+                    break;
+                case 2: // Capsule
+                    collider->asCapsule().radius = 0.25f;
+                    collider->asCapsule().height = 1.0f;
+                    break;
+                case 3: // Plane
+                    collider->asPlane().normal = Vec3(0, 1, 0);
+                    collider->asPlane().distance = 0.0f;
+                    body->setType(RigidBodyType::Static);
+                    break;
+            }
+            
+            body->setCollider(collider);
+            body->setPosition(Vec3(0, 5, 0));
+            physicsState.selectedBody = body;
+        }
+        
+        ImGui::SameLine();
+        if (ImGui::Button("Create Ground")) {
+            RigidBody* ground = world.createBody(RigidBodyType::Static);
+            auto collider = std::make_shared<Collider>(ColliderType::Box);
+            collider->asBox().halfExtents = Vec3(10.0f, 0.5f, 10.0f);
+            ground->setCollider(collider);
+            ground->setPosition(Vec3(0, -0.5f, 0));
+        }
+    }
+    
+    // === Body List ===
+    if (ImGui::CollapsingHeader("Bodies", ImGuiTreeNodeFlags_DefaultOpen)) {
+        const auto& bodies = world.getBodies();
+        
+        for (size_t i = 0; i < bodies.size(); i++) {
+            RigidBody* body = bodies[i].get();
+            
+            char label[64];
+            const char* typeStr = "?";
+            switch (body->getType()) {
+                case RigidBodyType::Static: typeStr = "S"; break;
+                case RigidBodyType::Dynamic: typeStr = "D"; break;
+                case RigidBodyType::Kinematic: typeStr = "K"; break;
+            }
+            snprintf(label, sizeof(label), "[%s] Body %u%s", typeStr, body->getId(),
+                     body->isSleeping() ? " (zzz)" : "");
+            
+            bool selected = (physicsState.selectedBody == body);
+            if (ImGui::Selectable(label, selected)) {
+                physicsState.selectedBody = body;
+            }
+        }
+    }
+    
+    // === Selected Body Inspector ===
+    if (physicsState.selectedBody) {
+        RigidBody* body = physicsState.selectedBody;
+        
+        ImGui::Separator();
+        ImGui::Text("Selected Body: %u", body->getId());
+        
+        // Type
+        const char* types[] = { "Static", "Dynamic", "Kinematic" };
+        int currentType = static_cast<int>(body->getType());
+        if (ImGui::Combo("Type", &currentType, types, 3)) {
+            body->setType(static_cast<RigidBodyType>(currentType));
+        }
+        
+        // Transform
+        Vec3 pos = body->getPosition();
+        if (ImGui::DragFloat3("Position", &pos.x, 0.1f)) {
+            body->setPosition(pos);
+            body->wakeUp();
+        }
+        
+        // Mass
+        if (body->getType() == RigidBodyType::Dynamic) {
+            float mass = body->getMass();
+            if (ImGui::DragFloat("Mass", &mass, 0.1f, 0.01f, 1000.0f)) {
+                body->setMass(mass);
+            }
+        }
+        
+        // Velocity
+        if (body->getType() != RigidBodyType::Static) {
+            Vec3 linVel = body->getLinearVelocity();
+            if (ImGui::DragFloat3("Linear Velocity", &linVel.x, 0.1f)) {
+                body->setLinearVelocity(linVel);
+            }
+            
+            Vec3 angVel = body->getAngularVelocity();
+            if (ImGui::DragFloat3("Angular Velocity", &angVel.x, 0.1f)) {
+                body->setAngularVelocity(angVel);
+            }
+        }
+        
+        // Material
+        float restitution = body->getRestitution();
+        if (ImGui::SliderFloat("Restitution", &restitution, 0.0f, 1.0f)) {
+            body->setRestitution(restitution);
+        }
+        
+        float friction = body->getFriction();
+        if (ImGui::SliderFloat("Friction", &friction, 0.0f, 1.0f)) {
+            body->setFriction(friction);
+        }
+        
+        // Damping
+        float linDamp = body->getLinearDamping();
+        if (ImGui::SliderFloat("Linear Damping", &linDamp, 0.0f, 1.0f)) {
+            body->setLinearDamping(linDamp);
+        }
+        
+        float angDamp = body->getAngularDamping();
+        if (ImGui::SliderFloat("Angular Damping", &angDamp, 0.0f, 1.0f)) {
+            body->setAngularDamping(angDamp);
+        }
+        
+        // Collider
+        if (body->getCollider()) {
+            Collider* col = body->getCollider();
+            ImGui::Separator();
+            
+            const char* shapeTypes[] = { "Sphere", "Box", "Capsule", "Plane", "Mesh", "Compound" };
+            ImGui::Text("Collider: %s", shapeTypes[static_cast<int>(col->getType())]);
+            
+            switch (col->getType()) {
+                case ColliderType::Sphere:
+                    ImGui::DragFloat("Radius", &col->asSphere().radius, 0.01f, 0.01f, 100.0f);
+                    break;
+                case ColliderType::Box:
+                    ImGui::DragFloat3("Half Extents", &col->asBox().halfExtents.x, 0.01f, 0.01f, 100.0f);
+                    break;
+                case ColliderType::Capsule:
+                    ImGui::DragFloat("Radius##cap", &col->asCapsule().radius, 0.01f, 0.01f, 10.0f);
+                    ImGui::DragFloat("Height", &col->asCapsule().height, 0.01f, 0.01f, 10.0f);
+                    break;
+                default:
+                    break;
+            }
+            
+            bool isTrigger = col->isTrigger();
+            if (ImGui::Checkbox("Is Trigger", &isTrigger)) {
+                col->setTrigger(isTrigger);
+            }
+        }
+        
+        // Actions
+        ImGui::Separator();
+        if (ImGui::Button("Apply Impulse Up")) {
+            body->addImpulse(Vec3(0, 10, 0));
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Wake Up")) {
+            body->wakeUp();
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Delete")) {
+            world.destroyBody(body);
+            physicsState.selectedBody = nullptr;
+        }
+    }
+    
+    // === Constraints ===
+    if (ImGui::CollapsingHeader("Constraints")) {
+        const auto& constraintList = constraints.getConstraints();
+        
+        for (size_t i = 0; i < constraintList.size(); i++) {
+            Constraint* c = constraintList[i].get();
+            
+            const char* typeStr = "?";
+            switch (c->getType()) {
+                case ConstraintType::Distance: typeStr = "Distance"; break;
+                case ConstraintType::BallSocket: typeStr = "BallSocket"; break;
+                case ConstraintType::Hinge: typeStr = "Hinge"; break;
+                case ConstraintType::Slider: typeStr = "Slider"; break;
+                case ConstraintType::Fixed: typeStr = "Fixed"; break;
+                case ConstraintType::Spring: typeStr = "Spring"; break;
+                case ConstraintType::Cone: typeStr = "Cone"; break;
+            }
+            
+            char label[64];
+            snprintf(label, sizeof(label), "%s (%u-%u)%s", typeStr, 
+                     c->getBodyA()->getId(), c->getBodyB()->getId(),
+                     c->isBroken() ? " [BROKEN]" : "");
+            
+            bool selected = (physicsState.selectedConstraint == c);
+            if (ImGui::Selectable(label, selected)) {
+                physicsState.selectedConstraint = c;
+            }
+        }
+        
+        // Create constraint button
+        if (physicsState.selectedBody && world.getBodyCount() > 1) {
+            if (ImGui::Button("Create Distance Constraint")) {
+                // Find another body
+                for (const auto& b : world.getBodies()) {
+                    if (b.get() != physicsState.selectedBody) {
+                        constraints.createConstraint<DistanceConstraint>(
+                            physicsState.selectedBody, b.get(),
+                            Vec3(0, 0, 0), Vec3(0, 0, 0)
+                        );
+                        break;
+                    }
+                }
+            }
+            
+            if (ImGui::Button("Create Spring Constraint")) {
+                for (const auto& b : world.getBodies()) {
+                    if (b.get() != physicsState.selectedBody) {
+                        constraints.createConstraint<SpringConstraint>(
+                            physicsState.selectedBody, b.get(),
+                            Vec3(0, 0, 0), Vec3(0, 0, 0),
+                            -1.0f, 100.0f, 10.0f
+                        );
+                        break;
+                    }
+                }
+            }
+        }
+    }
+    
+    ImGui::End();
+}
+
+// ===== Terrain Editor State =====
+struct TerrainEditorState {
+    // Generation settings
+    FractalNoiseSettings noiseSettings;
+    ErosionSettings erosionSettings;
+    int selectedPreset = 1;  // Hills
+    int selectedErosionPreset = 1;  // Medium
+    bool applyErosion = true;
+    uint32_t seed = 12345;
+    
+    // Terrain settings
+    int heightmapResolution = 257;
+    float terrainSize = 256.0f;
+    float heightScale = 50.0f;
+    
+    // Brush settings
+    int brushMode = 0;  // 0=raise, 1=lower, 2=smooth, 3=flatten, 4=paint
+    float brushRadius = 5.0f;
+    float brushStrength = 0.5f;
+    int paintLayer = 0;
+    
+    // Foliage
+    int selectedFoliageLayer = -1;
+    bool showFoliageSettings = false;
+    
+    // State
+    bool terrainInitialized = false;
+    bool needsRebuild = false;
+};
+
+// ===== Terrain Editor Panel =====
+inline void drawTerrainEditorPanel(TerrainEditorState& terrainState, EditorState& state) {
+    if (!state.showTerrainEditor) return;
+    
+    ImGui::SetNextWindowSize(ImVec2(400, 600), ImGuiCond_FirstUseEver);
+    if (!ImGui::Begin("Terrain Editor", &state.showTerrainEditor)) {
+        ImGui::End();
+        return;
+    }
+    
+    auto& terrain = getTerrain();
+    auto& generator = getTerrainGenerator();
+    auto& foliage = getFoliageSystem();
+    
+    // === Terrain Generation ===
+    if (ImGui::CollapsingHeader("Generation", ImGuiTreeNodeFlags_DefaultOpen)) {
+        // Presets
+        const char* presets[] = { "Flat", "Hills", "Mountains", "Islands", "Canyon" };
+        if (ImGui::Combo("Preset", &terrainState.selectedPreset, presets, 5)) {
+            switch (terrainState.selectedPreset) {
+                case 0: terrainState.noiseSettings = TerrainGenerator::presetFlat(); break;
+                case 1: terrainState.noiseSettings = TerrainGenerator::presetHills(); break;
+                case 2: terrainState.noiseSettings = TerrainGenerator::presetMountains(); break;
+                case 3: terrainState.noiseSettings = TerrainGenerator::presetIslands(); break;
+                case 4: terrainState.noiseSettings = TerrainGenerator::presetCanyon(); break;
+            }
+        }
+        
+        ImGui::Separator();
+        ImGui::Text("Noise Settings");
+        ImGui::SliderInt("Octaves", &terrainState.noiseSettings.octaves, 1, 10);
+        ImGui::SliderFloat("Frequency", &terrainState.noiseSettings.frequency, 0.001f, 0.02f, "%.4f");
+        ImGui::SliderFloat("Amplitude", &terrainState.noiseSettings.amplitude, 0.1f, 2.0f);
+        ImGui::SliderFloat("Lacunarity", &terrainState.noiseSettings.lacunarity, 1.5f, 3.0f);
+        ImGui::SliderFloat("Persistence", &terrainState.noiseSettings.persistence, 0.2f, 0.8f);
+        ImGui::SliderFloat("Exponent", &terrainState.noiseSettings.exponent, 0.5f, 3.0f);
+        ImGui::Checkbox("Ridged Noise", &terrainState.noiseSettings.ridged);
+        if (terrainState.noiseSettings.ridged) {
+            ImGui::SliderFloat("Ridge Offset", &terrainState.noiseSettings.ridgeOffset, 0.5f, 1.5f);
+        }
+        
+        ImGui::Separator();
+        ImGui::Checkbox("Apply Erosion", &terrainState.applyErosion);
+        if (terrainState.applyErosion) {
+            const char* erosionPresets[] = { "Light", "Medium", "Heavy" };
+            if (ImGui::Combo("Erosion Preset", &terrainState.selectedErosionPreset, erosionPresets, 3)) {
+                switch (terrainState.selectedErosionPreset) {
+                    case 0: terrainState.erosionSettings = TerrainGenerator::erosionLight(); break;
+                    case 1: terrainState.erosionSettings = TerrainGenerator::erosionMedium(); break;
+                    case 2: terrainState.erosionSettings = TerrainGenerator::erosionHeavy(); break;
+                }
+            }
+            ImGui::SliderInt("Iterations", &terrainState.erosionSettings.iterations, 1000, 200000);
+        }
+        
+        ImGui::Separator();
+        ImGui::DragInt("Seed", (int*)&terrainState.seed, 1.0f);
+        ImGui::SameLine();
+        if (ImGui::Button("Random")) {
+            terrainState.seed = (uint32_t)time(nullptr);
+        }
+        
+        if (ImGui::Button("Generate Terrain", ImVec2(-1, 30))) {
+            // Initialize terrain if needed
+            if (!terrainState.terrainInitialized) {
+                TerrainSettings settings;
+                settings.heightmapResolution = terrainState.heightmapResolution;
+                settings.terrainSize = terrainState.terrainSize;
+                settings.heightScale = terrainState.heightScale;
+                terrain.initialize(settings);
+                foliage.initialize(settings.terrainSize, 16);
+                terrainState.terrainInitialized = true;
+            }
+            
+            generator.setSeed(terrainState.seed);
+            generator.generate(terrain, terrainState.noiseSettings, 
+                              terrainState.erosionSettings, terrainState.applyErosion);
+            terrainState.needsRebuild = true;
+        }
+    }
+    
+    // === Terrain Settings ===
+    if (ImGui::CollapsingHeader("Terrain Settings")) {
+        bool changed = false;
+        
+        const char* resolutions[] = { "129", "257", "513", "1025" };
+        int resIdx = 0;
+        if (terrainState.heightmapResolution == 129) resIdx = 0;
+        else if (terrainState.heightmapResolution == 257) resIdx = 1;
+        else if (terrainState.heightmapResolution == 513) resIdx = 2;
+        else if (terrainState.heightmapResolution == 1025) resIdx = 3;
+        
+        if (ImGui::Combo("Resolution", &resIdx, resolutions, 4)) {
+            const int resValues[] = { 129, 257, 513, 1025 };
+            terrainState.heightmapResolution = resValues[resIdx];
+            changed = true;
+        }
+        
+        changed |= ImGui::DragFloat("Size", &terrainState.terrainSize, 1.0f, 64.0f, 1024.0f);
+        changed |= ImGui::DragFloat("Height Scale", &terrainState.heightScale, 1.0f, 10.0f, 200.0f);
+        
+        if (changed) {
+            terrainState.terrainInitialized = false;  // Need to re-initialize
+        }
+        
+        // Stats
+        if (terrainState.terrainInitialized) {
+            ImGui::Separator();
+            ImGui::Text("Chunks: %zu", terrain.getChunkCount());
+            float minH, maxH;
+            terrain.getHeightmap().getMinMax(minH, maxH);
+            ImGui::Text("Height Range: %.2f - %.2f", minH * terrainState.heightScale, maxH * terrainState.heightScale);
+        }
+    }
+    
+    // === Material Layers ===
+    if (ImGui::CollapsingHeader("Material Layers")) {
+        if (terrainState.terrainInitialized) {
+            auto& settings = terrain.getSettings();
+            
+            for (size_t i = 0; i < settings.layers.size(); i++) {
+                auto& layer = settings.layers[i];
+                ImGui::PushID((int)i);
+                
+                if (ImGui::TreeNode(layer.name.c_str())) {
+                    ImGui::ColorEdit3("Tint", &layer.tint.x);
+                    ImGui::SliderFloat("Metallic", &layer.metallic, 0.0f, 1.0f);
+                    ImGui::SliderFloat("Roughness", &layer.roughness, 0.0f, 1.0f);
+                    ImGui::SliderFloat("Tile Scale", &layer.tileScale, 1.0f, 50.0f);
+                    
+                    ImGui::Separator();
+                    ImGui::Text("Height Blend");
+                    ImGui::SliderFloat("Min Height", &layer.minHeight, 0.0f, 1.0f);
+                    ImGui::SliderFloat("Max Height", &layer.maxHeight, 0.0f, 1.0f);
+                    ImGui::SliderFloat("Blend", &layer.blendSharpness, 0.1f, 5.0f);
+                    
+                    ImGui::Separator();
+                    ImGui::Text("Slope Blend");
+                    ImGui::SliderFloat("Min Slope", &layer.minSlope, 0.0f, 1.0f);
+                    ImGui::SliderFloat("Max Slope", &layer.maxSlope, 0.0f, 1.0f);
+                    ImGui::SliderFloat("Slope Blend", &layer.slopeBlendSharpness, 0.1f, 5.0f);
+                    
+                    ImGui::TreePop();
+                }
+                
+                ImGui::PopID();
+            }
+            
+            if (ImGui::Button("Regenerate Splatmap")) {
+                terrain.autoGenerateSplatmap();
+                terrainState.needsRebuild = true;
+            }
+        } else {
+            ImGui::TextDisabled("Generate terrain first");
+        }
+    }
+    
+    // === Foliage ===
+    if (ImGui::CollapsingHeader("Foliage")) {
+        if (terrainState.terrainInitialized) {
+            // Layer list
+            for (size_t i = 0; i < foliage.getLayerCount(); i++) {
+                auto& layer = foliage.getLayers()[i];
+                bool selected = (terrainState.selectedFoliageLayer == (int)i);
+                
+                char label[64];
+                snprintf(label, sizeof(label), "%s (%zu instances)", 
+                        layer->getSettings().name.c_str(), layer->getTotalInstances());
+                
+                if (ImGui::Selectable(label, selected)) {
+                    terrainState.selectedFoliageLayer = (int)i;
+                }
+            }
+            
+            ImGui::Separator();
+            
+            // Add foliage buttons
+            if (ImGui::Button("+ Grass")) {
+                foliage.addLayer(FoliageSystem::presetGrass());
+            }
+            ImGui::SameLine();
+            if (ImGui::Button("+ Tall Grass")) {
+                foliage.addLayer(FoliageSystem::presetTallGrass());
+            }
+            ImGui::SameLine();
+            if (ImGui::Button("+ Flowers")) {
+                foliage.addLayer(FoliageSystem::presetFlowers());
+            }
+            
+            if (ImGui::Button("+ Trees")) {
+                foliage.addLayer(FoliageSystem::presetTrees());
+            }
+            ImGui::SameLine();
+            if (ImGui::Button("+ Rocks")) {
+                foliage.addLayer(FoliageSystem::presetRocks());
+            }
+            
+            // Selected layer settings
+            if (terrainState.selectedFoliageLayer >= 0 && 
+                terrainState.selectedFoliageLayer < (int)foliage.getLayerCount()) {
+                
+                auto& layer = foliage.getLayers()[terrainState.selectedFoliageLayer];
+                auto& settings = layer->getSettings();
+                
+                ImGui::Separator();
+                ImGui::Text("Layer: %s", settings.name.c_str());
+                
+                ImGui::SliderFloat("Density", &settings.density, 0.1f, 50.0f);
+                ImGui::SliderFloat("Min Scale", &settings.minScale, 0.1f, 2.0f);
+                ImGui::SliderFloat("Max Scale", &settings.maxScale, 0.1f, 3.0f);
+                ImGui::ColorEdit3("Base Color", &settings.baseColor.x);
+                ImGui::SliderFloat("Wind Strength", &settings.windStrength, 0.0f, 2.0f);
+                ImGui::SliderFloat("Cull Distance", &settings.cullDistance, 50.0f, 500.0f);
+                
+                ImGui::Separator();
+                ImGui::Text("Placement");
+                ImGui::SliderFloat("Min Height##fol", &settings.minHeight, 0.0f, 1.0f);
+                ImGui::SliderFloat("Max Height##fol", &settings.maxHeight, 0.0f, 1.0f);
+                ImGui::SliderFloat("Max Slope##fol", &settings.maxSlope, 0.0f, 1.0f);
+                
+                if (ImGui::Button("Remove Layer")) {
+                    foliage.removeLayer(terrainState.selectedFoliageLayer);
+                    terrainState.selectedFoliageLayer = -1;
+                }
+            }
+            
+            ImGui::Separator();
+            if (ImGui::Button("Generate All Foliage", ImVec2(-1, 25))) {
+                foliage.generateAll(terrain, terrainState.seed);
+            }
+            
+            ImGui::Text("Total: %zu  Visible: %zu", 
+                       foliage.getTotalInstances(), foliage.getVisibleInstances());
+        } else {
+            ImGui::TextDisabled("Generate terrain first");
+        }
+    }
+    
+    // === Brush Tools (placeholder) ===
+    if (ImGui::CollapsingHeader("Brush Tools")) {
+        const char* brushModes[] = { "Raise", "Lower", "Smooth", "Flatten", "Paint Layer" };
+        ImGui::Combo("Mode", &terrainState.brushMode, brushModes, 5);
+        ImGui::SliderFloat("Radius", &terrainState.brushRadius, 1.0f, 50.0f);
+        ImGui::SliderFloat("Strength", &terrainState.brushStrength, 0.01f, 1.0f);
+        
+        if (terrainState.brushMode == 4) {
+            ImGui::SliderInt("Paint Layer", &terrainState.paintLayer, 0, 3);
+        }
+        
+        ImGui::TextDisabled("Click and drag on terrain to sculpt");
+    }
+    
+    ImGui::End();
+}
+
+// ===== Audio Editor State =====
+struct AudioEditorState {
+    // Selected items
+    int selectedSourceIndex = -1;
+    int selectedClipIndex = -1;
+    int selectedMixerGroup = 0;
+    
+    // Test tone
+    bool testToneEnabled = false;
+    float testToneFrequency = 440.0f;
+    float testToneDuration = 1.0f;
+    
+    // Source creation
+    float newSourcePosition[3] = {0, 0, 0};
+    float newSourceVolume = 1.0f;
+    bool newSourceLoop = false;
+    
+    // Visualization
+    bool showSourceGizmos = true;
+    bool showListenerGizmo = true;
+    
+    // Recording (placeholder)
+    bool isRecording = false;
+};
+
+// ===== Audio Editor Panel =====
+inline void drawAudioEditorPanel(AudioEditorState& audioState, EditorState& state) {
+    if (!state.showAudioEditor) return;
+    
+    ImGui::SetNextWindowSize(ImVec2(400, 550), ImGuiCond_FirstUseEver);
+    if (!ImGui::Begin("Audio Editor", &state.showAudioEditor)) {
+        ImGui::End();
+        return;
+    }
+    
+    auto& audioSystem = getAudioSystem();
+    
+    // Initialize if needed
+    if (!audioSystem.isInitialized()) {
+        audioSystem.initialize();
+    }
+    
+    // === Master Controls ===
+    if (ImGui::CollapsingHeader("Master", ImGuiTreeNodeFlags_DefaultOpen)) {
+        float masterVol = audioSystem.getMasterVolume();
+        if (ImGui::SliderFloat("Master Volume", &masterVol, 0.0f, 1.0f)) {
+            audioSystem.setMasterVolume(masterVol);
+        }
+        
+        bool muted = audioSystem.isMuted();
+        if (ImGui::Checkbox("Mute", &muted)) {
+            audioSystem.setMuted(muted);
+        }
+        
+        ImGui::SameLine();
+        if (ImGui::Button("Stop All")) {
+            audioSystem.stopAll();
+        }
+        
+        ImGui::Text("Playing: %zu sources", audioSystem.getPlayingCount());
+    }
+    
+    // === Listener ===
+    if (ImGui::CollapsingHeader("Listener")) {
+        auto& listener = audioSystem.getListener();
+        
+        Vec3 pos = listener.getPosition();
+        float posArr[3] = {pos.x, pos.y, pos.z};
+        if (ImGui::DragFloat3("Position", posArr, 0.1f)) {
+            listener.setPosition({posArr[0], posArr[1], posArr[2]});
+        }
+        
+        Vec3 fwd = listener.getForward();
+        float fwdArr[3] = {fwd.x, fwd.y, fwd.z};
+        if (ImGui::DragFloat3("Forward", fwdArr, 0.1f)) {
+            listener.setForward({fwdArr[0], fwdArr[1], fwdArr[2]});
+        }
+        
+        float listenerVol = listener.getVolume();
+        if (ImGui::SliderFloat("Volume##listener", &listenerVol, 0.0f, 1.0f)) {
+            listener.setVolume(listenerVol);
+        }
+        
+        ImGui::Checkbox("Show Listener Gizmo", &audioState.showListenerGizmo);
+    }
+    
+    // === Mixer ===
+    if (ImGui::CollapsingHeader("Mixer")) {
+        auto& mixer = audioSystem.getMixer();
+        auto& groups = mixer.getGroups();
+        
+        for (size_t i = 0; i < groups.size(); i++) {
+            auto& group = groups[i];
+            
+            ImGui::PushID((int)i);
+            
+            // Indent based on parent
+            float indent = 0.0f;
+            if (group.parentIndex >= 0) indent = 20.0f;
+            ImGui::Indent(indent);
+            
+            bool selected = (audioState.selectedMixerGroup == (int)i);
+            if (ImGui::Selectable(group.name.c_str(), selected, 0, ImVec2(100, 0))) {
+                audioState.selectedMixerGroup = (int)i;
+            }
+            
+            ImGui::SameLine();
+            ImGui::SetNextItemWidth(100);
+            ImGui::SliderFloat("##vol", &group.volume, 0.0f, 1.0f);
+            
+            ImGui::SameLine();
+            ImGui::Checkbox("M##mute", &group.mute);
+            
+            ImGui::SameLine();
+            ImGui::Checkbox("S##solo", &group.solo);
+            
+            ImGui::Unindent(indent);
+            ImGui::PopID();
+        }
+        
+        // Selected group details
+        if (audioState.selectedMixerGroup >= 0 && audioState.selectedMixerGroup < (int)groups.size()) {
+            ImGui::Separator();
+            auto& group = groups[audioState.selectedMixerGroup];
+            ImGui::Text("Group: %s", group.name.c_str());
+            ImGui::Text("Effective Volume: %.2f", mixer.getEffectiveVolume(audioState.selectedMixerGroup));
+            
+            ImGui::Checkbox("Low Pass Filter", &group.lowPassEnabled);
+            if (group.lowPassEnabled) {
+                ImGui::SliderFloat("Cutoff", &group.lowPassCutoff, 100.0f, 22000.0f, "%.0f Hz");
+            }
+            
+            ImGui::Checkbox("Reverb", &group.reverbEnabled);
+            if (group.reverbEnabled) {
+                ImGui::SliderFloat("Reverb Mix", &group.reverbMix, 0.0f, 1.0f);
+            }
+        }
+    }
+    
+    // === Audio Sources ===
+    if (ImGui::CollapsingHeader("Audio Sources", ImGuiTreeNodeFlags_DefaultOpen)) {
+        const auto& sources = audioSystem.getSources();
+        
+        // Source list
+        ImGui::BeginChild("SourceList", ImVec2(0, 120), true);
+        for (size_t i = 0; i < sources.size(); i++) {
+            const auto& source = sources[i];
+            const AudioClip* clip = source->getClip();
+            
+            char label[64];
+            snprintf(label, sizeof(label), "[%u] %s %s",
+                    source->getId(),
+                    clip ? clip->getName().c_str() : "(no clip)",
+                    source->isPlaying() ? "(playing)" : "");
+            
+            bool selected = (audioState.selectedSourceIndex == (int)i);
+            if (ImGui::Selectable(label, selected)) {
+                audioState.selectedSourceIndex = (int)i;
+            }
+        }
+        ImGui::EndChild();
+        
+        // Create source
+        if (ImGui::Button("+ Create Source")) {
+            AudioSource* source = audioSystem.createSource();
+            audioState.selectedSourceIndex = (int)audioSystem.getSources().size() - 1;
+        }
+        
+        // Selected source details
+        if (audioState.selectedSourceIndex >= 0 && audioState.selectedSourceIndex < (int)sources.size()) {
+            auto& source = sources[audioState.selectedSourceIndex];
+            auto& settings = source->getSettings();
+            
+            ImGui::Separator();
+            ImGui::Text("Source ID: %u", source->getId());
+            
+            // Clip selection (simplified)
+            ImGui::Text("Clip: %s", source->getClip() ? source->getClip()->getName().c_str() : "None");
+            
+            // Playback controls
+            if (ImGui::Button("Play")) source->play();
+            ImGui::SameLine();
+            if (ImGui::Button("Pause")) source->pause();
+            ImGui::SameLine();
+            if (ImGui::Button("Stop")) source->stop();
+            
+            // State
+            const char* stateStr = source->isPlaying() ? "Playing" :
+                                  (source->getState() == AudioState::Paused ? "Paused" : "Stopped");
+            ImGui::Text("State: %s  Time: %.2fs", stateStr, source->getTime());
+            
+            // Settings
+            ImGui::SliderFloat("Volume##src", &settings.volume, 0.0f, 1.0f);
+            ImGui::SliderFloat("Pitch", &settings.pitch, 0.1f, 3.0f);
+            ImGui::Checkbox("Loop##src", &settings.loop);
+            
+            // 3D Settings
+            ImGui::Separator();
+            ImGui::Text("3D Settings");
+            ImGui::Checkbox("Spatialize", &settings.spatialize);
+            
+            if (settings.spatialize) {
+                Vec3 pos = source->getPosition();
+                float posArr[3] = {pos.x, pos.y, pos.z};
+                if (ImGui::DragFloat3("Position##src", posArr, 0.1f)) {
+                    source->setPosition({posArr[0], posArr[1], posArr[2]});
+                }
+                
+                ImGui::SliderFloat("Min Distance", &settings.minDistance, 0.1f, 50.0f);
+                ImGui::SliderFloat("Max Distance", &settings.maxDistance, 10.0f, 1000.0f);
+                
+                const char* rolloffModes[] = { "Linear", "Logarithmic", "Custom" };
+                int rolloffIdx = (int)settings.rolloff;
+                if (ImGui::Combo("Rolloff", &rolloffIdx, rolloffModes, 3)) {
+                    settings.rolloff = (AudioRolloff)rolloffIdx;
+                }
+                
+                ImGui::SliderFloat("Doppler Level", &settings.dopplerLevel, 0.0f, 5.0f);
+            }
+            
+            // Debug info
+            ImGui::Text("Computed Volume: %.3f", source->computedVolume);
+            ImGui::Text("Pan L/R: %.2f / %.2f", source->computedPanL, source->computedPanR);
+            
+            if (ImGui::Button("Delete Source")) {
+                audioSystem.destroySource(source.get());
+                audioState.selectedSourceIndex = -1;
+            }
+        }
+    }
+    
+    // === Test Tones ===
+    if (ImGui::CollapsingHeader("Test Sounds")) {
+        ImGui::SliderFloat("Frequency", &audioState.testToneFrequency, 100.0f, 2000.0f, "%.0f Hz");
+        ImGui::SliderFloat("Duration", &audioState.testToneDuration, 0.1f, 5.0f, "%.1f s");
+        
+        if (ImGui::Button("Generate Sine")) {
+            auto clip = audioSystem.createClip("TestSine");
+            clip->generateSineWave(audioState.testToneFrequency, audioState.testToneDuration);
+            
+            AudioSource* source = audioSystem.createSource();
+            source->setClip(clip);
+            source->play();
+        }
+        
+        ImGui::SameLine();
+        if (ImGui::Button("Generate Noise")) {
+            auto clip = audioSystem.createClip("TestNoise");
+            clip->generateWhiteNoise(audioState.testToneDuration);
+            
+            AudioSource* source = audioSystem.createSource();
+            source->setClip(clip);
+            source->play();
+        }
+        
+        // Position for 3D test
+        ImGui::DragFloat3("Test Position", audioState.newSourcePosition, 0.5f);
+        
+        if (ImGui::Button("Play at Position")) {
+            auto clip = audioSystem.getClip("TestSine");
+            if (!clip) {
+                clip = audioSystem.createClip("TestSine");
+                clip->generateSineWave(440.0f, 1.0f);
+            }
+            
+            Vec3 pos = {
+                audioState.newSourcePosition[0],
+                audioState.newSourcePosition[1],
+                audioState.newSourcePosition[2]
+            };
+            audioSystem.playOneShot(clip, pos);
+        }
+    }
+    
+    // === Visualization ===
+    if (ImGui::CollapsingHeader("Visualization")) {
+        ImGui::Checkbox("Show Source Gizmos", &audioState.showSourceGizmos);
+        ImGui::Checkbox("Show Listener Gizmo##vis", &audioState.showListenerGizmo);
+    }
+    
+    ImGui::End();
+}
+
+// ===== GI Editor State =====
+struct GIEditorState {
+    // Light probe grid settings
+    float gridMin[3] = {-50, 0, -50};
+    float gridMax[3] = {50, 20, 50};
+    int gridResolution[3] = {5, 3, 5};
+    bool gridInitialized = false;
+    
+    // Baking
+    bool isBaking = false;
+    int bakeProgress = 0;
+    int bakeTotal = 0;
+    
+    // Selected items
+    int selectedLightProbeGroup = -1;
+    int selectedReflectionProbe = -1;
+    
+    // Visualization
+    bool showLightProbes = true;
+    bool showReflectionProbes = true;
+    bool showProbeInfluence = false;
+    float visualizationScale = 0.5f;
+    
+    // Preview
+    Vec3 previewPosition = {0, 1, 0};
+    Vec3 previewNormal = {0, 1, 0};
+};
+
+// ===== GI Editor Panel =====
+inline void drawGIEditorPanel(GIEditorState& giState, EditorState& state) {
+    if (!state.showGIEditor) return;
+    
+    ImGui::SetNextWindowSize(ImVec2(400, 600), ImGuiCond_FirstUseEver);
+    if (!ImGui::Begin("GI Editor", &state.showGIEditor)) {
+        ImGui::End();
+        return;
+    }
+    
+    auto& giSystem = getGISystem();
+    auto& settings = giSystem.getSettings();
+    
+    // === GI Settings ===
+    if (ImGui::CollapsingHeader("Settings", ImGuiTreeNodeFlags_DefaultOpen)) {
+        ImGui::Checkbox("Light Probes", &settings.lightProbesEnabled);
+        if (settings.lightProbesEnabled) {
+            ImGui::SliderFloat("Probe Intensity", &settings.lightProbeIntensity, 0.0f, 2.0f);
+        }
+        
+        ImGui::Checkbox("Reflection Probes", &settings.reflectionProbesEnabled);
+        if (settings.reflectionProbesEnabled) {
+            ImGui::SliderFloat("Reflection Intensity", &settings.reflectionProbeIntensity, 0.0f, 2.0f);
+        }
+        
+        ImGui::Separator();
+        ImGui::Text("Ambient");
+        ImGui::ColorEdit3("Sky Color", &settings.ambientSkyColor.x);
+        ImGui::ColorEdit3("Ground Color", &settings.ambientGroundColor.x);
+        ImGui::SliderFloat("Ambient Intensity", &settings.ambientIntensity, 0.0f, 1.0f);
+    }
+    
+    // === Light Probe Grid ===
+    if (ImGui::CollapsingHeader("Light Probe Grid", ImGuiTreeNodeFlags_DefaultOpen)) {
+        ImGui::DragFloat3("Grid Min", giState.gridMin, 1.0f);
+        ImGui::DragFloat3("Grid Max", giState.gridMax, 1.0f);
+        ImGui::DragInt3("Resolution", giState.gridResolution, 0.1f, 1, 20);
+        
+        if (ImGui::Button("Initialize Grid", ImVec2(-1, 25))) {
+            Vec3 min = {giState.gridMin[0], giState.gridMin[1], giState.gridMin[2]};
+            Vec3 max = {giState.gridMax[0], giState.gridMax[1], giState.gridMax[2]};
+            giSystem.initializeLightProbeGrid(min, max, 
+                giState.gridResolution[0], giState.gridResolution[1], giState.gridResolution[2]);
+            giState.gridInitialized = true;
+        }
+        
+        if (giSystem.hasLightProbeGrid()) {
+            auto& grid = giSystem.getLightProbeGrid();
+            ImGui::Text("Probes: %zu", grid.getProbeCount());
+            ImGui::Text("Cell Size: %.2f x %.2f x %.2f", 
+                       grid.getCellSize().x, grid.getCellSize().y, grid.getCellSize().z);
+        }
+    }
+    
+    // === Light Probe Groups ===
+    if (ImGui::CollapsingHeader("Light Probe Groups")) {
+        const auto& groups = giSystem.getLightProbeGroups();
+        
+        for (size_t i = 0; i < groups.size(); i++) {
+            const auto& group = groups[i];
+            bool selected = (giState.selectedLightProbeGroup == (int)i);
+            
+            char label[64];
+            snprintf(label, sizeof(label), "%s (%zu probes)", 
+                    group->getName().c_str(), group->getProbeCount());
+            
+            if (ImGui::Selectable(label, selected)) {
+                giState.selectedLightProbeGroup = (int)i;
+            }
+        }
+        
+        if (ImGui::Button("+ Add Group")) {
+            giSystem.addLightProbeGroup("LightProbeGroup");
+        }
+        
+        // Selected group details
+        if (giState.selectedLightProbeGroup >= 0 && 
+            giState.selectedLightProbeGroup < (int)groups.size()) {
+            
+            auto& group = groups[giState.selectedLightProbeGroup];
+            ImGui::Separator();
+            ImGui::Text("Group: %s", group->getName().c_str());
+            
+            // Add probe at position
+            static float addPos[3] = {0, 0, 0};
+            ImGui::DragFloat3("Position##addprobe", addPos, 0.1f);
+            if (ImGui::Button("Add Probe")) {
+                group->addProbe({addPos[0], addPos[1], addPos[2]});
+            }
+        }
+    }
+    
+    // === Reflection Probes ===
+    if (ImGui::CollapsingHeader("Reflection Probes")) {
+        auto& probeManager = getReflectionProbeManager();
+        auto& probes = probeManager.getProbes();
+        
+        for (size_t i = 0; i < probes.size(); i++) {
+            const auto& probe = probes[i];
+            bool selected = (giState.selectedReflectionProbe == (int)i);
+            
+            char label[64];
+            snprintf(label, sizeof(label), "%s [%d]%s", 
+                    probe->getName().c_str(), probe->getPriority(),
+                    probe->isEnabled() ? "" : " (disabled)");
+            
+            if (ImGui::Selectable(label, selected)) {
+                giState.selectedReflectionProbe = (int)i;
+            }
+        }
+        
+        if (ImGui::Button("+ Add Reflection Probe")) {
+            probeManager.createProbe("ReflectionProbe");
+        }
+        
+        // Selected probe details
+        if (giState.selectedReflectionProbe >= 0 && 
+            giState.selectedReflectionProbe < (int)probes.size()) {
+            
+            auto& probe = probes[giState.selectedReflectionProbe];
+            auto& probeSettings = probe->getSettings();
+            
+            ImGui::Separator();
+            
+            // Name input (simplified)
+            ImGui::Text("Name: %s", probe->getName().c_str());
+            
+            bool enabled = probe->isEnabled();
+            if (ImGui::Checkbox("Enabled##rp", &enabled)) {
+                probe->setEnabled(enabled);
+            }
+            
+            // Position
+            Vec3 pos = probe->getPosition();
+            float posArr[3] = {pos.x, pos.y, pos.z};
+            if (ImGui::DragFloat3("Position##rp", posArr, 0.1f)) {
+                probe->setPosition({posArr[0], posArr[1], posArr[2]});
+            }
+            
+            // Shape
+            const char* shapes[] = { "Box", "Sphere" };
+            int shapeIdx = (int)probe->getShape();
+            if (ImGui::Combo("Shape", &shapeIdx, shapes, 2)) {
+                probe->setShape((ReflectionProbeShape)shapeIdx);
+            }
+            
+            if (probe->getShape() == ReflectionProbeShape::Box) {
+                Vec3 size = probe->getBoxSize();
+                float sizeArr[3] = {size.x, size.y, size.z};
+                if (ImGui::DragFloat3("Box Size", sizeArr, 0.1f, 0.1f, 100.0f)) {
+                    probe->setBoxSize({sizeArr[0], sizeArr[1], sizeArr[2]});
+                }
+                
+                ImGui::Checkbox("Box Projection", &probeSettings.boxProjection);
+            } else {
+                float radius = probe->getSphereRadius();
+                if (ImGui::DragFloat("Sphere Radius", &radius, 0.1f, 0.1f, 1000.0f)) {
+                    probe->setSphereRadius(radius);
+                }
+            }
+            
+            float influence = probe->getInfluenceRadius();
+            if (ImGui::DragFloat("Influence Radius", &influence, 0.1f, 0.1f, 1000.0f)) {
+                probe->setInfluenceRadius(influence);
+            }
+            
+            int priority = probe->getPriority();
+            if (ImGui::DragInt("Priority", &priority)) {
+                probe->setPriority(priority);
+            }
+            
+            float intensity = probe->getIntensity();
+            if (ImGui::SliderFloat("Intensity##rp", &intensity, 0.0f, 2.0f)) {
+                probe->setIntensity(intensity);
+            }
+            
+            // Resolution
+            const char* resolutions[] = { "64", "128", "256", "512", "1024" };
+            int resIdx = 0;
+            if (probeSettings.resolution == 64) resIdx = 0;
+            else if (probeSettings.resolution == 128) resIdx = 1;
+            else if (probeSettings.resolution == 256) resIdx = 2;
+            else if (probeSettings.resolution == 512) resIdx = 3;
+            else if (probeSettings.resolution == 1024) resIdx = 4;
+            
+            if (ImGui::Combo("Resolution##rp", &resIdx, resolutions, 5)) {
+                const int resValues[] = {64, 128, 256, 512, 1024};
+                probeSettings.resolution = resValues[resIdx];
+            }
+            
+            ImGui::Checkbox("Realtime", &probeSettings.realtime);
+            
+            if (ImGui::Button("Bake Probe")) {
+                probe->setDirty(true);
+            }
+            
+            ImGui::SameLine();
+            if (ImGui::Button("Delete Probe")) {
+                probeManager.removeProbe(probe.get());
+                giState.selectedReflectionProbe = -1;
+            }
+        }
+    }
+    
+    // === Baking ===
+    if (ImGui::CollapsingHeader("Baking", ImGuiTreeNodeFlags_DefaultOpen)) {
+        ImGui::Text("Bake Settings");
+        ImGui::SliderInt("Bounces", &settings.bounces, 0, 4);
+        ImGui::SliderInt("Samples", &settings.lightProbeSamples, 16, 256);
+        ImGui::SliderInt("Rays/Sample", &settings.raysPerSample, 8, 128);
+        
+        ImGui::Separator();
+        
+        if (giState.isBaking) {
+            ImGui::Text("Baking... %d / %d", giState.bakeProgress, giState.bakeTotal);
+            float progress = giState.bakeTotal > 0 ? (float)giState.bakeProgress / giState.bakeTotal : 0;
+            ImGui::ProgressBar(progress);
+        } else {
+            if (ImGui::Button("Bake All Light Probes", ImVec2(-1, 30))) {
+                // Start baking (simplified - would be async in real implementation)
+                std::vector<GISystem::LightInfo> lights;
+                
+                // Add a default directional light for testing
+                GISystem::LightInfo sunLight;
+                sunLight.type = GISystem::LightInfo::Type::Directional;
+                sunLight.direction = Vec3(0.5f, -0.7f, 0.3f).normalized();
+                sunLight.color = {1.0f, 0.95f, 0.8f};
+                sunLight.intensity = 1.0f;
+                lights.push_back(sunLight);
+                
+                giSystem.bakeAllLightProbes(lights, [&giState](int current, int total) {
+                    giState.bakeProgress = current;
+                    giState.bakeTotal = total;
+                });
+                
+                giSystem.bakeAllLightProbeGroups(lights);
+            }
+            
+            if (ImGui::Button("Clear Baked Data")) {
+                giSystem.clearBakedData();
+            }
+        }
+    }
+    
+    // === Preview ===
+    if (ImGui::CollapsingHeader("Preview")) {
+        ImGui::DragFloat3("Position##prev", &giState.previewPosition.x, 0.1f);
+        ImGui::DragFloat3("Normal##prev", &giState.previewNormal.x, 0.01f, -1.0f, 1.0f);
+        giState.previewNormal = giState.previewNormal.normalized();
+        
+        Vec3 irradiance = giSystem.sampleIndirectDiffuse(giState.previewPosition, giState.previewNormal);
+        ImGui::Text("Irradiance: (%.3f, %.3f, %.3f)", irradiance.x, irradiance.y, irradiance.z);
+        
+        // Color preview
+        ImVec4 color(irradiance.x, irradiance.y, irradiance.z, 1.0f);
+        ImGui::ColorButton("##irr", color, 0, ImVec2(50, 50));
+    }
+    
+    // === Visualization ===
+    if (ImGui::CollapsingHeader("Visualization")) {
+        ImGui::Checkbox("Show Light Probes", &giState.showLightProbes);
+        ImGui::Checkbox("Show Reflection Probes", &giState.showReflectionProbes);
+        ImGui::Checkbox("Show Influence Volumes", &giState.showProbeInfluence);
+        ImGui::SliderFloat("Gizmo Scale", &giState.visualizationScale, 0.1f, 2.0f);
+    }
+    
+    ImGui::End();
+}
+
+// ===== Video Export State =====
+struct VideoExportState {
+    VideoExportSettings settings;
+    
+    // UI state
+    int formatIndex = 0;
+    int qualityIndex = 2;  // High
+    int resolutionPreset = 0;  // Custom
+    
+    // Recording state
+    bool showAdvanced = false;
+    double recordStartTime = 0.0;
+    double lastFrameTime = 0.0;
+    float avgFrameTime = 0.0f;
+    
+    VideoExportState() {
+        settings.outputPath = "output.mp4";
+        settings.width = 1920;
+        settings.height = 1080;
+        settings.frameRate = 30;
+        settings.startTime = 0.0f;
+        settings.endTime = 10.0f;
+    }
+};
+
+// ===== Video Export Panel =====
+inline void drawVideoExportPanel(VideoExportState& exportState, EditorState& state) {
+    if (!state.showVideoExport) return;
+    
+    ImGui::SetNextWindowSize(ImVec2(380, 500), ImGuiCond_FirstUseEver);
+    if (!ImGui::Begin("Video Export", &state.showVideoExport)) {
+        ImGui::End();
+        return;
+    }
+    
+    auto& recorder = getRecordingManager();
+    auto& settings = exportState.settings;
+    RecordingState recState = recorder.getState();
+    
+    bool isRecording = (recState == RecordingState::Recording || recState == RecordingState::Paused);
+    
+    // === Output Settings ===
+    if (ImGui::CollapsingHeader("Output", ImGuiTreeNodeFlags_DefaultOpen)) {
+        // Format
+        const char* formats[] = {
+            "MP4 (H.264)", "MP4 (H.265)", "WebM (VP9)", "AVI (MJPEG)",
+            "GIF", "PNG Sequence", "JPG Sequence", "TGA Sequence"
+        };
+        
+        if (ImGui::Combo("Format", &exportState.formatIndex, formats, 8)) {
+            const VideoFormat formatValues[] = {
+                VideoFormat::MP4_H264, VideoFormat::MP4_H265,
+                VideoFormat::WebM_VP9, VideoFormat::AVI_MJPEG,
+                VideoFormat::GIF,
+                VideoFormat::ImageSequence_PNG, VideoFormat::ImageSequence_JPG,
+                VideoFormat::ImageSequence_TGA
+            };
+            settings.format = formatValues[exportState.formatIndex];
+        }
+        
+        // Quality
+        const char* qualities[] = { "Low", "Medium", "High", "Lossless" };
+        if (ImGui::Combo("Quality", &exportState.qualityIndex, qualities, 4)) {
+            settings.quality = (VideoQuality)exportState.qualityIndex;
+        }
+        
+        // Output path
+        char pathBuf[256];
+        strncpy(pathBuf, settings.outputPath.c_str(), sizeof(pathBuf) - 1);
+        if (ImGui::InputText("Output File", pathBuf, sizeof(pathBuf))) {
+            settings.outputPath = pathBuf;
+        }
+    }
+    
+    // === Resolution ===
+    if (ImGui::CollapsingHeader("Resolution", ImGuiTreeNodeFlags_DefaultOpen)) {
+        const char* presets[] = {
+            "Custom", "720p (1280x720)", "1080p (1920x1080)",
+            "1440p (2560x1440)", "4K (3840x2160)"
+        };
+        
+        if (ImGui::Combo("Preset", &exportState.resolutionPreset, presets, 5)) {
+            switch (exportState.resolutionPreset) {
+                case 1: settings.width = 1280; settings.height = 720; break;
+                case 2: settings.width = 1920; settings.height = 1080; break;
+                case 3: settings.width = 2560; settings.height = 1440; break;
+                case 4: settings.width = 3840; settings.height = 2160; break;
+            }
+        }
+        
+        if (exportState.resolutionPreset == 0) {
+            ImGui::DragInt("Width", &settings.width, 1, 64, 7680);
+            ImGui::DragInt("Height", &settings.height, 1, 64, 4320);
+        } else {
+            ImGui::Text("Resolution: %d x %d", settings.width, settings.height);
+        }
+        
+        ImGui::Checkbox("Match Viewport", &settings.matchViewport);
+    }
+    
+    // === Timeline ===
+    if (ImGui::CollapsingHeader("Timeline", ImGuiTreeNodeFlags_DefaultOpen)) {
+        ImGui::DragInt("Frame Rate", &settings.frameRate, 1, 1, 120);
+        ImGui::DragFloat("Start Time", &settings.startTime, 0.1f, 0.0f, 3600.0f, "%.2f s");
+        ImGui::DragFloat("End Time", &settings.endTime, 0.1f, 0.0f, 3600.0f, "%.2f s");
+        
+        float duration = settings.endTime - settings.startTime;
+        int totalFrames = settings.getTotalFrames();
+        ImGui::Text("Duration: %.2f s  |  Frames: %d", duration, totalFrames);
+    }
+    
+    // === Advanced ===
+    if (ImGui::CollapsingHeader("Advanced")) {
+        ImGui::DragInt("Bitrate (bps)", &settings.bitrate, 100000, 500000, 50000000);
+        ImGui::DragInt("Keyframe Interval", &settings.keyframeInterval, 1, 1, 300);
+        ImGui::Checkbox("Capture Every Frame", &settings.captureEveryFrame);
+        ImGui::Checkbox("Multi-threaded", &settings.multiThreaded);
+        if (settings.multiThreaded) {
+            ImGui::DragInt("Encoder Threads", &settings.encoderThreads, 1, 1, 16);
+        }
+        
+        // Estimated file size
+        size_t estSize = recorder.getEstimatedFileSize();
+        if (estSize > 1024 * 1024 * 1024) {
+            ImGui::Text("Est. Size: %.2f GB", estSize / (1024.0 * 1024.0 * 1024.0));
+        } else if (estSize > 1024 * 1024) {
+            ImGui::Text("Est. Size: %.2f MB", estSize / (1024.0 * 1024.0));
+        } else {
+            ImGui::Text("Est. Size: %.2f KB", estSize / 1024.0);
+        }
+    }
+    
+    ImGui::Separator();
+    
+    // === Recording Controls ===
+    if (!isRecording) {
+        ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.8f, 0.2f, 0.2f, 1.0f));
+        if (ImGui::Button("Start Recording", ImVec2(-1, 35))) {
+            exportState.recordStartTime = 0.0;
+            recorder.startRecording(settings);
+        }
+        ImGui::PopStyleColor();
+    } else {
+        // Progress
+        float progress = recorder.getProgress();
+        ImGui::ProgressBar(progress, ImVec2(-1, 20));
+        
+        ImGui::Text("Frame: %d / %d", (int)recorder.getFrameCount(), recorder.getTotalFrames());
+        
+        // ETA
+        if (exportState.avgFrameTime > 0.0f) {
+            double eta = recorder.getEstimatedTimeRemaining(exportState.avgFrameTime);
+            if (eta > 60.0) {
+                ImGui::Text("ETA: %.1f min", eta / 60.0);
+            } else {
+                ImGui::Text("ETA: %.1f s", eta);
+            }
+        }
+        
+        // Controls
+        if (recState == RecordingState::Recording) {
+            if (ImGui::Button("Pause", ImVec2(100, 30))) {
+                recorder.pauseRecording();
+            }
+        } else if (recState == RecordingState::Paused) {
+            if (ImGui::Button("Resume", ImVec2(100, 30))) {
+                recorder.resumeRecording();
+            }
+        }
+        
+        ImGui::SameLine();
+        ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.6f, 0.2f, 0.2f, 1.0f));
+        if (ImGui::Button("Stop", ImVec2(100, 30))) {
+            recorder.stopRecording();
+        }
+        ImGui::PopStyleColor();
+    }
+    
+    // State indicator
+    ImGui::Separator();
+    const char* stateStr = "Idle";
+    ImVec4 stateColor = ImVec4(0.5f, 0.5f, 0.5f, 1.0f);
+    
+    switch (recState) {
+        case RecordingState::Preparing:
+            stateStr = "Preparing...";
+            stateColor = ImVec4(1.0f, 0.8f, 0.0f, 1.0f);
+            break;
+        case RecordingState::Recording:
+            stateStr = "Recording";
+            stateColor = ImVec4(1.0f, 0.2f, 0.2f, 1.0f);
+            break;
+        case RecordingState::Paused:
+            stateStr = "Paused";
+            stateColor = ImVec4(1.0f, 0.6f, 0.0f, 1.0f);
+            break;
+        case RecordingState::Finalizing:
+            stateStr = "Finalizing...";
+            stateColor = ImVec4(0.0f, 0.8f, 0.0f, 1.0f);
+            break;
+        case RecordingState::Complete:
+            stateStr = "Complete";
+            stateColor = ImVec4(0.0f, 1.0f, 0.0f, 1.0f);
+            break;
+        case RecordingState::Error:
+            stateStr = "Error";
+            stateColor = ImVec4(1.0f, 0.0f, 0.0f, 1.0f);
+            break;
+        default:
+            break;
+    }
+    
+    ImGui::TextColored(stateColor, "Status: %s", stateStr);
+    
+    if (recState == RecordingState::Error) {
+        ImGui::TextColored(ImVec4(1, 0, 0, 1), "Error: %s", recorder.getError().c_str());
+    }
+    
+    ImGui::End();
+}
+
+// ===== Network Panel State =====
+struct NetworkPanelState {
+    // Connection settings
+    char serverAddress[64] = "127.0.0.1";
+    int serverPort = 7777;
+    
+    // Selected connection
+    int selectedConnection = -1;
+    
+    // Stats
+    bool showStats = true;
+};
+
+// ===== Network Panel =====
+inline void drawNetworkPanel(NetworkPanelState& netState, EditorState& state) {
+    if (!state.showNetworkPanel) return;
+    
+    ImGui::SetNextWindowSize(ImVec2(350, 450), ImGuiCond_FirstUseEver);
+    if (!ImGui::Begin("Network", &state.showNetworkPanel)) {
+        ImGui::End();
+        return;
+    }
+    
+    auto& netMgr = getNetworkManager();
+    NetworkRole role = netMgr.getRole();
+    
+    // === Status ===
+    const char* roleStr = "None";
+    ImVec4 roleColor = ImVec4(0.5f, 0.5f, 0.5f, 1.0f);
+    
+    switch (role) {
+        case NetworkRole::Server:
+            roleStr = "Server";
+            roleColor = ImVec4(0.2f, 0.8f, 0.2f, 1.0f);
+            break;
+        case NetworkRole::Client:
+            roleStr = "Client";
+            roleColor = ImVec4(0.2f, 0.6f, 1.0f, 1.0f);
+            break;
+        case NetworkRole::Host:
+            roleStr = "Host";
+            roleColor = ImVec4(0.8f, 0.6f, 0.2f, 1.0f);
+            break;
+        default:
+            break;
+    }
+    
+    ImGui::TextColored(roleColor, "Role: %s", roleStr);
+    
+    if (!netMgr.isActive()) {
+        // === Connection Setup ===
+        ImGui::Separator();
+        ImGui::Text("Connection Setup");
+        
+        ImGui::InputText("Address", netState.serverAddress, sizeof(netState.serverAddress));
+        ImGui::InputInt("Port", &netState.serverPort);
+        
+        if (ImGui::Button("Start Server", ImVec2(150, 25))) {
+            netMgr.startServer((uint16_t)netState.serverPort);
+        }
+        
+        ImGui::SameLine();
+        if (ImGui::Button("Start Host", ImVec2(150, 25))) {
+            netMgr.startHost((uint16_t)netState.serverPort);
+        }
+        
+        if (ImGui::Button("Connect as Client", ImVec2(-1, 25))) {
+            netMgr.startClient(netState.serverAddress, (uint16_t)netState.serverPort);
+        }
+    } else {
+        // === Active Network ===
+        ImGui::Separator();
+        
+        if (ImGui::Button("Disconnect", ImVec2(-1, 25))) {
+            netMgr.stop();
+        }
+        
+        // Server info
+        if (netMgr.isServer()) {
+            auto* server = netMgr.getServer();
+            if (server) {
+                ImGui::Text("Clients: %zu", server->getClientCount());
+                
+                // Connection list
+                if (ImGui::CollapsingHeader("Connections", ImGuiTreeNodeFlags_DefaultOpen)) {
+                    const auto& connections = server->getConnections();
+                    
+                    for (const auto& [id, conn] : connections) {
+                        char label[64];
+                        snprintf(label, sizeof(label), "[%u] %s:%u", 
+                                id, conn.address.c_str(), conn.port);
+                        
+                        bool selected = (netState.selectedConnection == (int)id);
+                        if (ImGui::Selectable(label, selected)) {
+                            netState.selectedConnection = (int)id;
+                        }
+                    }
+                }
+                
+                // Selected connection details
+                if (netState.selectedConnection > 0) {
+                    auto* conn = server->getConnection(netState.selectedConnection);
+                    if (conn) {
+                        ImGui::Separator();
+                        ImGui::Text("Connection %u", conn->id);
+                        ImGui::Text("Address: %s:%u", conn->address.c_str(), conn->port);
+                        ImGui::Text("RTT: %.1f ms", conn->roundTripTime * 1000.0);
+                        ImGui::Text("Sent: %llu bytes", (unsigned long long)conn->bytesSent);
+                        ImGui::Text("Received: %llu bytes", (unsigned long long)conn->bytesReceived);
+                        
+                        if (ImGui::Button("Kick")) {
+                            server->disconnectClient(conn->id);
+                            netState.selectedConnection = -1;
+                        }
+                    }
+                }
+            }
+        }
+        
+        // Client info
+        if (netMgr.isClient()) {
+            auto* client = netMgr.getClient();
+            if (client) {
+                const char* stateStr = "Unknown";
+                switch (client->getConnectionState()) {
+                    case ConnectionState::Connecting: stateStr = "Connecting..."; break;
+                    case ConnectionState::Connected: stateStr = "Connected"; break;
+                    case ConnectionState::Disconnected: stateStr = "Disconnected"; break;
+                    case ConnectionState::Disconnecting: stateStr = "Disconnecting..."; break;
+                }
+                ImGui::Text("State: %s", stateStr);
+                
+                auto* conn = client->getConnection(SERVER_CONNECTION);
+                if (conn) {
+                    ImGui::Text("RTT: %.1f ms", conn->roundTripTime * 1000.0);
+                    ImGui::Text("Sent: %llu bytes", (unsigned long long)conn->bytesSent);
+                    ImGui::Text("Received: %llu bytes", (unsigned long long)conn->bytesReceived);
+                }
+            }
+        }
+    }
+    
+    ImGui::End();
+}
+
+// ===== Script Editor State =====
+struct ScriptEditorState {
+    // Selected class/instance
+    int selectedClass = -1;
+    int selectedInstance = -1;
+    
+    // New class
+    char newClassName[64] = "MyScript";
+    
+    // Code editor (simplified)
+    char codeBuffer[4096] = "";
+    bool codeModified = false;
+    
+    // Console
+    std::vector<std::string> consoleLog;
+    char consoleInput[256] = "";
+};
+
+// ===== Script Editor Panel =====
+inline void drawScriptEditorPanel(ScriptEditorState& scriptState, EditorState& state) {
+    if (!state.showScriptEditor) return;
+    
+    ImGui::SetNextWindowSize(ImVec2(500, 600), ImGuiCond_FirstUseEver);
+    if (!ImGui::Begin("Script Editor", &state.showScriptEditor)) {
+        ImGui::End();
+        return;
+    }
+    
+    auto& scriptEngine = getScriptEngine();
+    
+    // Initialize if needed
+    if (!scriptEngine.isInitialized()) {
+        if (ImGui::Button("Initialize Script Engine", ImVec2(-1, 30))) {
+            scriptEngine.initialize();
+        }
+        ImGui::End();
+        return;
+    }
+    
+    // === Script Classes ===
+    if (ImGui::CollapsingHeader("Script Classes", ImGuiTreeNodeFlags_DefaultOpen)) {
+        const auto& classes = scriptEngine.getClasses();
+        
+        int idx = 0;
+        for (const auto& [name, cls] : classes) {
+            bool selected = (scriptState.selectedClass == idx);
+            
+            char label[128];
+            snprintf(label, sizeof(label), "%s (%zu props, %zu RPCs)",
+                    cls->name.c_str(), cls->properties.size(), cls->rpcs.size());
+            
+            if (ImGui::Selectable(label, selected)) {
+                scriptState.selectedClass = idx;
+            }
+            idx++;
+        }
+        
+        // Create new class
+        ImGui::Separator();
+        ImGui::InputText("Class Name", scriptState.newClassName, sizeof(scriptState.newClassName));
+        if (ImGui::Button("Create Class")) {
+            scriptEngine.registerClass(scriptState.newClassName);
+        }
+        
+        // Selected class details
+        if (scriptState.selectedClass >= 0) {
+            int i = 0;
+            for (auto& [name, cls] : scriptEngine.getClasses()) {
+                if (i == scriptState.selectedClass) {
+                    ImGui::Separator();
+                    ImGui::Text("Class: %s", cls->name.c_str());
+                    
+                    // Properties
+                    if (ImGui::TreeNode("Properties")) {
+                        for (auto& prop : cls->properties) {
+                            ImGui::BulletText("%s%s", prop.name.c_str(),
+                                            prop.networked ? " [networked]" : "");
+                        }
+                        
+                        // Add property
+                        static char propName[64] = "";
+                        ImGui::InputText("##propname", propName, sizeof(propName));
+                        ImGui::SameLine();
+                        if (ImGui::Button("Add Property")) {
+                            ScriptProperty prop;
+                            prop.name = propName;
+                            cls->properties.push_back(prop);
+                            propName[0] = 0;
+                        }
+                        
+                        ImGui::TreePop();
+                    }
+                    
+                    // RPCs
+                    if (ImGui::TreeNode("RPCs")) {
+                        for (auto& rpc : cls->rpcs) {
+                            const char* auth = "";
+                            if (rpc.serverOnly) auth = " [server]";
+                            else if (rpc.clientOnly) auth = " [client]";
+                            ImGui::BulletText("%s%s", rpc.name.c_str(), auth);
+                        }
+                        
+                        // Add RPC
+                        static char rpcName[64] = "";
+                        static bool rpcServerOnly = false;
+                        ImGui::InputText("##rpcname", rpcName, sizeof(rpcName));
+                        ImGui::SameLine();
+                        ImGui::Checkbox("Server Only", &rpcServerOnly);
+                        ImGui::SameLine();
+                        if (ImGui::Button("Add RPC")) {
+                            ScriptRPCDef rpc;
+                            rpc.name = rpcName;
+                            rpc.serverOnly = rpcServerOnly;
+                            cls->rpcs.push_back(rpc);
+                            rpcName[0] = 0;
+                        }
+                        
+                        ImGui::TreePop();
+                    }
+                    break;
+                }
+                i++;
+            }
+        }
+    }
+    
+    // === Network Integration ===
+    if (ImGui::CollapsingHeader("Network Integration")) {
+        bool networkEnabled = scriptEngine.isNetworkEnabled();
+        if (ImGui::Checkbox("Enable Network Sync", &networkEnabled)) {
+            scriptEngine.setNetworkEnabled(networkEnabled);
+        }
+        
+        ImGui::TextDisabled("When enabled:");
+        ImGui::BulletText("Networked properties auto-sync");
+        ImGui::BulletText("RPC calls go over network");
+        ImGui::BulletText("Authority checks enforced");
+    }
+    
+    // === Console ===
+    if (ImGui::CollapsingHeader("Console")) {
+        // Output
+        ImGui::BeginChild("ConsoleOutput", ImVec2(0, 100), true);
+        for (const auto& line : scriptState.consoleLog) {
+            ImGui::TextUnformatted(line.c_str());
+        }
+        ImGui::EndChild();
+        
+        // Input
+        ImGui::InputText("##consoleinput", scriptState.consoleInput, sizeof(scriptState.consoleInput));
+        ImGui::SameLine();
+        if (ImGui::Button("Run") || 
+            (ImGui::IsItemFocused() && ImGui::IsKeyPressed(ImGuiKey_Enter))) {
+            if (strlen(scriptState.consoleInput) > 0) {
+                scriptState.consoleLog.push_back(std::string("> ") + scriptState.consoleInput);
+                
+                if (scriptEngine.loadScriptString(scriptState.consoleInput, "console")) {
+                    scriptState.consoleLog.push_back("OK");
+                } else {
+                    scriptState.consoleLog.push_back("Error: " + scriptEngine.getLastError());
+                }
+                
+                scriptState.consoleInput[0] = 0;
+            }
+        }
+        
+        ImGui::SameLine();
+        if (ImGui::Button("Clear")) {
+            scriptState.consoleLog.clear();
+        }
+    }
+    
+    // === Help ===
+    if (ImGui::CollapsingHeader("Lua API Reference")) {
+        ImGui::TextDisabled("Built-in Types:");
+        ImGui::BulletText("Vec3(x, y, z)");
+        ImGui::BulletText("Quat(x, y, z, w)");
+        
+        ImGui::TextDisabled("Entity Functions:");
+        ImGui::BulletText("Entity.getPosition(id)");
+        ImGui::BulletText("Entity.setPosition(id, vec3)");
+        ImGui::BulletText("Entity.getRotation(id)");
+        ImGui::BulletText("Entity.setRotation(id, quat)");
+        
+        ImGui::TextDisabled("Network Functions:");
+        ImGui::BulletText("Network.isServer()");
+        ImGui::BulletText("Network.isClient()");
+        ImGui::BulletText("Network.hasAuthority(instance)");
+        ImGui::BulletText("Network.rpc(instance, name, ...)");
+        
+        ImGui::TextDisabled("Debug Functions:");
+        ImGui::BulletText("print(...)");
+        ImGui::BulletText("Debug.drawLine(from, to, color)");
+    }
+    
+    ImGui::End();
+}
+
+// ===== AI Editor State =====
+struct AIEditorState {
+    // NavMesh
+    NavMeshBuildSettings navMeshSettings;
+    bool navMeshBuilt = false;
+    bool showNavMesh = true;
+    bool showNavMeshBounds = true;
+    
+    // Build from terrain
+    bool buildFromTerrain = true;
+    
+    // Agents
+    int selectedAgent = -1;
+    float agentTestDestination[3] = {0, 0, 0};
+    
+    // Path testing
+    float pathStart[3] = {0, 0, 0};
+    float pathEnd[3] = {10, 0, 10};
+    bool showTestPath = false;
+    NavPath testPath;
+    
+    // Behavior Tree
+    int selectedBTNode = -1;
+};
+
+// ===== AI Editor Panel =====
+inline void drawAIEditorPanel(AIEditorState& aiState, EditorState& state) {
+    if (!state.showAIEditor) return;
+    
+    ImGui::SetNextWindowSize(ImVec2(400, 600), ImGuiCond_FirstUseEver);
+    if (!ImGui::Begin("AI Editor", &state.showAIEditor)) {
+        ImGui::End();
+        return;
+    }
+    
+    auto& navMesh = getNavMesh();
+    auto& agentManager = getNavAgentManager();
+    
+    // === NavMesh ===
+    if (ImGui::CollapsingHeader("NavMesh", ImGuiTreeNodeFlags_DefaultOpen)) {
+        auto& settings = aiState.navMeshSettings;
+        
+        ImGui::Text("Agent Properties");
+        ImGui::SliderFloat("Height", &settings.agentHeight, 0.5f, 4.0f);
+        ImGui::SliderFloat("Radius", &settings.agentRadius, 0.1f, 2.0f);
+        ImGui::SliderFloat("Max Climb", &settings.agentMaxClimb, 0.1f, 1.0f);
+        ImGui::SliderFloat("Max Slope", &settings.agentMaxSlope, 15.0f, 60.0f);
+        
+        ImGui::Separator();
+        ImGui::Text("Voxelization");
+        ImGui::SliderFloat("Cell Size", &settings.cellSize, 0.1f, 1.0f);
+        ImGui::SliderFloat("Cell Height", &settings.cellHeight, 0.05f, 0.5f);
+        
+        ImGui::Separator();
+        
+        ImGui::Checkbox("Build from Terrain", &aiState.buildFromTerrain);
+        
+        if (ImGui::Button("Build NavMesh", ImVec2(-1, 30))) {
+            if (aiState.buildFromTerrain) {
+                // Would build from terrain heightmap
+                // For now, create a simple test grid
+                std::vector<Vec3> verts;
+                std::vector<int> indices;
+                
+                // Create flat ground plane
+                int gridSize = 20;
+                float gridSpacing = 2.0f;
+                float halfSize = gridSize * gridSpacing * 0.5f;
+                
+                for (int z = 0; z <= gridSize; z++) {
+                    for (int x = 0; x <= gridSize; x++) {
+                        float wx = x * gridSpacing - halfSize;
+                        float wz = z * gridSpacing - halfSize;
+                        verts.push_back(Vec3(wx, 0, wz));
+                    }
+                }
+                
+                for (int z = 0; z < gridSize; z++) {
+                    for (int x = 0; x < gridSize; x++) {
+                        int i = z * (gridSize + 1) + x;
+                        indices.push_back(i);
+                        indices.push_back(i + 1);
+                        indices.push_back(i + gridSize + 1);
+                        
+                        indices.push_back(i + 1);
+                        indices.push_back(i + gridSize + 2);
+                        indices.push_back(i + gridSize + 1);
+                    }
+                }
+                
+                navMesh.build(verts, indices, settings);
+                aiState.navMeshBuilt = true;
+            }
+        }
+        
+        if (navMesh.isValid()) {
+            ImGui::Text("Vertices: %zu", navMesh.getVertexCount());
+            ImGui::Text("Polygons: %zu", navMesh.getPolyCount());
+            ImGui::Text("Edges: %zu", navMesh.getEdges().size());
+            
+            Vec3 min = navMesh.getMinBounds();
+            Vec3 max = navMesh.getMaxBounds();
+            ImGui::Text("Bounds: (%.1f,%.1f,%.1f) - (%.1f,%.1f,%.1f)",
+                       min.x, min.y, min.z, max.x, max.y, max.z);
+        }
+        
+        ImGui::Checkbox("Show NavMesh", &aiState.showNavMesh);
+        ImGui::Checkbox("Show Bounds", &aiState.showNavMeshBounds);
+        
+        if (ImGui::Button("Clear NavMesh")) {
+            navMesh.clear();
+            aiState.navMeshBuilt = false;
+        }
+    }
+    
+    // === Agents ===
+    if (ImGui::CollapsingHeader("Agents")) {
+        const auto& agents = agentManager.getAgents();
+        
+        // Agent list
+        for (size_t i = 0; i < agents.size(); i++) {
+            const auto& agent = agents[i];
+            
+            char label[64];
+            const char* stateStr = "Idle";
+            switch (agent->getState()) {
+                case NavAgentState::Moving: stateStr = "Moving"; break;
+                case NavAgentState::Arrived: stateStr = "Arrived"; break;
+                case NavAgentState::Stuck: stateStr = "Stuck"; break;
+                default: break;
+            }
+            snprintf(label, sizeof(label), "Agent %u [%s]", agent->getId(), stateStr);
+            
+            bool selected = (aiState.selectedAgent == (int)i);
+            if (ImGui::Selectable(label, selected)) {
+                aiState.selectedAgent = (int)i;
+            }
+        }
+        
+        if (ImGui::Button("+ Create Agent")) {
+            auto* agent = agentManager.createAgent();
+            agent->setPosition(Vec3(0, 0, 0));
+            aiState.selectedAgent = (int)agents.size() - 1;
+        }
+        
+        // Selected agent details
+        if (aiState.selectedAgent >= 0 && aiState.selectedAgent < (int)agents.size()) {
+            auto& agent = agents[aiState.selectedAgent];
+            auto& settings = agent->getSettings();
+            
+            ImGui::Separator();
+            ImGui::Text("Agent %u", agent->getId());
+            
+            // Position
+            Vec3 pos = agent->getPosition();
+            float posArr[3] = {pos.x, pos.y, pos.z};
+            if (ImGui::DragFloat3("Position##agent", posArr, 0.1f)) {
+                agent->setPosition({posArr[0], posArr[1], posArr[2]});
+            }
+            
+            // Rotation
+            float rot = agent->getRotation();
+            if (ImGui::SliderFloat("Rotation", &rot, 0, 360)) {
+                agent->setRotation(rot);
+            }
+            
+            // Settings
+            ImGui::SliderFloat("Speed", &settings.speed, 1.0f, 20.0f);
+            ImGui::SliderFloat("Acceleration", &settings.acceleration, 1.0f, 50.0f);
+            ImGui::SliderFloat("Angular Speed", &settings.angularSpeed, 90.0f, 720.0f);
+            ImGui::SliderFloat("Stopping Distance", &settings.stoppingDistance, 0.01f, 1.0f);
+            
+            // Destination
+            ImGui::DragFloat3("Destination", aiState.agentTestDestination, 0.1f);
+            if (ImGui::Button("Go To")) {
+                agent->setDestination({
+                    aiState.agentTestDestination[0],
+                    aiState.agentTestDestination[1],
+                    aiState.agentTestDestination[2]
+                });
+            }
+            ImGui::SameLine();
+            if (ImGui::Button("Stop##agent")) {
+                agent->stop();
+            }
+            
+            // Path info
+            if (agent->hasPath()) {
+                ImGui::Text("Path Points: %zu", agent->getCurrentPath().getPointCount());
+                ImGui::Text("Remaining: %.2f m", agent->getRemainingDistance());
+            }
+            
+            if (ImGui::Button("Delete Agent")) {
+                agentManager.destroyAgent(agent.get());
+                aiState.selectedAgent = -1;
+            }
+        }
+    }
+    
+    // === Path Testing ===
+    if (ImGui::CollapsingHeader("Path Testing")) {
+        ImGui::DragFloat3("Start", aiState.pathStart, 0.1f);
+        ImGui::DragFloat3("End", aiState.pathEnd, 0.1f);
+        
+        if (ImGui::Button("Find Path")) {
+            if (navMesh.isValid()) {
+                NavPathfinder pathfinder(&navMesh);
+                Vec3 start = {aiState.pathStart[0], aiState.pathStart[1], aiState.pathStart[2]};
+                Vec3 end = {aiState.pathEnd[0], aiState.pathEnd[1], aiState.pathEnd[2]};
+                
+                if (pathfinder.findPath(start, end, aiState.testPath)) {
+                    aiState.showTestPath = true;
+                } else {
+                    aiState.testPath.clear();
+                    aiState.showTestPath = false;
+                }
+            }
+        }
+        
+        ImGui::Checkbox("Show Path", &aiState.showTestPath);
+        
+        if (aiState.testPath.valid) {
+            ImGui::Text("Path Length: %.2f m", aiState.testPath.totalLength);
+            ImGui::Text("Waypoints: %zu", aiState.testPath.getPointCount());
+        }
+    }
+    
+    // === Behavior Tree ===
+    if (ImGui::CollapsingHeader("Behavior Tree")) {
+        ImGui::TextDisabled("Behavior Tree Editor");
+        ImGui::BulletText("Sequence - Execute in order");
+        ImGui::BulletText("Selector - Try until success");
+        ImGui::BulletText("Parallel - Execute simultaneously");
+        ImGui::BulletText("Decorators - Modify child results");
+        
+        ImGui::Separator();
+        ImGui::Text("Example BT:");
+        ImGui::TextWrapped(
+            "BTBuilder()\n"
+            "  .selector()\n"
+            "    .sequence(\"Attack\")\n"
+            "      .condition(inRange(\"target\", 2.0f))\n"
+            "      .action(attackTarget)\n"
+            "    .end()\n"
+            "    .sequence(\"Chase\")\n"
+            "      .condition(hasTarget)\n"
+            "      .action(moveTo(\"target\"))\n"
+            "    .end()\n"
+            "    .action(patrol)\n"
+            "  .end()\n"
+            ".build();"
+        );
+    }
+    
+    // === Debug Visualization ===
+    if (ImGui::CollapsingHeader("Visualization")) {
+        ImGui::Checkbox("Show NavMesh##vis", &aiState.showNavMesh);
+        ImGui::Checkbox("Show Agent Paths", &aiState.showTestPath);
+        
+        static float navMeshColor[4] = {0.2f, 0.6f, 0.3f, 0.5f};
+        ImGui::ColorEdit4("NavMesh Color", navMeshColor);
+    }
+    
+    ImGui::End();
+}
+
+// ===== Game UI Editor State =====
+struct GameUIEditorState {
+    // Canvas
+    std::string selectedCanvas = "";
+    char newCanvasName[64] = "NewCanvas";
+    
+    // Widget
+    uint32_t selectedWidgetId = 0;
+    int widgetTypeToCreate = 0;  // 0=Panel, 1=Label, 2=Button, etc.
+    
+    // Preview
+    bool showPreview = true;
+    float previewScale = 1.0f;
+    
+    // Widget creation
+    char widgetName[64] = "Widget";
+    char labelText[256] = "Label Text";
+    char buttonText[256] = "Button";
+};
+
+// ===== Game UI Editor Panel =====
+inline void drawGameUIEditorPanel(GameUIEditorState& uiState, EditorState& state) {
+    if (!state.showGameUIEditor) return;
+    
+    ImGui::SetNextWindowSize(ImVec2(400, 600), ImGuiCond_FirstUseEver);
+    if (!ImGui::Begin("Game UI Editor", &state.showGameUIEditor)) {
+        ImGui::End();
+        return;
+    }
+    
+    auto& uiSystem = luma::ui::getUISystem();
+    
+    // === Canvas Management ===
+    if (ImGui::CollapsingHeader("Canvases", ImGuiTreeNodeFlags_DefaultOpen)) {
+        const auto& canvases = uiSystem.getCanvases();
+        
+        for (const auto& [name, canvas] : canvases) {
+            bool selected = (uiState.selectedCanvas == name);
+            char label[128];
+            snprintf(label, sizeof(label), "%s [%s]",
+                    name.c_str(), canvas->isVisible() ? "Visible" : "Hidden");
+            
+            if (ImGui::Selectable(label, selected)) {
+                uiState.selectedCanvas = name;
+            }
+        }
+        
+        ImGui::Separator();
+        
+        ImGui::InputText("Canvas Name", uiState.newCanvasName, IM_ARRAYSIZE(uiState.newCanvasName));
+        if (ImGui::Button("+ Create Canvas")) {
+            if (strlen(uiState.newCanvasName) > 0 && !uiSystem.getCanvas(uiState.newCanvasName)) {
+                uiSystem.createCanvas(uiState.newCanvasName);
+                uiState.selectedCanvas = uiState.newCanvasName;
+            }
+        }
+    }
+    
+    // === Selected Canvas ===
+    luma::ui::UICanvas* selectedCanvas = nullptr;
+    if (!uiState.selectedCanvas.empty()) {
+        selectedCanvas = uiSystem.getCanvas(uiState.selectedCanvas);
+    }
+    
+    if (selectedCanvas) {
+        if (ImGui::CollapsingHeader("Canvas Properties", ImGuiTreeNodeFlags_DefaultOpen)) {
+            bool visible = selectedCanvas->isVisible();
+            if (ImGui::Checkbox("Visible##canvas", &visible)) {
+                selectedCanvas->setVisible(visible);
+            }
+            
+            int order = selectedCanvas->getRenderOrder();
+            if (ImGui::InputInt("Render Order", &order)) {
+                selectedCanvas->setRenderOrder(order);
+            }
+            
+            ImGui::Text("Screen: %.0f x %.0f", 
+                       selectedCanvas->getScreenWidth(),
+                       selectedCanvas->getScreenHeight());
+            
+            if (ImGui::Button("Delete Canvas")) {
+                uiSystem.removeCanvas(uiState.selectedCanvas);
+                uiState.selectedCanvas = "";
+                selectedCanvas = nullptr;
+            }
+        }
+    }
+    
+    // === Widget Hierarchy ===
+    if (selectedCanvas && ImGui::CollapsingHeader("Widget Hierarchy", ImGuiTreeNodeFlags_DefaultOpen)) {
+        std::function<void(luma::ui::UIWidget*, int)> drawWidget;
+        drawWidget = [&](luma::ui::UIWidget* widget, int depth) {
+            if (!widget) return;
+            
+            ImGui::PushID(widget->getId());
+            
+            bool selected = (uiState.selectedWidgetId == widget->getId());
+            ImGuiTreeNodeFlags flags = ImGuiTreeNodeFlags_OpenOnArrow;
+            if (widget->getChildren().empty()) {
+                flags |= ImGuiTreeNodeFlags_Leaf;
+            }
+            if (selected) {
+                flags |= ImGuiTreeNodeFlags_Selected;
+            }
+            
+            // Widget type name
+            const char* typeNames[] = {"Base", "Panel", "Label", "Image", "Button",
+                                       "Checkbox", "Slider", "Progress", "Input",
+                                       "Dropdown", "ScrollView", "ListView",
+                                       "HLayout", "VLayout", "Grid"};
+            int typeIdx = (int)widget->getType();
+            const char* typeName = (typeIdx < 15) ? typeNames[typeIdx] : "Widget";
+            
+            char label[128];
+            snprintf(label, sizeof(label), "[%s] %s", typeName, widget->getName().c_str());
+            
+            bool open = ImGui::TreeNodeEx(label, flags);
+            
+            if (ImGui::IsItemClicked()) {
+                uiState.selectedWidgetId = widget->getId();
+            }
+            
+            if (open) {
+                for (const auto& child : widget->getChildren()) {
+                    drawWidget(child.get(), depth + 1);
+                }
+                ImGui::TreePop();
+            }
+            
+            ImGui::PopID();
+        };
+        
+        drawWidget(selectedCanvas->getRoot(), 0);
+    }
+    
+    // === Widget Creation ===
+    if (selectedCanvas && ImGui::CollapsingHeader("Create Widget")) {
+        ImGui::InputText("Name##widget", uiState.widgetName, IM_ARRAYSIZE(uiState.widgetName));
+        
+        const char* widgetTypes[] = {"Panel", "Label", "Button", "Checkbox", 
+                                     "Slider", "Progress Bar", "Input Field",
+                                     "Dropdown", "Scroll View", "List View",
+                                     "HBox", "VBox", "Grid"};
+        ImGui::Combo("Type", &uiState.widgetTypeToCreate, widgetTypes, IM_ARRAYSIZE(widgetTypes));
+        
+        // Type-specific settings
+        if (uiState.widgetTypeToCreate == 1 || uiState.widgetTypeToCreate == 2) {
+            ImGui::InputText("Text", uiState.labelText, IM_ARRAYSIZE(uiState.labelText));
+        }
+        
+        if (ImGui::Button("Create Widget", ImVec2(-1, 30))) {
+            std::shared_ptr<luma::ui::UIWidget> newWidget;
+            
+            switch (uiState.widgetTypeToCreate) {
+                case 0: newWidget = luma::ui::UIFactory::createPanel(uiState.widgetName); break;
+                case 1: newWidget = luma::ui::UIFactory::createLabel(uiState.labelText, uiState.widgetName); break;
+                case 2: newWidget = luma::ui::UIFactory::createButton(uiState.labelText, uiState.widgetName); break;
+                case 3: newWidget = luma::ui::UIFactory::createCheckbox("Checkbox", uiState.widgetName); break;
+                case 4: newWidget = luma::ui::UIFactory::createSlider(uiState.widgetName); break;
+                case 5: newWidget = luma::ui::UIFactory::createProgressBar(uiState.widgetName); break;
+                case 6: newWidget = luma::ui::UIFactory::createInputField(uiState.widgetName); break;
+                case 7: newWidget = luma::ui::UIFactory::createDropdown(uiState.widgetName); break;
+                case 8: newWidget = luma::ui::UIFactory::createScrollView(uiState.widgetName); break;
+                case 9: newWidget = luma::ui::UIFactory::createListView(uiState.widgetName); break;
+                case 10: newWidget = luma::ui::UIFactory::createHBox(uiState.widgetName); break;
+                case 11: newWidget = luma::ui::UIFactory::createVBox(uiState.widgetName); break;
+                case 12: newWidget = luma::ui::UIFactory::createGrid(3, uiState.widgetName); break;
+            }
+            
+            if (newWidget) {
+                newWidget->setPosition(100, 100);
+                newWidget->setSize(200, 40);
+                selectedCanvas->addWidget(newWidget);
+                uiState.selectedWidgetId = newWidget->getId();
+            }
+        }
+    }
+    
+    // === Selected Widget Properties ===
+    if (selectedCanvas && uiState.selectedWidgetId > 0) {
+        // Find widget by ID
+        std::function<luma::ui::UIWidget*(luma::ui::UIWidget*)> findWidget;
+        findWidget = [&](luma::ui::UIWidget* widget) -> luma::ui::UIWidget* {
+            if (!widget) return nullptr;
+            if (widget->getId() == uiState.selectedWidgetId) return widget;
+            for (const auto& child : widget->getChildren()) {
+                if (auto* found = findWidget(child.get())) return found;
+            }
+            return nullptr;
+        };
+        
+        luma::ui::UIWidget* selected = findWidget(selectedCanvas->getRoot());
+        
+        if (selected && ImGui::CollapsingHeader("Widget Properties", ImGuiTreeNodeFlags_DefaultOpen)) {
+            // Name
+            static char nameBuffer[64];
+            strncpy(nameBuffer, selected->getName().c_str(), sizeof(nameBuffer) - 1);
+            if (ImGui::InputText("Name##prop", nameBuffer, sizeof(nameBuffer))) {
+                selected->setName(nameBuffer);
+            }
+            
+            // Visibility
+            bool visible = selected->isVisible();
+            if (ImGui::Checkbox("Visible##prop", &visible)) {
+                selected->setVisible(visible);
+            }
+            
+            ImGui::SameLine();
+            bool enabled = selected->isEnabled();
+            if (ImGui::Checkbox("Enabled", &enabled)) {
+                selected->setEnabled(enabled);
+            }
+            
+            // Transform
+            ImGui::Separator();
+            ImGui::Text("Transform");
+            
+            float pos[2] = {selected->getX(), selected->getY()};
+            if (ImGui::DragFloat2("Position", pos, 1.0f)) {
+                selected->setPosition(pos[0], pos[1]);
+            }
+            
+            float size[2] = {selected->getWidth(), selected->getHeight()};
+            if (ImGui::DragFloat2("Size", size, 1.0f, 0.0f, 2000.0f)) {
+                selected->setSize(size[0], size[1]);
+            }
+            
+            // Anchor
+            const char* anchors[] = {"TopLeft", "TopCenter", "TopRight",
+                                     "MiddleLeft", "MiddleCenter", "MiddleRight",
+                                     "BottomLeft", "BottomCenter", "BottomRight", "Stretch"};
+            int anchorIdx = (int)selected->getAnchor();
+            if (ImGui::Combo("Anchor", &anchorIdx, anchors, IM_ARRAYSIZE(anchors))) {
+                selected->setAnchor((luma::ui::UIAnchor)anchorIdx);
+            }
+            
+            // Pivot
+            float pivot[2] = {selected->getPivot().x, selected->getPivot().y};
+            if (ImGui::DragFloat2("Pivot", pivot, 0.01f, 0.0f, 1.0f)) {
+                selected->setPivot(pivot[0], pivot[1]);
+            }
+            
+            // Color
+            ImGui::Separator();
+            float color[4] = {selected->getColor().r, selected->getColor().g,
+                             selected->getColor().b, selected->getColor().a};
+            if (ImGui::ColorEdit4("Color", color)) {
+                selected->setColor({color[0], color[1], color[2], color[3]});
+            }
+            
+            // Type-specific properties
+            ImGui::Separator();
+            
+            if (auto* label = dynamic_cast<luma::ui::UILabel*>(selected)) {
+                static char textBuffer[256];
+                strncpy(textBuffer, label->getText().c_str(), sizeof(textBuffer) - 1);
+                if (ImGui::InputText("Text##label", textBuffer, sizeof(textBuffer))) {
+                    label->setText(textBuffer);
+                }
+                
+                float fontSize = label->getFontSize();
+                if (ImGui::SliderFloat("Font Size", &fontSize, 8, 72)) {
+                    label->setFontSize(fontSize);
+                }
+            }
+            
+            if (auto* button = dynamic_cast<luma::ui::UIButton*>(selected)) {
+                static char textBuffer[256];
+                strncpy(textBuffer, button->getText().c_str(), sizeof(textBuffer) - 1);
+                if (ImGui::InputText("Text##button", textBuffer, sizeof(textBuffer))) {
+                    button->setText(textBuffer);
+                }
+                
+                float radius = button->getBorderRadius();
+                if (ImGui::SliderFloat("Border Radius", &radius, 0, 20)) {
+                    button->setBorderRadius(radius);
+                }
+            }
+            
+            if (auto* slider = dynamic_cast<luma::ui::UISlider*>(selected)) {
+                float value = slider->getValue();
+                float min = slider->getMinValue();
+                float max = slider->getMaxValue();
+                
+                if (ImGui::SliderFloat("Value", &value, min, max)) {
+                    slider->setValue(value);
+                }
+                
+                if (ImGui::DragFloat("Min", &min, 0.1f)) {
+                    slider->setRange(min, max);
+                }
+                if (ImGui::DragFloat("Max", &max, 0.1f)) {
+                    slider->setRange(min, max);
+                }
+            }
+            
+            if (auto* progress = dynamic_cast<luma::ui::UIProgressBar*>(selected)) {
+                float value = progress->getValue();
+                if (ImGui::SliderFloat("Value##progress", &value, 0, 1)) {
+                    progress->setValue(value);
+                }
+                
+                bool showText = progress->getShowText();
+                if (ImGui::Checkbox("Show Text", &showText)) {
+                    progress->setShowText(showText);
+                }
+            }
+            
+            if (auto* input = dynamic_cast<luma::ui::UIInputField*>(selected)) {
+                static char placeholder[256];
+                strncpy(placeholder, input->getPlaceholder().c_str(), sizeof(placeholder) - 1);
+                if (ImGui::InputText("Placeholder", placeholder, sizeof(placeholder))) {
+                    input->setPlaceholder(placeholder);
+                }
+                
+                int maxLen = input->getMaxLength();
+                if (ImGui::InputInt("Max Length", &maxLen)) {
+                    input->setMaxLength(maxLen);
+                }
+            }
+            
+            // Delete
+            ImGui::Separator();
+            if (ImGui::Button("Delete Widget")) {
+                selected->removeFromParent();
+                uiState.selectedWidgetId = 0;
+            }
+        }
+    }
+    
+    // === Preview Settings ===
+    if (ImGui::CollapsingHeader("Preview")) {
+        ImGui::Checkbox("Show Preview Window", &uiState.showPreview);
+        ImGui::SliderFloat("Preview Scale", &uiState.previewScale, 0.25f, 2.0f);
+    }
+    
+    // === Widget Reference ===
+    if (ImGui::CollapsingHeader("Widget Reference")) {
+        ImGui::TextDisabled("Available Widgets:");
+        ImGui::BulletText("Panel - Container with background");
+        ImGui::BulletText("Label - Text display");
+        ImGui::BulletText("Image - Texture display");
+        ImGui::BulletText("Button - Clickable button");
+        ImGui::BulletText("Checkbox - Toggle switch");
+        ImGui::BulletText("Slider - Value slider");
+        ImGui::BulletText("Progress Bar - Progress display");
+        ImGui::BulletText("Input Field - Text input");
+        ImGui::BulletText("Dropdown - Selection list");
+        
+        ImGui::Separator();
+        ImGui::TextDisabled("Layout Containers:");
+        ImGui::BulletText("HBox - Horizontal layout");
+        ImGui::BulletText("VBox - Vertical layout");
+        ImGui::BulletText("Grid - Grid layout");
+    }
+    
+    ImGui::End();
+}
+
+// ===== Scene Manager State =====
+struct SceneManagerState {
+    char newSceneName[64] = "NewScene";
+    char loadScenePath[256] = "";
+    int selectedSceneId = -1;
+    bool showTransitionSettings = false;
+    int transitionType = 0;
+    float transitionDuration = 0.5f;
+};
+
+// ===== Scene Manager Panel =====
+inline void drawSceneManagerPanel(SceneManagerState& sceneState, EditorState& state) {
+    if (!state.showSceneManager) return;
+    
+    ImGui::SetNextWindowSize(ImVec2(400, 500), ImGuiCond_FirstUseEver);
+    if (!ImGui::Begin("Scene Manager", &state.showSceneManager)) {
+        ImGui::End();
+        return;
+    }
+    
+    auto& sceneMgr = luma::getSceneManager();
+    
+    // === Current Scene ===
+    if (ImGui::CollapsingHeader("Current Scene", ImGuiTreeNodeFlags_DefaultOpen)) {
+        auto* activeScene = sceneMgr.getActiveScene();
+        if (activeScene) {
+            ImGui::Text("Name: %s", activeScene->getName().c_str());
+            ImGui::Text("Path: %s", activeScene->getPath().c_str());
+            ImGui::Text("Objects: %zu", activeScene->getData().objects.size());
+            
+            const char* stateNames[] = {"Unloaded", "Loading", "Loaded", "Active", "Unloading"};
+            ImGui::Text("State: %s", stateNames[(int)activeScene->getState()]);
+            
+            if (activeScene->getState() == luma::SceneState::Loading) {
+                ImGui::ProgressBar(activeScene->getLoadProgress());
+            }
+        } else {
+            ImGui::TextDisabled("No active scene");
+        }
+    }
+    
+    // === Loaded Scenes ===
+    if (ImGui::CollapsingHeader("Loaded Scenes", ImGuiTreeNodeFlags_DefaultOpen)) {
+        const auto& scenes = sceneMgr.getAllScenes();
+        
+        for (const auto& [id, scene] : scenes) {
+            bool selected = (sceneState.selectedSceneId == (int)id);
+            bool isActive = (scene.get() == sceneMgr.getActiveScene());
+            
+            char label[128];
+            snprintf(label, sizeof(label), "%s%s [%s]", 
+                    isActive ? "* " : "  ",
+                    scene->getName().c_str(),
+                    scene->getPath().c_str());
+            
+            if (ImGui::Selectable(label, selected)) {
+                sceneState.selectedSceneId = (int)id;
+            }
+            
+            if (ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(0)) {
+                sceneMgr.setActiveScene(scene.get());
+            }
+        }
+        
+        if (scenes.empty()) {
+            ImGui::TextDisabled("No scenes loaded");
+        }
+    }
+    
+    // === Scene Operations ===
+    if (ImGui::CollapsingHeader("Operations", ImGuiTreeNodeFlags_DefaultOpen)) {
+        ImGui::InputText("Scene Path", sceneState.loadScenePath, IM_ARRAYSIZE(sceneState.loadScenePath));
+        
+        if (ImGui::Button("Load Scene")) {
+            if (strlen(sceneState.loadScenePath) > 0) {
+                sceneMgr.loadSceneAsync(sceneState.loadScenePath, luma::SceneLoadMode::Single);
+            }
+        }
+        
+        ImGui::SameLine();
+        if (ImGui::Button("Load Additive")) {
+            if (strlen(sceneState.loadScenePath) > 0) {
+                sceneMgr.loadSceneAsync(sceneState.loadScenePath, luma::SceneLoadMode::Additive);
+            }
+        }
+        
+        ImGui::SameLine();
+        if (ImGui::Button("Preload")) {
+            if (strlen(sceneState.loadScenePath) > 0) {
+                sceneMgr.preloadScene(sceneState.loadScenePath);
+            }
+        }
+        
+        ImGui::Separator();
+        
+        ImGui::InputText("New Scene Name", sceneState.newSceneName, IM_ARRAYSIZE(sceneState.newSceneName));
+        if (ImGui::Button("Create New Scene")) {
+            auto* scene = sceneMgr.createScene(sceneState.newSceneName);
+            sceneMgr.setActiveScene(scene);
+        }
+        
+        ImGui::Separator();
+        
+        if (sceneState.selectedSceneId > 0) {
+            if (ImGui::Button("Unload Selected")) {
+                sceneMgr.unloadScene((uint32_t)sceneState.selectedSceneId);
+                sceneState.selectedSceneId = -1;
+            }
+            ImGui::SameLine();
+        }
+        
+        if (ImGui::Button("Unload All")) {
+            sceneMgr.unloadAllScenes();
+            sceneState.selectedSceneId = -1;
+        }
+    }
+    
+    // === Transition ===
+    if (ImGui::CollapsingHeader("Scene Transition")) {
+        const char* transitionTypes[] = {"None", "Fade", "Crossfade", "SlideLeft", "SlideRight"};
+        ImGui::Combo("Transition Type", &sceneState.transitionType, transitionTypes, IM_ARRAYSIZE(transitionTypes));
+        ImGui::SliderFloat("Duration", &sceneState.transitionDuration, 0.1f, 2.0f);
+        
+        if (ImGui::Button("Transition To Scene")) {
+            if (strlen(sceneState.loadScenePath) > 0) {
+                luma::getSceneTransitionManager().transitionTo(
+                    sceneState.loadScenePath,
+                    (luma::SceneTransition::Type)sceneState.transitionType,
+                    sceneState.transitionDuration
+                );
+            }
+        }
+        
+        if (luma::getSceneTransitionManager().isTransitioning()) {
+            ImGui::Text("Transitioning...");
+            ImGui::ProgressBar(luma::getSceneTransitionManager().getTransition().getProgress());
+        }
+    }
+    
+    // === Loading Status ===
+    if (sceneMgr.isLoading()) {
+        ImGui::Separator();
+        ImGui::Text("Loading...");
+        ImGui::ProgressBar(sceneMgr.getCurrentLoadProgress());
+    }
+    
+    ImGui::End();
+}
+
+// ===== Data Manager State =====
+struct DataManagerState {
+    char configName[64] = "game";
+    char configKey[64] = "";
+    char configValue[256] = "";
+    int valueType = 0;  // 0=string, 1=int, 2=float, 3=bool
+    
+    char langCode[8] = "en";
+    char localizeKey[64] = "";
+    
+    int selectedConfig = -1;
+};
+
+// ===== Data Manager Panel =====
+inline void drawDataManagerPanel(DataManagerState& dataState, EditorState& state) {
+    if (!state.showDataManager) return;
+    
+    ImGui::SetNextWindowSize(ImVec2(400, 500), ImGuiCond_FirstUseEver);
+    if (!ImGui::Begin("Data Manager", &state.showDataManager)) {
+        ImGui::End();
+        return;
+    }
+    
+    auto& dataMgr = luma::getDataManager();
+    
+    // === Config Tables ===
+    if (ImGui::CollapsingHeader("Config Tables", ImGuiTreeNodeFlags_DefaultOpen)) {
+        ImGui::InputText("Config Name", dataState.configName, IM_ARRAYSIZE(dataState.configName));
+        
+        if (ImGui::Button("Load Config")) {
+            dataMgr.loadConfig(dataState.configName);
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Reload")) {
+            dataMgr.reloadConfig(dataState.configName);
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Save")) {
+            dataMgr.saveConfig(dataState.configName);
+        }
+        
+        auto* config = dataMgr.getConfig(dataState.configName);
+        if (config) {
+            ImGui::Separator();
+            ImGui::Text("Config: %s", config->getName().c_str());
+            
+            // Display all values
+            const auto& data = config->getAllData();
+            for (const auto& [key, value] : data) {
+                std::string valueStr;
+                if (std::holds_alternative<bool>(value)) {
+                    valueStr = std::get<bool>(value) ? "true" : "false";
+                } else if (std::holds_alternative<int64_t>(value)) {
+                    valueStr = std::to_string(std::get<int64_t>(value));
+                } else if (std::holds_alternative<double>(value)) {
+                    valueStr = std::to_string(std::get<double>(value));
+                } else if (std::holds_alternative<std::string>(value)) {
+                    valueStr = std::get<std::string>(value);
+                }
+                ImGui::Text("%s = %s", key.c_str(), valueStr.c_str());
+            }
+            
+            // Add/edit value
+            ImGui::Separator();
+            ImGui::InputText("Key", dataState.configKey, IM_ARRAYSIZE(dataState.configKey));
+            ImGui::InputText("Value", dataState.configValue, IM_ARRAYSIZE(dataState.configValue));
+            
+            const char* types[] = {"String", "Int", "Float", "Bool"};
+            ImGui::Combo("Type", &dataState.valueType, types, IM_ARRAYSIZE(types));
+            
+            if (ImGui::Button("Set Value")) {
+                switch (dataState.valueType) {
+                    case 0: config->setString(dataState.configKey, dataState.configValue); break;
+                    case 1: config->setInt(dataState.configKey, std::stoll(dataState.configValue)); break;
+                    case 2: config->setFloat(dataState.configKey, std::stod(dataState.configValue)); break;
+                    case 3: config->setBool(dataState.configKey, std::string(dataState.configValue) == "true"); break;
+                }
+            }
+        }
+    }
+    
+    // === Localization ===
+    if (ImGui::CollapsingHeader("Localization")) {
+        auto& loc = dataMgr.getLocalization();
+        
+        ImGui::Text("Current Language: %s", loc.getLanguage().c_str());
+        
+        auto langs = loc.getAvailableLanguages();
+        if (!langs.empty()) {
+            if (ImGui::BeginCombo("Language", loc.getLanguage().c_str())) {
+                for (const auto& lang : langs) {
+                    if (ImGui::Selectable(lang.c_str(), lang == loc.getLanguage())) {
+                        dataMgr.setLanguage(lang);
+                    }
+                }
+                ImGui::EndCombo();
+            }
+        }
+        
+        ImGui::Separator();
+        
+        ImGui::InputText("Lang Code", dataState.langCode, IM_ARRAYSIZE(dataState.langCode));
+        if (ImGui::Button("Load Language")) {
+            dataMgr.loadLanguage(dataState.langCode);
+        }
+        
+        ImGui::Separator();
+        
+        ImGui::InputText("Localize Key", dataState.localizeKey, IM_ARRAYSIZE(dataState.localizeKey));
+        if (strlen(dataState.localizeKey) > 0) {
+            ImGui::Text("Result: %s", dataMgr.localize(dataState.localizeKey).c_str());
+        }
+    }
+    
+    // === Hot Reload ===
+    if (ImGui::CollapsingHeader("Hot Reload")) {
+        bool hotReload = dataMgr.isHotReloadEnabled();
+        if (ImGui::Checkbox("Enable Hot Reload", &hotReload)) {
+            dataMgr.setHotReloadEnabled(hotReload);
+        }
+        
+        ImGui::Text("Watched Files: %zu", dataMgr.getWatchedFileCount());
+    }
+    
+    ImGui::End();
+}
+
+// ===== Build Settings State =====
+struct BuildSettingsState {
+    bool building = false;
+    float buildProgress = 0.0f;
+    std::string currentStep;
+};
+
+// ===== Build Settings Panel =====
+inline void drawBuildSettingsPanel(BuildSettingsState& buildState, EditorState& state) {
+    if (!state.showBuildSettings) return;
+    
+    ImGui::SetNextWindowSize(ImVec2(450, 600), ImGuiCond_FirstUseEver);
+    if (!ImGui::Begin("Build Settings", &state.showBuildSettings)) {
+        ImGui::End();
+        return;
+    }
+    
+    auto& buildMgr = luma::getBuildManager();
+    auto& settings = buildMgr.getSettings();
+    
+    // === Project Info ===
+    if (ImGui::CollapsingHeader("Project", ImGuiTreeNodeFlags_DefaultOpen)) {
+        static char projectName[64];
+        strncpy(projectName, settings.projectName.c_str(), sizeof(projectName) - 1);
+        if (ImGui::InputText("Project Name", projectName, sizeof(projectName))) {
+            settings.projectName = projectName;
+        }
+        
+        static char version[32];
+        strncpy(version, settings.version.c_str(), sizeof(version) - 1);
+        if (ImGui::InputText("Version", version, sizeof(version))) {
+            settings.version = version;
+        }
+        
+        static char buildNum[16];
+        strncpy(buildNum, settings.buildNumber.c_str(), sizeof(buildNum) - 1);
+        if (ImGui::InputText("Build Number", buildNum, sizeof(buildNum))) {
+            settings.buildNumber = buildNum;
+        }
+    }
+    
+    // === Platform ===
+    if (ImGui::CollapsingHeader("Platform", ImGuiTreeNodeFlags_DefaultOpen)) {
+        const char* platforms[] = {"Windows", "macOS", "iOS", "Android", "Linux", "WebGL"};
+        int platformIdx = (int)settings.platform;
+        if (ImGui::Combo("Target Platform", &platformIdx, platforms, IM_ARRAYSIZE(platforms))) {
+            settings.platform = (luma::BuildPlatform)platformIdx;
+        }
+        
+        const char* configs[] = {"Debug", "Development", "Release"};
+        int configIdx = (int)settings.config;
+        if (ImGui::Combo("Configuration", &configIdx, configs, IM_ARRAYSIZE(configs))) {
+            settings.config = (luma::BuildConfig)configIdx;
+        }
+        
+        ImGui::Separator();
+        
+        if (ImGui::Button("Debug Preset")) buildMgr.useDebugPreset();
+        ImGui::SameLine();
+        if (ImGui::Button("Dev Preset")) buildMgr.useDevelopmentPreset();
+        ImGui::SameLine();
+        if (ImGui::Button("Release Preset")) buildMgr.useReleasePreset();
+    }
+    
+    // === Paths ===
+    if (ImGui::CollapsingHeader("Paths")) {
+        static char outputDir[256];
+        strncpy(outputDir, settings.outputDir.c_str(), sizeof(outputDir) - 1);
+        if (ImGui::InputText("Output Directory", outputDir, sizeof(outputDir))) {
+            settings.outputDir = outputDir;
+        }
+        
+        static char assetsDir[256];
+        strncpy(assetsDir, settings.assetsDir.c_str(), sizeof(assetsDir) - 1);
+        if (ImGui::InputText("Assets Directory", assetsDir, sizeof(assetsDir))) {
+            settings.assetsDir = assetsDir;
+        }
+    }
+    
+    // === Options ===
+    if (ImGui::CollapsingHeader("Build Options")) {
+        ImGui::Checkbox("Compress Assets", &settings.compressAssets);
+        ImGui::Checkbox("Strip Debug Info", &settings.stripDebugInfo);
+        ImGui::Checkbox("Use Asset Bundles", &settings.useAssetBundles);
+        ImGui::Checkbox("Sign Build", &settings.signBuild);
+        ImGui::Checkbox("Create Installer", &settings.createInstaller);
+    }
+    
+    // === Platform Specific ===
+    if (ImGui::CollapsingHeader("Platform Settings")) {
+        static char bundleId[128];
+        strncpy(bundleId, settings.bundleIdentifier.c_str(), sizeof(bundleId) - 1);
+        if (ImGui::InputText("Bundle Identifier", bundleId, sizeof(bundleId))) {
+            settings.bundleIdentifier = bundleId;
+        }
+        
+        if (settings.platform == luma::BuildPlatform::iOS) {
+            static char teamId[32];
+            strncpy(teamId, settings.teamId.c_str(), sizeof(teamId) - 1);
+            if (ImGui::InputText("Team ID", teamId, sizeof(teamId))) {
+                settings.teamId = teamId;
+            }
+        }
+        
+        if (settings.platform == luma::BuildPlatform::Android) {
+            static char keystore[256];
+            strncpy(keystore, settings.keystorePath.c_str(), sizeof(keystore) - 1);
+            if (ImGui::InputText("Keystore Path", keystore, sizeof(keystore))) {
+                settings.keystorePath = keystore;
+            }
+        }
+    }
+    
+    // === Build ===
+    ImGui::Separator();
+    
+    if (buildState.building) {
+        ImGui::Text("Building: %s", buildState.currentStep.c_str());
+        ImGui::ProgressBar(buildState.buildProgress);
+        
+        if (ImGui::Button("Cancel")) {
+            buildState.building = false;
+        }
+    } else {
+        if (ImGui::Button("Build", ImVec2(120, 40))) {
+            buildState.building = true;
+            buildState.buildProgress = 0.0f;
+            
+            auto result = buildMgr.build([&](const std::string& step, float progress) {
+                buildState.currentStep = step;
+                buildState.buildProgress = progress;
+            });
+            
+            buildState.building = false;
+        }
+        
+        ImGui::SameLine();
+        if (ImGui::Button("Build And Run", ImVec2(120, 40))) {
+            // Would build and launch
+        }
+    }
+    
+    // === Last Build Result ===
+    const auto& lastResult = buildMgr.getLastResult();
+    if (!lastResult.outputPath.empty()) {
+        ImGui::Separator();
+        
+        if (lastResult.success) {
+            ImGui::TextColored(ImVec4(0.3f, 0.8f, 0.3f, 1.0f), "Build Successful");
+        } else {
+            ImGui::TextColored(ImVec4(0.8f, 0.3f, 0.3f, 1.0f), "Build Failed");
+            ImGui::TextWrapped("Error: %s", lastResult.errorMessage.c_str());
+        }
+        
+        ImGui::Text("Output: %s", lastResult.outputPath.c_str());
+        ImGui::Text("Build Time: %.1f seconds", lastResult.buildTimeMs / 1000.0f);
+        ImGui::Text("Total Size: %.2f MB", lastResult.totalSize / (1024.0f * 1024.0f));
+        
+        if (!lastResult.warnings.empty()) {
+            ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.0f, 1.0f), "Warnings:");
+            for (const auto& w : lastResult.warnings) {
+                ImGui::BulletText("%s", w.c_str());
+            }
+        }
+    }
+    
     ImGui::End();
 }
 

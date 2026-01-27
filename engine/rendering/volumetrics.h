@@ -159,9 +159,9 @@ public:
             Vec3 scatterColor = lightColor * settings.lightIntensity * phase +
                                settings.albedo * settings.ambientIntensity;
             
-            Vec3 segmentScattering = scatterColor * settings.scattering * density *
-                                    transmittance * (1.0f - segmentTransmittance) / 
-                                    std::max(extinction, 0.0001f);
+            float scatterFactor = settings.scattering * density * transmittance * 
+                                  (1.0f - segmentTransmittance) / std::max(extinction, 0.0001f);
+            Vec3 segmentScattering = scatterColor * scatterFactor;
             
             inScattering = inScattering + segmentScattering;
             transmittance *= segmentTransmittance;

@@ -22,8 +22,12 @@ struct Vec3 {
     Vec3 operator+(const Vec3& other) const { return {x + other.x, y + other.y, z + other.z}; }
     Vec3 operator-(const Vec3& other) const { return {x - other.x, y - other.y, z - other.z}; }
     Vec3 operator*(float s) const { return {x * s, y * s, z * s}; }
+    Vec3 operator*(const Vec3& other) const { return {x * other.x, y * other.y, z * other.z}; }  // Component-wise
+    Vec3 operator/(float s) const { return {x / s, y / s, z / s}; }
+    Vec3 operator/(const Vec3& other) const { return {x / other.x, y / other.y, z / other.z}; }  // Component-wise
     
     float length() const { return std::sqrt(x*x + y*y + z*z); }
+    float lengthSquared() const { return x*x + y*y + z*z; }
     Vec3 normalized() const {
         float len = length();
         if (len < 0.0001f) return {0, 0, 0};
@@ -47,6 +51,29 @@ struct Vec3 {
     }
 };
 
+// ===== Vec4 =====
+struct Vec4 {
+    float x = 0.0f;
+    float y = 0.0f;
+    float z = 0.0f;
+    float w = 0.0f;
+    
+    constexpr Vec4() = default;
+    constexpr Vec4(float x_, float y_, float z_, float w_) : x(x_), y(y_), z(z_), w(w_) {}
+    Vec4(const Vec3& v, float w_) : x(v.x), y(v.y), z(v.z), w(w_) {}
+    
+    Vec4 operator+(const Vec4& other) const { return {x + other.x, y + other.y, z + other.z, w + other.w}; }
+    Vec4 operator-(const Vec4& other) const { return {x - other.x, y - other.y, z - other.z, w - other.w}; }
+    Vec4 operator*(float s) const { return {x * s, y * s, z * s, w * s}; }
+    Vec4 operator/(float s) const { return {x / s, y / s, z / s, w / s}; }
+    
+    Vec3 xyz() const { return {x, y, z}; }
+    
+    static Vec4 lerp(const Vec4& a, const Vec4& b, float t) {
+        return a + (b - a) * t;
+    }
+};
+
 // ===== Quat =====
 struct Quat {
     float x = 0.0f;
@@ -56,6 +83,8 @@ struct Quat {
     
     Quat() = default;
     Quat(float x_, float y_, float z_, float w_) : x(x_), y(y_), z(z_), w(w_) {}
+    
+    static Quat identity() { return Quat(0, 0, 0, 1); }
     
     // Create from Euler angles (radians)
     static Quat fromEuler(float pitch, float yaw, float roll) {
@@ -128,6 +157,16 @@ struct Quat {
         return Quat(x/len, y/len, z/len, w/len);
     }
     
+    Quat conjugate() const {
+        return Quat(-x, -y, -z, w);
+    }
+    
+    Quat inverse() const {
+        float lenSq = x*x + y*y + z*z + w*w;
+        if (lenSq < 0.0001f) return Quat();
+        return Quat(-x/lenSq, -y/lenSq, -z/lenSq, w/lenSq);
+    }
+    
     static Quat slerp(const Quat& a, const Quat& b, float t) {
         float dot = a.x*b.x + a.y*b.y + a.z*b.z + a.w*b.w;
         Quat b2 = dot < 0 ? Quat(-b.x, -b.y, -b.z, -b.w) : b;
@@ -141,6 +180,35 @@ struct Quat {
         float wa = std::sin((1-t)*theta) / sinTheta;
         float wb = std::sin(t*theta) / sinTheta;
         return Quat(wa*a.x + wb*b2.x, wa*a.y + wb*b2.y, wa*a.z + wb*b2.z, wa*a.w + wb*b2.w);
+    }
+};
+
+// ===== Mat3 (column-major) =====
+struct Mat3 {
+    float m[9] = {1,0,0, 0,1,0, 0,0,1};
+    
+    Mat3() = default;
+    
+    float& operator()(int row, int col) { return m[col * 3 + row]; }
+    float operator()(int row, int col) const { return m[col * 3 + row]; }
+    
+    static Mat3 identity() {
+        Mat3 result;
+        return result;
+    }
+    
+    Vec3 operator*(const Vec3& v) const {
+        return {
+            m[0] * v.x + m[3] * v.y + m[6] * v.z,
+            m[1] * v.x + m[4] * v.y + m[7] * v.z,
+            m[2] * v.x + m[5] * v.y + m[8] * v.z
+        };
+    }
+    
+    Mat3 operator*(float s) const {
+        Mat3 result;
+        for (int i = 0; i < 9; i++) result.m[i] = m[i] * s;
+        return result;
     }
 };
 

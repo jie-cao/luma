@@ -72,6 +72,13 @@ public:
         }
     }
     
+    float getParameter(const std::string& name) const {
+        if (name == parameterName) {
+            return parameter;
+        }
+        return 0.0f;
+    }
+    
     void addMotion(AnimationClip* clip, float threshold, float speed = 1.0f) {
         BlendMotion motion;
         motion.clip = clip;

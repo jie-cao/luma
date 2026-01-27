@@ -75,6 +75,11 @@ public:
         return includes(boneIndex) ? layerWeight : 0.0f;
     }
     
+    // For UI: check if mask is empty
+    bool isEmpty() const { return includedBones_.empty(); }
+    size_t getBoneCount() const { return includedBones_.size(); }
+    const std::unordered_set<std::string>& getIncludedBones() const { return includedBones_; }
+    
     // Preset masks
     static BoneMask fullBody() {
         BoneMask mask;

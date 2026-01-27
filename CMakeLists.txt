@@ -57,6 +57,7 @@ set(LUMA_CORE_SOURCES
     engine/asset/hdr_loader.cpp
     engine/renderer/ibl_generator.cpp
     engine/util/file_watcher.cpp
+    engine/script/script_engine.cpp
 )
 
 # Platform-specific renderer sources (UnifiedRenderer)
@@ -199,6 +200,7 @@ if(APPLE)
     
     target_include_directories(luma_studio_macos PRIVATE ${imgui_SOURCE_DIR} ${imgui_SOURCE_DIR}/backends)
     
+    find_library(UNIFORMTYPEIDENTIFIERS_FRAMEWORK UniformTypeIdentifiers REQUIRED)
     target_link_libraries(luma_studio_macos PRIVATE 
         luma_core 
         imgui_metal
@@ -206,6 +208,7 @@ if(APPLE)
         ${METALKIT_FRAMEWORK}
         ${QUARTZCORE_FRAMEWORK}
         ${COCOA_FRAMEWORK}
+        ${UNIFORMTYPEIDENTIFIERS_FRAMEWORK}
     )
     
     # Enable ARC for Objective-C++ files

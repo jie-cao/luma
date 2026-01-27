@@ -291,6 +291,41 @@ public:
         return it != parameters_.end() ? it->second.boolValue : false;
     }
     
+    int getInt(const std::string& name) const {
+        auto it = parameters_.find(name);
+        return it != parameters_.end() ? it->second.intValue : 0;
+    }
+    
+    // Get parameter names/types for UI
+    std::vector<std::string> getParameterNames() const {
+        std::vector<std::string> names;
+        for (const auto& [name, _] : parameters_) {
+            names.push_back(name);
+        }
+        return names;
+    }
+    
+    ParameterType getParameterType(const std::string& name) const {
+        auto it = parameters_.find(name);
+        return it != parameters_.end() ? it->second.type : ParameterType::Float;
+    }
+    
+    // Get state names for UI
+    std::vector<std::string> getStateNames() const {
+        std::vector<std::string> names;
+        for (const auto& [name, _] : states_) {
+            names.push_back(name);
+        }
+        return names;
+    }
+    
+    // Force state transition (for debugging)
+    void forceState(const std::string& stateName) {
+        if (states_.find(stateName) != states_.end()) {
+            currentState_ = stateName;
+        }
+    }
+    
     // === Any State Transitions ===
     
     StateTransition& addAnyStateTransition(const std::string& targetState) {
