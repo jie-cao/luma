@@ -47,8 +47,8 @@ float3 rotateY(float3 v, float angle) {
 }
 
 // Fresnel-Schlick with roughness (for IBL)
-float3 fresnelSchlickRoughness(float cosTheta, float3 F0, float roughness) {
-    return F0 + (max(float3(1.0 - roughness, 1.0 - roughness, 1.0 - roughness), F0) - F0) * pow(1.0 - cosTheta, 5.0);
+float3 fresnelSchlickRoughness(float cosTheta, float3 F0, float r) {
+    return F0 + (max(float3(1.0 - r, 1.0 - r, 1.0 - r), F0) - F0) * pow(1.0 - cosTheta, 5.0);
 }
 
 struct VSInput {
@@ -88,17 +88,24 @@ PSInput VSMain(VSInput input) {
 }
 
 // PCF Shadow Sampling
-float sampleShadowPCF(float3 shadowCoord, float3 normal, float3 lightDir) {
+float sampleShadowPCF(float3 shadowCoord, float3 normal, float3 lDir) {
     if (shadowEnabled < 0.5) return 1.0;
     
-    // Apply bias
-    float NdotL = max(dot(normal, -lightDir), 0.0);
+    // Check bounds - if outside shadow map, no shadow
+    if (shadowCoord.x < 0.0 || shadowCoord.x > 1.0 || 
+        shadowCoord.y < 0.0 || shadowCoord.y > 1.0 ||
+        shadowCoord.z < 0.0 || shadowCoord.z > 1.0) {
+        return 1.0;
+    }
+    
+    // Standard bias calculation
+    float NdotL = max(dot(normal, -lDir), 0.0);
     float bias = shadowBias + shadowNormalBias * (1.0 - NdotL);
     float depth = shadowCoord.z - bias;
     
     // PCF 3x3
     float shadow = 0.0;
-    float2 texelSize = shadowSoftness / 2048.0;  // Assuming 2048 shadow map
+    float2 texelSize = shadowSoftness / 2048.0;
     
     [unroll]
     for (int x = -1; x <= 1; x++) {

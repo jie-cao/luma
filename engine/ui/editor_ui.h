@@ -46,8 +46,11 @@
 #include "engine/ai/behavior_tree.h"
 #include "engine/game_ui/ui_system.h"
 #include "engine/scene/scene_manager.h"
+#include "engine/scene/prefab.h"
 #include "engine/data/data_system.h"
 #include "engine/build/build_system.h"
+#include "engine/asset/asset_browser.h"
+#include "engine/script/visual_script.h"
 #include <string>
 #include <vector>
 #include <functional>
@@ -56,20 +59,71 @@
 namespace luma {
 namespace ui {
 
+// ===== Responsive Layout System =====
+struct EditorLayout {
+    // Layout constants
+    static constexpr float kMenuBarHeight = 19.0f;
+    static constexpr float kToolbarHeight = 36.0f;
+    static constexpr float kStatusBarHeight = 24.0f;
+    static constexpr float kLeftPanelWidth = 280.0f;
+    static constexpr float kRightPanelWidth = 320.0f;
+    static constexpr float kBottomPanelHeight = 200.0f;
+    
+    // Calculate layout regions based on current window size
+    static float getTopOffset() { return kMenuBarHeight + kToolbarHeight; }
+    
+    static ImVec2 getLeftPanelPos() { 
+        return ImVec2(0, getTopOffset()); 
+    }
+    static ImVec2 getLeftPanelSize(float windowHeight, bool hasBottomPanel) {
+        float height = windowHeight - getTopOffset() - kStatusBarHeight;
+        if (hasBottomPanel) height -= kBottomPanelHeight;
+        return ImVec2(kLeftPanelWidth, height);
+    }
+    
+    static ImVec2 getRightPanelPos(float windowWidth) {
+        return ImVec2(windowWidth - kRightPanelWidth, getTopOffset());
+    }
+    static ImVec2 getRightPanelSize(float windowHeight, bool hasBottomPanel) {
+        float height = windowHeight - getTopOffset() - kStatusBarHeight;
+        if (hasBottomPanel) height -= kBottomPanelHeight;
+        return ImVec2(kRightPanelWidth, height);
+    }
+    
+    static ImVec2 getBottomPanelPos(float windowHeight) {
+        return ImVec2(0, windowHeight - kBottomPanelHeight - kStatusBarHeight);
+    }
+    static ImVec2 getBottomPanelSize(float windowWidth) {
+        return ImVec2(windowWidth, kBottomPanelHeight);
+    }
+    
+    static ImVec2 getViewportPos() {
+        return ImVec2(kLeftPanelWidth, getTopOffset());
+    }
+    static ImVec2 getViewportSize(float windowWidth, float windowHeight, bool hasBottomPanel) {
+        float width = windowWidth - kLeftPanelWidth - kRightPanelWidth;
+        float height = windowHeight - getTopOffset() - kStatusBarHeight;
+        if (hasBottomPanel) height -= kBottomPanelHeight;
+        return ImVec2(width, height);
+    }
+};
+
 // ===== Editor State =====
 struct EditorState {
-    // Window visibility - Basic
+    // Window visibility - Core panels (always docked)
     bool showHierarchy = true;
     bool showInspector = true;
     bool showAssetBrowser = true;
+    
+    // Window visibility - Secondary panels (open via View menu)
     bool showAnimationTimeline = false;
-    bool showPostProcess = true;
-    bool showRenderSettings = true;
-    bool showLighting = true;
-    bool showConsole = false;
+    bool showPostProcess = false;      // Open via View > Post Processing
+    bool showRenderSettings = false;   // Open via View > Render Settings
+    bool showLighting = false;         // Open via View > Lighting
+    bool showConsole = false;          // Open via View > Console
     bool showHelp = false;
-    bool showStats = true;
-    bool showShaderStatus = true;
+    bool showStats = true;             // Small overlay, always useful
+    bool showShaderStatus = false;     // Only show when shader errors
     bool showScreenshotDialog = false;
     
     // Window visibility - Advanced (NEW)
@@ -95,6 +149,8 @@ struct EditorState {
     bool showSceneManager = false;
     bool showDataManager = false;
     bool showBuildSettings = false;
+    bool showVisualScript = false;
+    bool showCharacterCreator = false;
     
     // Gizmo
     GizmoMode gizmoMode = GizmoMode::Translate;
@@ -160,6 +216,15 @@ struct EditorState {
     std::function<void(const std::string&)> onSceneLoad;
     std::function<void(const std::string&)> onHDRLoad;
     std::function<void(const std::string&)> onDemoGenerate;
+    
+    // Asset Browser callbacks
+    std::function<void(const std::string& path, BrowserAssetType type)> onAssetDoubleClick;
+    std::function<void(const std::string& path, BrowserAssetType type)> onAssetDragDropToScene;
+    std::function<void(const std::string& path)> onAssetPreview;
+    
+    // Prefab callbacks
+    std::function<void(Entity*)> onSaveAsPrefab;
+    std::function<void(const std::string&)> onInstantiatePrefab;
 };
 
 // ===== Advanced Settings Structures =====
@@ -300,19 +365,37 @@ inline void drawMainMenuBar(EditorState& state, Viewport& viewport, bool& should
         
         // View Menu
         if (ImGui::BeginMenu("View")) {
-            // Panels
-            ImGui::MenuItem("Scene Hierarchy", nullptr, &state.showHierarchy);
-            ImGui::MenuItem("Inspector", nullptr, &state.showInspector);
-            ImGui::MenuItem("Asset Browser", nullptr, &state.showAssetBrowser);
+            // Core Panels (docked)
+            if (ImGui::BeginMenu("Panels")) {
+                ImGui::MenuItem("Hierarchy", "H", &state.showHierarchy);
+                ImGui::MenuItem("Inspector", "I", &state.showInspector);
+                ImGui::MenuItem("Asset Browser", "A", &state.showAssetBrowser);
+                ImGui::EndMenu();
+            }
+            
+            ImGui::Separator();
+            
+            // Rendering panels
+            if (ImGui::BeginMenu("Rendering")) {
+                ImGui::MenuItem("Post Processing", nullptr, &state.showPostProcess);
+                ImGui::MenuItem("Render Settings", nullptr, &state.showRenderSettings);
+                ImGui::MenuItem("Lighting", nullptr, &state.showLighting);
+                ImGui::EndMenu();
+            }
+            
+            // Animation
             ImGui::MenuItem("Animation Timeline", nullptr, &state.showAnimationTimeline);
+            
             ImGui::Separator();
-            ImGui::MenuItem("Post Processing", nullptr, &state.showPostProcess);
-            ImGui::MenuItem("Render Settings", nullptr, &state.showRenderSettings);
-            ImGui::MenuItem("Lighting", nullptr, &state.showLighting);
-            ImGui::Separator();
-            ImGui::MenuItem("Console", nullptr, &state.showConsole);
-            ImGui::MenuItem("Statistics", nullptr, &state.showStats);
-            ImGui::MenuItem("Shader Status", nullptr, &state.showShaderStatus);
+            
+            // Debug/Development
+            if (ImGui::BeginMenu("Debug")) {
+                ImGui::MenuItem("Console", "`", &state.showConsole);
+                ImGui::MenuItem("Statistics", nullptr, &state.showStats);
+                ImGui::MenuItem("Shader Status", nullptr, &state.showShaderStatus);
+                ImGui::EndMenu();
+            }
+            
             ImGui::Separator();
             
             // Camera views
@@ -394,13 +477,23 @@ inline void drawMainMenuBar(EditorState& state, Viewport& viewport, bool& should
             ImGui::MenuItem("GI Editor", nullptr, &state.showGIEditor);
             ImGui::MenuItem("Video Export", nullptr, &state.showVideoExport);
             ImGui::MenuItem("Network", nullptr, &state.showNetworkPanel);
-            ImGui::MenuItem("Script Editor", nullptr, &state.showScriptEditor);
             ImGui::MenuItem("AI Editor", nullptr, &state.showAIEditor);
             ImGui::MenuItem("Game UI Editor", nullptr, &state.showGameUIEditor);
             ImGui::MenuItem("Scene Manager", nullptr, &state.showSceneManager);
             ImGui::MenuItem("Data Manager", nullptr, &state.showDataManager);
             ImGui::Separator();
             ImGui::MenuItem("Build Settings", nullptr, &state.showBuildSettings);
+            
+            ImGui::Separator();
+            ImGui::Text("Tools");
+            ImGui::Separator();
+            ImGui::MenuItem("Character Creator", nullptr, &state.showCharacterCreator);
+            
+            ImGui::Separator();
+            ImGui::Text("Scripting");
+            ImGui::Separator();
+            ImGui::MenuItem("Visual Script", nullptr, &state.showVisualScript);
+            ImGui::MenuItem("Script Editor", nullptr, &state.showScriptEditor);
             
             ImGui::Separator();
             ImGui::Text("Animation");
@@ -446,8 +539,9 @@ inline void drawMainMenuBar(EditorState& state, Viewport& viewport, bool& should
 
 // ===== Toolbar =====
 inline void drawToolbar(EditorState& state, TransformGizmo& gizmo) {
-    ImGui::SetNextWindowPos(ImVec2(0, 19), ImGuiCond_Always);
-    ImGui::SetNextWindowSize(ImVec2(ImGui::GetIO().DisplaySize.x, 36), ImGuiCond_Always);
+    ImGuiIO& io = ImGui::GetIO();
+    ImGui::SetNextWindowPos(ImVec2(0, EditorLayout::kMenuBarHeight), ImGuiCond_Always);
+    ImGui::SetNextWindowSize(ImVec2(io.DisplaySize.x, EditorLayout::kToolbarHeight), ImGuiCond_Always);
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(8, 4));
     ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 0);
     ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(4, 4));
@@ -528,6 +622,40 @@ inline void drawToolbar(EditorState& state, TransformGizmo& gizmo) {
             state.animationTime = 0.0f;
         }
         if (ImGui::IsItemHovered()) ImGui::SetTooltip("Stop Animation");
+        
+        // Right-aligned panel toggles
+        float rightOffset = io.DisplaySize.x - 320;
+        ImGui::SameLine(rightOffset);
+        ImGui::Text("|");
+        ImGui::SameLine();
+        
+        // Rendering panels quick access
+        if (state.showPostProcess) ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.3f, 0.5f, 0.3f, 1.0f));
+        if (ImGui::Button("PP", ImVec2(30, 26))) state.showPostProcess = !state.showPostProcess;
+        if (state.showPostProcess) ImGui::PopStyleColor();
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip("Post Processing");
+        
+        ImGui::SameLine();
+        if (state.showRenderSettings) ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.3f, 0.5f, 0.3f, 1.0f));
+        if (ImGui::Button("RS", ImVec2(30, 26))) state.showRenderSettings = !state.showRenderSettings;
+        if (state.showRenderSettings) ImGui::PopStyleColor();
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip("Render Settings");
+        
+        ImGui::SameLine();
+        if (state.showLighting) ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.3f, 0.5f, 0.3f, 1.0f));
+        if (ImGui::Button("LT", ImVec2(30, 26))) state.showLighting = !state.showLighting;
+        if (state.showLighting) ImGui::PopStyleColor();
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip("Lighting");
+        
+        ImGui::SameLine();
+        ImGui::Text("|");
+        ImGui::SameLine();
+        
+        // Console toggle
+        if (state.showConsole) ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.5f, 0.3f, 0.3f, 1.0f));
+        if (ImGui::Button("C", ImVec2(26, 26))) state.showConsole = !state.showConsole;
+        if (state.showConsole) ImGui::PopStyleColor();
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip("Console (`)");
     }
     ImGui::End();
     ImGui::PopStyleVar(3);
@@ -537,10 +665,14 @@ inline void drawToolbar(EditorState& state, TransformGizmo& gizmo) {
 inline void drawHierarchyPanel(SceneGraph& scene, EditorState& state) {
     if (!state.showHierarchy) return;
     
-    ImGui::SetNextWindowPos(ImVec2(0, 55), ImGuiCond_FirstUseEver);
-    ImGui::SetNextWindowSize(ImVec2(280, 300), ImGuiCond_FirstUseEver);
+    // Responsive layout - dock to left side
+    ImGuiIO& io = ImGui::GetIO();
+    bool hasBottomPanel = state.showAssetBrowser || state.showAnimationTimeline || state.showConsole;
+    ImGui::SetNextWindowPos(EditorLayout::getLeftPanelPos(), ImGuiCond_Always);
+    ImGui::SetNextWindowSize(EditorLayout::getLeftPanelSize(io.DisplaySize.y, hasBottomPanel), ImGuiCond_Always);
     
-    if (ImGui::Begin("Hierarchy", &state.showHierarchy)) {
+    ImGuiWindowFlags flags = ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoResize;
+    if (ImGui::Begin("Hierarchy", &state.showHierarchy, flags)) {
         // Search bar
         static char searchBuf[128] = "";
         ImGui::SetNextItemWidth(-60);
@@ -634,6 +766,27 @@ inline void drawHierarchyPanel(SceneGraph& scene, EditorState& state) {
                         scene.setParent(dragged, entity);
                     }
                 }
+                // Accept assets from asset browser
+                if (const ImGuiPayload* payload = ImGui::AcceptDragDropPayload("ASSET_BROWSER_ITEM")) {
+                    std::string assetPath((const char*)payload->Data);
+                    if (state.onAssetDragDropToScene) {
+                        // Determine asset type from extension
+                        BrowserAssetType type = BrowserAssetType::Unknown;
+                        size_t dotPos = assetPath.find_last_of('.');
+                        if (dotPos != std::string::npos) {
+                            std::string ext = assetPath.substr(dotPos);
+                            // Check extension
+                            if (ext == ".fbx" || ext == ".obj" || ext == ".gltf" || ext == ".glb") {
+                                type = BrowserAssetType::Model;
+                            } else if (ext == ".png" || ext == ".jpg" || ext == ".jpeg" || ext == ".tga" || ext == ".hdr") {
+                                type = BrowserAssetType::Texture;
+                            } else if (ext == ".luma") {
+                                type = BrowserAssetType::Scene;
+                            }
+                        }
+                        state.onAssetDragDropToScene(assetPath, type);
+                    }
+                }
                 ImGui::EndDragDropTarget();
             }
             
@@ -644,8 +797,26 @@ inline void drawHierarchyPanel(SceneGraph& scene, EditorState& state) {
                     scene.setParent(child, entity);
                 }
                 if (ImGui::MenuItem("Duplicate")) {
-                    // TODO: Duplicate entity
+                    scene.duplicateEntity(entity);
                 }
+                ImGui::Separator();
+                
+                // Prefab options
+                bool isPrefab = getPrefabManager().isPrefabInstance(entity->id);
+                if (ImGui::MenuItem("Save as Prefab...")) {
+                    if (state.onSaveAsPrefab) {
+                        state.onSaveAsPrefab(entity);
+                    }
+                }
+                if (isPrefab) {
+                    if (ImGui::MenuItem("Apply Prefab")) {
+                        getPrefabManager().applyPrefab(entity->id, scene);
+                    }
+                    if (ImGui::MenuItem("Unpack Prefab")) {
+                        getPrefabManager().unpackInstance(entity->id);
+                    }
+                }
+                
                 ImGui::Separator();
                 if (ImGui::MenuItem(entity->enabled ? "Disable" : "Enable")) {
                     entity->enabled = !entity->enabled;
@@ -672,18 +843,43 @@ inline void drawHierarchyPanel(SceneGraph& scene, EditorState& state) {
             drawNode(root);
         }
         
-        // Simple separator for drop-to-root functionality
+        // Drop zone at bottom of hierarchy
         ImGui::Separator();
-        if (ImGui::Selectable("(Drop here to make root)", false)) {
-            // Selection behavior placeholder
-        }
+        ImGui::InvisibleButton("##DropZone", ImVec2(-1, 30));
         if (ImGui::BeginDragDropTarget()) {
+            // Accept entity for reparenting to root
             if (const ImGuiPayload* payload = ImGui::AcceptDragDropPayload("ENTITY")) {
                 Entity* dragged = *(Entity**)payload->Data;
                 scene.setParent(dragged, nullptr);
             }
+            // Accept assets from browser
+            if (const ImGuiPayload* payload = ImGui::AcceptDragDropPayload("ASSET_BROWSER_ITEM")) {
+                std::string assetPath((const char*)payload->Data);
+                if (state.onAssetDragDropToScene) {
+                    // Determine type from extension
+                    BrowserAssetType type = BrowserAssetType::Unknown;
+                    size_t dotPos = assetPath.find_last_of('.');
+                    if (dotPos != std::string::npos) {
+                        std::string ext = assetPath.substr(dotPos);
+                        if (ext == ".fbx" || ext == ".obj" || ext == ".gltf" || ext == ".glb") {
+                            type = BrowserAssetType::Model;
+                        } else if (ext == ".luma") {
+                            type = BrowserAssetType::Scene;
+                        }
+                    }
+                    state.onAssetDragDropToScene(assetPath, type);
+                }
+            }
             ImGui::EndDragDropTarget();
         }
+        // Visual feedback
+        if (ImGui::IsItemHovered()) {
+            ImGui::GetWindowDrawList()->AddRectFilled(
+                ImGui::GetItemRectMin(), ImGui::GetItemRectMax(),
+                IM_COL32(100, 100, 150, 50)
+            );
+        }
+        ImGui::TextDisabled("Drop assets or entities here");
     }
     ImGui::End();
 }
@@ -692,10 +888,14 @@ inline void drawHierarchyPanel(SceneGraph& scene, EditorState& state) {
 inline void drawInspectorPanel(SceneGraph& scene, EditorState& state) {
     if (!state.showInspector) return;
     
-    ImGui::SetNextWindowPos(ImVec2(ImGui::GetIO().DisplaySize.x - 320, 55), ImGuiCond_FirstUseEver);
-    ImGui::SetNextWindowSize(ImVec2(320, 500), ImGuiCond_FirstUseEver);
+    // Responsive layout - dock to right side
+    ImGuiIO& io = ImGui::GetIO();
+    bool hasBottomPanel = state.showAssetBrowser || state.showAnimationTimeline || state.showConsole;
+    ImGui::SetNextWindowPos(EditorLayout::getRightPanelPos(io.DisplaySize.x), ImGuiCond_Always);
+    ImGui::SetNextWindowSize(EditorLayout::getRightPanelSize(io.DisplaySize.y, hasBottomPanel), ImGuiCond_Always);
     
-    if (ImGui::Begin("Inspector", &state.showInspector)) {
+    ImGuiWindowFlags flags = ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoResize;
+    if (ImGui::Begin("Inspector", &state.showInspector, flags)) {
         Entity* selected = scene.getSelectedEntity();
         
         if (!selected) {
@@ -1072,7 +1272,9 @@ inline void drawInspectorPanel(SceneGraph& scene, EditorState& state) {
 inline void drawPostProcessPanel(PostProcessSettings& settings, EditorState& state) {
     if (!state.showPostProcess) return;
     
-    ImGui::SetNextWindowPos(ImVec2(ImGui::GetIO().DisplaySize.x - 320, 400), ImGuiCond_FirstUseEver);
+    // Floating panel - positioned to the left of the main Inspector
+    ImGuiIO& io = ImGui::GetIO();
+    ImGui::SetNextWindowPos(ImVec2(io.DisplaySize.x - EditorLayout::kRightPanelWidth - 330, 100), ImGuiCond_FirstUseEver);
     ImGui::SetNextWindowSize(ImVec2(320, 400), ImGuiCond_FirstUseEver);
     
     if (ImGui::Begin("Post Processing", &state.showPostProcess)) {
@@ -1199,7 +1401,9 @@ struct RenderSettings {
 inline void drawRenderSettingsPanel(RenderSettings& settings, EditorState& state) {
     if (!state.showRenderSettings) return;
     
-    ImGui::SetNextWindowPos(ImVec2(10, 360), ImGuiCond_FirstUseEver);
+    // Floating panel - positioned below left panel area
+    ImGuiIO& io = ImGui::GetIO();
+    ImGui::SetNextWindowPos(ImVec2(EditorLayout::kLeftPanelWidth + 10, 100), ImGuiCond_FirstUseEver);
     ImGui::SetNextWindowSize(ImVec2(280, 300), ImGuiCond_FirstUseEver);
     
     if (ImGui::Begin("Render Settings", &state.showRenderSettings)) {
@@ -1303,8 +1507,10 @@ struct LightSettings {
 inline void drawLightingPanel(LightSettings& settings, EditorState& state) {
     if (!state.showLighting) return;
     
-    ImGui::SetNextWindowPos(ImVec2(10, 660), ImGuiCond_FirstUseEver);
-    ImGui::SetNextWindowSize(ImVec2(300, 400), ImGuiCond_FirstUseEver);
+    // Floating panel - positioned in viewport area
+    ImGuiIO& io = ImGui::GetIO();
+    ImGui::SetNextWindowPos(ImVec2(EditorLayout::kLeftPanelWidth + 10, 420), ImGuiCond_FirstUseEver);
+    ImGui::SetNextWindowSize(ImVec2(300, 280), ImGuiCond_FirstUseEver);
     
     if (ImGui::Begin("Lighting", &state.showLighting)) {
         auto& mgr = getLightManager();
@@ -1482,11 +1688,13 @@ struct AnimationState {
 inline void drawAnimationTimeline(AnimationState& anim, EditorState& state) {
     if (!state.showAnimationTimeline) return;
     
-    float height = 180;
-    ImGui::SetNextWindowPos(ImVec2(0, ImGui::GetIO().DisplaySize.y - height - 24), ImGuiCond_FirstUseEver);
-    ImGui::SetNextWindowSize(ImVec2(ImGui::GetIO().DisplaySize.x, height), ImGuiCond_FirstUseEver);
+    // Responsive layout - dock to bottom (shares space with Asset Browser)
+    ImGuiIO& io = ImGui::GetIO();
+    ImGui::SetNextWindowPos(EditorLayout::getBottomPanelPos(io.DisplaySize.y), ImGuiCond_Always);
+    ImGui::SetNextWindowSize(EditorLayout::getBottomPanelSize(io.DisplaySize.x), ImGuiCond_Always);
     
-    if (ImGui::Begin("Animation", &state.showAnimationTimeline)) {
+    ImGuiWindowFlags flags = ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoResize;
+    if (ImGui::Begin("Animation", &state.showAnimationTimeline, flags)) {
         // Clip selector
         if (ImGui::BeginCombo("Clip", anim.currentClip.empty() ? "None" : anim.currentClip.c_str())) {
             for (const auto& clip : anim.clips) {
@@ -1578,10 +1786,13 @@ inline void drawAnimationTimeline(AnimationState& anim, EditorState& state) {
 inline void drawAssetBrowser(EditorState& state) {
     if (!state.showAssetBrowser) return;
     
-    ImGui::SetNextWindowPos(ImVec2(280, ImGui::GetIO().DisplaySize.y - 250), ImGuiCond_FirstUseEver);
-    ImGui::SetNextWindowSize(ImVec2(500, 200), ImGuiCond_FirstUseEver);
+    // Responsive layout - dock to bottom
+    ImGuiIO& io = ImGui::GetIO();
+    ImGui::SetNextWindowPos(EditorLayout::getBottomPanelPos(io.DisplaySize.y), ImGuiCond_Always);
+    ImGui::SetNextWindowSize(EditorLayout::getBottomPanelSize(io.DisplaySize.x), ImGuiCond_Always);
     
-    if (ImGui::Begin("Assets", &state.showAssetBrowser)) {
+    ImGuiWindowFlags flags = ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoResize;
+    if (ImGui::Begin("Assets", &state.showAssetBrowser, flags)) {
         // Path bar
         ImGui::Text("Path: %s", state.currentAssetPath.c_str());
         ImGui::SameLine(ImGui::GetContentRegionAvail().x - 60);
@@ -1664,10 +1875,13 @@ inline void drawAssetBrowser(EditorState& state) {
 inline void drawConsole(EditorState& state) {
     if (!state.showConsole) return;
     
-    ImGui::SetNextWindowPos(ImVec2(0, ImGui::GetIO().DisplaySize.y - 200), ImGuiCond_FirstUseEver);
-    ImGui::SetNextWindowSize(ImVec2(500, 180), ImGuiCond_FirstUseEver);
+    // Responsive layout - dock to bottom (can share with Asset Browser)
+    ImGuiIO& io = ImGui::GetIO();
+    ImGui::SetNextWindowPos(EditorLayout::getBottomPanelPos(io.DisplaySize.y), ImGuiCond_Always);
+    ImGui::SetNextWindowSize(EditorLayout::getBottomPanelSize(io.DisplaySize.x), ImGuiCond_Always);
     
-    if (ImGui::Begin("Console", &state.showConsole)) {
+    ImGuiWindowFlags flags = ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoResize;
+    if (ImGui::Begin("Console", &state.showConsole, flags)) {
         if (ImGui::Button("Clear")) {
             state.consoleLogs.clear();
         }
@@ -1931,27 +2145,28 @@ inline void drawScreenshotDialog(EditorState& state) {
 inline void drawStatsPanel(EditorState& state) {
     if (!state.showStats) return;
     
-    ImGui::SetNextWindowPos(ImVec2(ImGui::GetIO().DisplaySize.x - 200, 55), ImGuiCond_FirstUseEver);
-    ImGui::SetNextWindowSize(ImVec2(180, 180), ImGuiCond_FirstUseEver);
-    ImGui::SetNextWindowBgAlpha(0.7f);
+    // Small overlay in viewport area (top-right of viewport, not overlapping Inspector)
+    ImGuiIO& io = ImGui::GetIO();
+    float x = EditorLayout::kLeftPanelWidth + 10;
+    float y = EditorLayout::getTopOffset() + 10;
     
-    ImGuiWindowFlags flags = ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize;
-    if (ImGui::Begin("##Stats", &state.showStats, flags)) {
-        ImGui::TextColored(ImVec4(0.6f, 0.8f, 0.6f, 1.0f), "FPS: %.1f", ImGui::GetIO().Framerate);
-        ImGui::Text("Frame: %.2f ms", 1000.0f / ImGui::GetIO().Framerate);
+    ImGui::SetNextWindowPos(ImVec2(x, y), ImGuiCond_Always);
+    ImGui::SetNextWindowSize(ImVec2(150, 0), ImGuiCond_Always);  // Auto height
+    ImGui::SetNextWindowBgAlpha(0.6f);
+    
+    ImGuiWindowFlags flags = ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | 
+                             ImGuiWindowFlags_NoMove | ImGuiWindowFlags_AlwaysAutoResize |
+                             ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoFocusOnAppearing |
+                             ImGuiWindowFlags_NoNav;
+    if (ImGui::Begin("##Stats", nullptr, flags)) {
+        ImGui::TextColored(ImVec4(0.6f, 0.9f, 0.6f, 1.0f), "FPS: %.1f", io.Framerate);
+        ImGui::Text("Frame: %.2f ms", 1000.0f / io.Framerate);
         ImGui::Separator();
-        
-        // Culling statistics
         ImGui::Text("Objects: %zu", state.cullStats.totalObjects);
         ImGui::Text("Visible: %zu", state.cullStats.visibleObjects);
-        
-        // Show culling efficiency
         if (state.cullStats.totalObjects > 0) {
             float cullRatio = (float)state.cullStats.culledObjects / state.cullStats.totalObjects * 100.0f;
-            ImVec4 cullColor = cullRatio > 30.0f ? ImVec4(0.4f, 0.8f, 0.4f, 1.0f) : ImVec4(0.8f, 0.8f, 0.8f, 1.0f);
-            ImGui::TextColored(cullColor, "Culled: %zu (%.0f%%)", state.cullStats.culledObjects, cullRatio);
-        } else {
-            ImGui::Text("Culled: 0");
+            ImGui::Text("Culled: %.0f%%", cullRatio);
         }
     }
     ImGui::End();
@@ -2146,10 +2361,13 @@ inline bool handleViewportDragDrop(std::string& outAssetPath) {
 inline void drawAssetBrowserExtended(EditorState& state, const AssetCacheStats* cacheStats = nullptr) {
     if (!state.showAssetBrowser) return;
     
-    ImGui::SetNextWindowPos(ImVec2(280, ImGui::GetIO().DisplaySize.y - 250), ImGuiCond_FirstUseEver);
-    ImGui::SetNextWindowSize(ImVec2(500, 200), ImGuiCond_FirstUseEver);
+    // Responsive layout - dock to bottom
+    ImGuiIO& io = ImGui::GetIO();
+    ImGui::SetNextWindowPos(EditorLayout::getBottomPanelPos(io.DisplaySize.y), ImGuiCond_Always);
+    ImGui::SetNextWindowSize(EditorLayout::getBottomPanelSize(io.DisplaySize.x), ImGuiCond_Always);
     
-    if (ImGui::Begin("Assets", &state.showAssetBrowser)) {
+    ImGuiWindowFlags flags = ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoResize;
+    if (ImGui::Begin("Assets", &state.showAssetBrowser, flags)) {
         // Tab bar for browser and cache
         if (ImGui::BeginTabBar("AssetTabs")) {
             // File browser tab
@@ -6228,9 +6446,8 @@ inline void drawBuildSettingsPanel(BuildSettingsState& buildState, EditorState& 
 
 // ===== Status Bar =====
 inline void drawStatusBar(int windowWidth, int windowHeight, const std::string& statusText = "") {
-    float statusBarHeight = 24.0f;
-    ImGui::SetNextWindowPos(ImVec2(0, (float)windowHeight - statusBarHeight));
-    ImGui::SetNextWindowSize(ImVec2((float)windowWidth, statusBarHeight));
+    ImGui::SetNextWindowPos(ImVec2(0, (float)windowHeight - EditorLayout::kStatusBarHeight));
+    ImGui::SetNextWindowSize(ImVec2((float)windowWidth, EditorLayout::kStatusBarHeight));
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(10, 4));
     ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 0);
     
@@ -6248,6 +6465,2602 @@ inline void drawStatusBar(int windowWidth, int windowHeight, const std::string& 
     }
     ImGui::End();
     ImGui::PopStyleVar(2);
+}
+
+// ===== Asset Browser State =====
+struct AssetBrowserState {
+    AssetBrowser browser;
+    bool initialized = false;
+    char searchBuffer[256] = {0};
+    int viewMode = 0; // 0 = Grid, 1 = List
+    int thumbnailSize = 96;
+    int selectedAsset = -1;
+    bool showCreateMenu = false;
+    char newFolderName[64] = {0};
+    char renameBuffer[256] = {0};
+    int renamingAsset = -1;
+};
+
+// ===== Asset Browser Panel =====
+inline void drawAssetBrowserPanel(AssetBrowserState& state, EditorState& editorState) {
+    if (!editorState.showAssetBrowser) return;
+    
+    ImGui::SetNextWindowSize(ImVec2(800, 400), ImGuiCond_FirstUseEver);
+    if (!ImGui::Begin("Asset Browser", &editorState.showAssetBrowser)) {
+        ImGui::End();
+        return;
+    }
+    
+    // Initialize if needed
+    if (!state.initialized) {
+        state.browser.initialize(".");
+        state.initialized = true;
+    }
+    
+    // === Toolbar ===
+    // Navigation buttons
+    ImGui::BeginDisabled(!state.browser.canGoBack());
+    if (ImGui::Button("<")) state.browser.navigateBack();
+    ImGui::EndDisabled();
+    
+    ImGui::SameLine();
+    ImGui::BeginDisabled(!state.browser.canGoForward());
+    if (ImGui::Button(">")) state.browser.navigateForward();
+    ImGui::EndDisabled();
+    
+    ImGui::SameLine();
+    ImGui::BeginDisabled(!state.browser.canGoUp());
+    if (ImGui::Button("^")) state.browser.navigateUp();
+    ImGui::EndDisabled();
+    
+    ImGui::SameLine();
+    if (ImGui::Button("Refresh")) state.browser.refresh();
+    
+    ImGui::SameLine();
+    ImGui::Separator();
+    
+    // Breadcrumb path
+    ImGui::SameLine();
+    auto crumbs = state.browser.getBreadcrumbs();
+    for (size_t i = 0; i < crumbs.size(); i++) {
+        if (i > 0) {
+            ImGui::SameLine();
+            ImGui::TextDisabled("/");
+            ImGui::SameLine();
+        }
+        if (ImGui::SmallButton(crumbs[i].first.c_str())) {
+            state.browser.setCurrentPath(crumbs[i].second);
+        }
+    }
+    
+    // Search
+    ImGui::SameLine(ImGui::GetWindowWidth() - 250);
+    ImGui::SetNextItemWidth(200);
+    if (ImGui::InputTextWithHint("##search", "Search...", state.searchBuffer, sizeof(state.searchBuffer))) {
+        state.browser.setSearchText(state.searchBuffer);
+    }
+    
+    ImGui::Separator();
+    
+    // === Main content ===
+    float sidebarWidth = 200;
+    
+    // Sidebar - Folder tree
+    ImGui::BeginChild("FolderTree", ImVec2(sidebarWidth, 0), true);
+    auto tree = state.browser.getFolderTree();
+    
+    std::function<void(const AssetBrowser::FolderNode&)> drawFolderNode = [&](const AssetBrowser::FolderNode& node) {
+        ImGuiTreeNodeFlags flags = ImGuiTreeNodeFlags_OpenOnArrow | ImGuiTreeNodeFlags_SpanAvailWidth;
+        if (node.children.empty()) flags |= ImGuiTreeNodeFlags_Leaf;
+        if (state.browser.getCurrentPath() == node.path) flags |= ImGuiTreeNodeFlags_Selected;
+        
+        bool open = ImGui::TreeNodeEx(node.name.c_str(), flags);
+        
+        if (ImGui::IsItemClicked() && !ImGui::IsItemToggledOpen()) {
+            state.browser.setCurrentPath(node.path);
+        }
+        
+        if (open) {
+            for (const auto& child : node.children) {
+                drawFolderNode(child);
+            }
+            ImGui::TreePop();
+        }
+    };
+    drawFolderNode(tree);
+    ImGui::EndChild();
+    
+    ImGui::SameLine();
+    
+    // Content area
+    ImGui::BeginChild("AssetContent", ImVec2(0, 0), true);
+    
+    // View mode toggle and options
+    ImGui::RadioButton("Grid", &state.viewMode, 0);
+    ImGui::SameLine();
+    ImGui::RadioButton("List", &state.viewMode, 1);
+    
+    if (state.viewMode == 0) {
+        ImGui::SameLine();
+        ImGui::SetNextItemWidth(100);
+        ImGui::SliderInt("Size", &state.thumbnailSize, 48, 128);
+    }
+    
+    ImGui::SameLine(ImGui::GetContentRegionAvail().x - 100);
+    if (ImGui::Button("+ Create")) {
+        state.showCreateMenu = true;
+        ImGui::OpenPopup("CreateAssetPopup");
+    }
+    
+    // Create popup
+    if (ImGui::BeginPopup("CreateAssetPopup")) {
+        if (ImGui::MenuItem("New Folder")) {
+            strcpy(state.newFolderName, "New Folder");
+            ImGui::OpenPopup("NewFolderPopup");
+        }
+        if (ImGui::MenuItem("New Material")) {}
+        if (ImGui::MenuItem("New Script")) {}
+        if (ImGui::MenuItem("New Scene")) {}
+        ImGui::EndPopup();
+    }
+    
+    ImGui::Separator();
+    
+    // Asset grid/list
+    const auto& assets = state.browser.getAssets();
+    
+    if (state.viewMode == 0) {
+        // Grid view
+        float cellSize = (float)state.thumbnailSize + 20;
+        int columns = std::max(1, (int)(ImGui::GetContentRegionAvail().x / cellSize));
+        
+        ImGui::Columns(columns, nullptr, false);
+        
+        for (size_t i = 0; i < assets.size(); i++) {
+            const auto& asset = assets[i];
+            
+            ImGui::PushID((int)i);
+            
+            // Selection state
+            bool selected = state.browser.isSelected(i);
+            
+            ImGui::BeginGroup();
+            
+            // Thumbnail/icon area
+            ImVec2 iconSize((float)state.thumbnailSize, (float)state.thumbnailSize);
+            ImVec4 bgColor = selected ? ImVec4(0.3f, 0.4f, 0.6f, 1.0f) : ImVec4(0.15f, 0.15f, 0.17f, 1.0f);
+            
+            ImGui::PushStyleColor(ImGuiCol_Button, bgColor);
+            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.25f, 0.35f, 0.5f, 1.0f));
+            
+            if (ImGui::Button("##icon", iconSize)) {
+                state.browser.selectAsset(i);
+                state.selectedAsset = (int)i;
+            }
+            
+            ImGui::PopStyleColor(2);
+            
+            // Type icon overlay
+            ImGui::SetCursorPosY(ImGui::GetCursorPosY() - iconSize.y - 5);
+            ImGui::SetCursorPosX(ImGui::GetCursorPosX() + iconSize.x / 2 - 10);
+            ImGui::TextColored(ImVec4(0.7f, 0.7f, 0.7f, 0.8f), "%s", getAssetTypeName(asset.type));
+            ImGui::SetCursorPosY(ImGui::GetCursorPosY() + 5);
+            
+            // Drag source for dropping into scene
+            if (ImGui::BeginDragDropSource(ImGuiDragDropFlags_SourceAllowNullID)) {
+                // Store asset path for drag payload
+                ImGui::SetDragDropPayload("ASSET_BROWSER_ITEM", asset.path.c_str(), asset.path.size() + 1);
+                
+                // Preview during drag
+                ImGui::Text("%s %s", getAssetTypeIcon(asset.type), asset.name.c_str());
+                ImGui::EndDragDropSource();
+            }
+            
+            // Double-click to open
+            if (ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(0)) {
+                if (asset.isDirectory) {
+                    state.browser.setCurrentPath(asset.path);
+                } else {
+                    // Call callback for asset action
+                    if (editorState.onAssetDoubleClick) {
+                        editorState.onAssetDoubleClick(asset.path, asset.type);
+                    }
+                }
+            }
+            
+            // Context menu
+            if (ImGui::BeginPopupContextItem()) {
+                if (ImGui::MenuItem("Open")) {}
+                if (ImGui::MenuItem("Rename")) {
+                    state.renamingAsset = (int)i;
+                    strncpy(state.renameBuffer, asset.name.c_str(), sizeof(state.renameBuffer) - 1);
+                }
+                if (ImGui::MenuItem("Delete")) {
+                    state.browser.deleteAsset(asset);
+                }
+                ImGui::Separator();
+                if (ImGui::MenuItem("Show in Finder")) {
+                    // Platform specific
+                }
+                ImGui::EndPopup();
+            }
+            
+            // Name
+            ImGui::TextWrapped("%s", asset.name.c_str());
+            
+            ImGui::EndGroup();
+            
+            ImGui::NextColumn();
+            ImGui::PopID();
+        }
+        
+        ImGui::Columns(1);
+    } else {
+        // List view
+        if (ImGui::BeginTable("AssetTable", 4, ImGuiTableFlags_Resizable | ImGuiTableFlags_RowBg)) {
+            ImGui::TableSetupColumn("Name", ImGuiTableColumnFlags_WidthStretch);
+            ImGui::TableSetupColumn("Type", ImGuiTableColumnFlags_WidthFixed, 80);
+            ImGui::TableSetupColumn("Size", ImGuiTableColumnFlags_WidthFixed, 80);
+            ImGui::TableSetupColumn("Modified", ImGuiTableColumnFlags_WidthFixed, 120);
+            ImGui::TableHeadersRow();
+            
+            for (size_t i = 0; i < assets.size(); i++) {
+                const auto& asset = assets[i];
+                
+                ImGui::TableNextRow();
+                ImGui::TableNextColumn();
+                
+                bool selected = state.browser.isSelected(i);
+                if (ImGui::Selectable(asset.name.c_str(), selected, ImGuiSelectableFlags_SpanAllColumns)) {
+                    state.browser.selectAsset(i);
+                }
+                
+                // Drag source for list view
+                if (ImGui::BeginDragDropSource(ImGuiDragDropFlags_SourceAllowNullID)) {
+                    ImGui::SetDragDropPayload("ASSET_BROWSER_ITEM", asset.path.c_str(), asset.path.size() + 1);
+                    ImGui::Text("%s %s", getAssetTypeIcon(asset.type), asset.name.c_str());
+                    ImGui::EndDragDropSource();
+                }
+                
+                if (ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(0)) {
+                    if (asset.isDirectory) {
+                        state.browser.setCurrentPath(asset.path);
+                    } else {
+                        if (editorState.onAssetDoubleClick) {
+                            editorState.onAssetDoubleClick(asset.path, asset.type);
+                        }
+                    }
+                }
+                
+                ImGui::TableNextColumn();
+                ImGui::Text("%s", getAssetTypeName(asset.type));
+                
+                ImGui::TableNextColumn();
+                if (!asset.isDirectory) {
+                    ImGui::Text("%s", formatFileSize(asset.size).c_str());
+                }
+                
+                ImGui::TableNextColumn();
+                // Would format time here
+                ImGui::Text("-");
+            }
+            
+            ImGui::EndTable();
+        }
+    }
+    
+    ImGui::EndChild();
+    
+    ImGui::End();
+}
+
+// ===== Visual Script State =====
+struct VisualScriptState {
+    std::unique_ptr<VisualScriptGraph> graph;
+    Vec2 scrollOffset = {0, 0};
+    float zoom = 1.0f;
+    
+    // Interaction state
+    int selectedNodeId = -1;
+    int hoveredNodeId = -1;
+    int draggingNodeId = -1;
+    Vec2 dragOffset;
+    
+    // Link creation
+    bool creatingLink = false;
+    uint32_t linkStartNode = 0;
+    uint32_t linkStartPin = 0;
+    
+    // Context menu
+    bool showContextMenu = false;
+    Vec2 contextMenuPos;
+    char searchBuffer[64] = {0};
+    
+    // Variables
+    char newVarName[64] = {0};
+    int newVarType = 0;
+    
+    VisualScriptState() {
+        graph = std::make_unique<VisualScriptGraph>();
+        graph->name = "NewScript";
+    }
+};
+
+// ===== Visual Script Editor Panel =====
+inline void drawVisualScriptPanel(VisualScriptState& state, EditorState& editorState) {
+    if (!editorState.showVisualScript) return;
+    
+    ImGui::SetNextWindowSize(ImVec2(1000, 600), ImGuiCond_FirstUseEver);
+    if (!ImGui::Begin("Visual Script", &editorState.showVisualScript, ImGuiWindowFlags_MenuBar)) {
+        ImGui::End();
+        return;
+    }
+    
+    auto& graph = *state.graph;
+    
+    // === Menu Bar ===
+    if (ImGui::BeginMenuBar()) {
+        if (ImGui::BeginMenu("File")) {
+            if (ImGui::MenuItem("New")) {
+                state.graph = std::make_unique<VisualScriptGraph>();
+            }
+            if (ImGui::MenuItem("Open...")) {}
+            if (ImGui::MenuItem("Save")) {}
+            if (ImGui::MenuItem("Save As...")) {}
+            ImGui::Separator();
+            if (ImGui::MenuItem("Export to Lua")) {
+                std::string lua = graph.compileToLua();
+                // Would save to file
+            }
+            ImGui::EndMenu();
+        }
+        if (ImGui::BeginMenu("Edit")) {
+            if (ImGui::MenuItem("Undo", "Ctrl+Z")) {}
+            if (ImGui::MenuItem("Redo", "Ctrl+Y")) {}
+            ImGui::Separator();
+            if (ImGui::MenuItem("Delete", "Del")) {
+                if (state.selectedNodeId >= 0) {
+                    graph.deleteNode(state.selectedNodeId);
+                    state.selectedNodeId = -1;
+                }
+            }
+            ImGui::Separator();
+            if (ImGui::MenuItem("Select All", "Ctrl+A")) {}
+            ImGui::EndMenu();
+        }
+        if (ImGui::BeginMenu("View")) {
+            if (ImGui::MenuItem("Reset View")) {
+                state.scrollOffset = {0, 0};
+                state.zoom = 1.0f;
+            }
+            if (ImGui::MenuItem("Zoom In")) state.zoom = std::min(2.0f, state.zoom + 0.1f);
+            if (ImGui::MenuItem("Zoom Out")) state.zoom = std::max(0.5f, state.zoom - 0.1f);
+            ImGui::EndMenu();
+        }
+        ImGui::EndMenuBar();
+    }
+    
+    // === Left Sidebar - Variables and Properties ===
+    ImGui::BeginChild("Sidebar", ImVec2(200, 0), true);
+    
+    // Variables
+    if (ImGui::CollapsingHeader("Variables", ImGuiTreeNodeFlags_DefaultOpen)) {
+        for (size_t i = 0; i < graph.variables.size(); i++) {
+            auto& var = graph.variables[i];
+            
+            ImGui::PushID((int)i);
+            
+            const char* typeNames[] = {"Bool", "Int", "Float", "String", "Vec3", "Object"};
+            ImGui::Text("%s", var.name.c_str());
+            ImGui::SameLine(120);
+            ImGui::TextDisabled("%s", typeNames[(int)var.type - 1]);
+            
+            ImGui::PopID();
+        }
+        
+        ImGui::Separator();
+        
+        ImGui::SetNextItemWidth(100);
+        ImGui::InputText("##varname", state.newVarName, sizeof(state.newVarName));
+        
+        ImGui::SameLine();
+        const char* types[] = {"Bool", "Int", "Float", "String", "Vec3"};
+        ImGui::SetNextItemWidth(60);
+        ImGui::Combo("##vartype", &state.newVarType, types, IM_ARRAYSIZE(types));
+        
+        ImGui::SameLine();
+        if (ImGui::Button("+") && strlen(state.newVarName) > 0) {
+            PinType pinTypes[] = {PinType::Bool, PinType::Int, PinType::Float, PinType::String, PinType::Vec3};
+            graph.addVariable(state.newVarName, pinTypes[state.newVarType]);
+            state.newVarName[0] = '\0';
+        }
+    }
+    
+    // Selected node properties
+    if (state.selectedNodeId >= 0) {
+        if (auto* node = graph.findNode(state.selectedNodeId)) {
+            ImGui::Separator();
+            if (ImGui::CollapsingHeader("Properties", ImGuiTreeNodeFlags_DefaultOpen)) {
+                ImGui::Text("Node: %s", node->displayName.c_str());
+                ImGui::Text("ID: %u", node->id);
+                
+                // Node-specific properties
+                for (auto& [key, value] : node->properties) {
+                    if (std::holds_alternative<std::string>(value)) {
+                        static char buf[256];
+                        strncpy(buf, std::get<std::string>(value).c_str(), sizeof(buf) - 1);
+                        if (ImGui::InputText(key.c_str(), buf, sizeof(buf))) {
+                            node->properties[key] = std::string(buf);
+                        }
+                    }
+                }
+                
+                // Comment
+                static char comment[256];
+                strncpy(comment, node->comment.c_str(), sizeof(comment) - 1);
+                if (ImGui::InputText("Comment", comment, sizeof(comment))) {
+                    node->comment = comment;
+                }
+                
+                ImGui::Checkbox("Breakpoint", &node->breakpoint);
+            }
+        }
+    }
+    
+    ImGui::EndChild();
+    
+    ImGui::SameLine();
+    
+    // === Canvas ===
+    ImGui::BeginChild("Canvas", ImVec2(0, 0), true, ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoMove);
+    
+    ImDrawList* drawList = ImGui::GetWindowDrawList();
+    ImVec2 canvasPos = ImGui::GetCursorScreenPos();
+    ImVec2 canvasSize = ImGui::GetContentRegionAvail();
+    
+    // Background grid
+    float gridSize = 32.0f * state.zoom;
+    ImU32 gridColor = IM_COL32(50, 50, 55, 255);
+    ImU32 gridColorBold = IM_COL32(70, 70, 75, 255);
+    
+    for (float x = fmodf(state.scrollOffset.x, gridSize); x < canvasSize.x; x += gridSize) {
+        drawList->AddLine(
+            ImVec2(canvasPos.x + x, canvasPos.y),
+            ImVec2(canvasPos.x + x, canvasPos.y + canvasSize.y),
+            (int(x - state.scrollOffset.x) % (int)(gridSize * 4) == 0) ? gridColorBold : gridColor
+        );
+    }
+    for (float y = fmodf(state.scrollOffset.y, gridSize); y < canvasSize.y; y += gridSize) {
+        drawList->AddLine(
+            ImVec2(canvasPos.x, canvasPos.y + y),
+            ImVec2(canvasPos.x + canvasSize.x, canvasPos.y + y),
+            (int(y - state.scrollOffset.y) % (int)(gridSize * 4) == 0) ? gridColorBold : gridColor
+        );
+    }
+    
+    // Draw links
+    for (const auto& link : graph.links) {
+        auto* fromNode = graph.findNode(link.fromNode);
+        auto* toNode = graph.findNode(link.toNode);
+        if (!fromNode || !toNode) continue;
+        
+        auto* fromPin = fromNode->findPin(link.fromPin);
+        auto* toPin = toNode->findPin(link.toPin);
+        if (!fromPin || !toPin) continue;
+        
+        // Calculate positions
+        ImVec2 p1(
+            canvasPos.x + (fromNode->position.x + fromNode->size.x) * state.zoom + state.scrollOffset.x,
+            canvasPos.y + (fromNode->position.y + 30 + 20 * fromPin->id % 5) * state.zoom + state.scrollOffset.y
+        );
+        ImVec2 p4(
+            canvasPos.x + toNode->position.x * state.zoom + state.scrollOffset.x,
+            canvasPos.y + (toNode->position.y + 30 + 20 * toPin->id % 5) * state.zoom + state.scrollOffset.y
+        );
+        
+        float dx = std::abs(p4.x - p1.x) * 0.5f;
+        ImVec2 p2(p1.x + dx, p1.y);
+        ImVec2 p3(p4.x - dx, p4.y);
+        
+        ImU32 color = getPinColor(fromPin->type);
+        drawList->AddBezierCubic(p1, p2, p3, p4, color, 2.0f * state.zoom);
+    }
+    
+    // Draw nodes
+    for (const auto& nodePtr : graph.nodes) {
+        auto& node = *nodePtr;
+        
+        ImVec2 nodePos(
+            canvasPos.x + node.position.x * state.zoom + state.scrollOffset.x,
+            canvasPos.y + node.position.y * state.zoom + state.scrollOffset.y
+        );
+        ImVec2 nodeSize(node.size.x * state.zoom, node.size.y * state.zoom);
+        
+        // Node background
+        ImU32 bgColor = (state.selectedNodeId == (int)node.id) ? IM_COL32(60, 60, 70, 255) : IM_COL32(40, 40, 45, 255);
+        drawList->AddRectFilled(nodePos, ImVec2(nodePos.x + nodeSize.x, nodePos.y + nodeSize.y), bgColor, 4.0f);
+        
+        // Header
+        drawList->AddRectFilled(nodePos, ImVec2(nodePos.x + nodeSize.x, nodePos.y + 24 * state.zoom), node.headerColor, 4.0f, ImDrawFlags_RoundCornersTop);
+        
+        // Title
+        drawList->AddText(ImVec2(nodePos.x + 8, nodePos.y + 4), IM_COL32(255, 255, 255, 255), node.displayName.c_str());
+        
+        // Border
+        ImU32 borderColor = (state.selectedNodeId == (int)node.id) ? IM_COL32(100, 150, 255, 255) : IM_COL32(80, 80, 90, 255);
+        drawList->AddRect(nodePos, ImVec2(nodePos.x + nodeSize.x, nodePos.y + nodeSize.y), borderColor, 4.0f);
+        
+        // Breakpoint indicator
+        if (node.breakpoint) {
+            drawList->AddCircleFilled(ImVec2(nodePos.x + nodeSize.x - 8, nodePos.y + 8), 5, IM_COL32(255, 50, 50, 255));
+        }
+        
+        // Input pins
+        float pinY = nodePos.y + 30 * state.zoom;
+        for (const auto& pin : node.inputs) {
+            ImVec2 pinPos(nodePos.x, pinY);
+            drawList->AddCircleFilled(pinPos, 5 * state.zoom, getPinColor(pin.type));
+            drawList->AddText(ImVec2(pinPos.x + 10, pinY - 7), IM_COL32(200, 200, 200, 255), pin.name.c_str());
+            pinY += 20 * state.zoom;
+        }
+        
+        // Output pins
+        pinY = nodePos.y + 30 * state.zoom;
+        for (const auto& pin : node.outputs) {
+            ImVec2 pinPos(nodePos.x + nodeSize.x, pinY);
+            drawList->AddCircleFilled(pinPos, 5 * state.zoom, getPinColor(pin.type));
+            
+            ImVec2 textSize = ImGui::CalcTextSize(pin.name.c_str());
+            drawList->AddText(ImVec2(pinPos.x - textSize.x - 10, pinY - 7), IM_COL32(200, 200, 200, 255), pin.name.c_str());
+            pinY += 20 * state.zoom;
+        }
+        
+        // Interaction
+        ImGui::SetCursorScreenPos(nodePos);
+        ImGui::InvisibleButton(("node_" + std::to_string(node.id)).c_str(), nodeSize);
+        
+        if (ImGui::IsItemClicked()) {
+            state.selectedNodeId = node.id;
+        }
+        
+        if (ImGui::IsItemActive() && ImGui::IsMouseDragging(0)) {
+            node.position.x += ImGui::GetIO().MouseDelta.x / state.zoom;
+            node.position.y += ImGui::GetIO().MouseDelta.y / state.zoom;
+        }
+    }
+    
+    // Canvas interaction
+    ImGui::SetCursorScreenPos(canvasPos);
+    ImGui::InvisibleButton("canvas", canvasSize);
+    
+    // Pan
+    if (ImGui::IsItemActive() && ImGui::IsMouseDragging(2)) {
+        state.scrollOffset.x += ImGui::GetIO().MouseDelta.x;
+        state.scrollOffset.y += ImGui::GetIO().MouseDelta.y;
+    }
+    
+    // Zoom
+    if (ImGui::IsItemHovered()) {
+        float wheel = ImGui::GetIO().MouseWheel;
+        if (wheel != 0) {
+            state.zoom = std::clamp(state.zoom + wheel * 0.1f, 0.25f, 2.0f);
+        }
+    }
+    
+    // Right-click context menu
+    if (ImGui::IsItemClicked(1)) {
+        state.showContextMenu = true;
+        state.contextMenuPos = {ImGui::GetMousePos().x - canvasPos.x, ImGui::GetMousePos().y - canvasPos.y};
+        ImGui::OpenPopup("NodeContextMenu");
+    }
+    
+    // Context menu
+    if (ImGui::BeginPopup("NodeContextMenu")) {
+        ImGui::SetNextItemWidth(150);
+        ImGui::InputTextWithHint("##search", "Search nodes...", state.searchBuffer, sizeof(state.searchBuffer));
+        
+        auto& library = NodeLibrary::getInstance();
+        
+        if (strlen(state.searchBuffer) > 0) {
+            // Search results
+            auto results = library.searchNodes(state.searchBuffer);
+            for (const auto& def : results) {
+                if (ImGui::MenuItem(def.displayName.c_str())) {
+                    auto* node = graph.createNode(def.name);
+                    node->position.x = (state.contextMenuPos.x - state.scrollOffset.x) / state.zoom;
+                    node->position.y = (state.contextMenuPos.y - state.scrollOffset.y) / state.zoom;
+                    state.searchBuffer[0] = '\0';
+                }
+            }
+        } else {
+            // Categories
+            NodeCategory categories[] = {
+                NodeCategory::Events, NodeCategory::Flow, NodeCategory::Math,
+                NodeCategory::Logic, NodeCategory::Variables, NodeCategory::Transform,
+                NodeCategory::Physics, NodeCategory::Audio, NodeCategory::Input, NodeCategory::Debug
+            };
+            
+            for (auto cat : categories) {
+                if (ImGui::BeginMenu(getCategoryName(cat))) {
+                    auto nodes = library.getNodesInCategory(cat);
+                    for (const auto& def : nodes) {
+                        if (ImGui::MenuItem(def.displayName.c_str())) {
+                            auto* node = graph.createNode(def.name);
+                            node->position.x = (state.contextMenuPos.x - state.scrollOffset.x) / state.zoom;
+                            node->position.y = (state.contextMenuPos.y - state.scrollOffset.y) / state.zoom;
+                        }
+                    }
+                    ImGui::EndMenu();
+                }
+            }
+        }
+        
+        ImGui::EndPopup();
+    }
+    
+    ImGui::EndChild();
+    
+    ImGui::End();
+}
+
+// ===== Character Creator State =====
+struct CharacterCreatorState {
+    // Character reference (managed externally)
+    void* character = nullptr;  // Character*
+    void* blendShapeMesh = nullptr;  // BlendShapeMesh*
+    
+    // UI state
+    int currentTab = 0;  // 0=Presets, 1=Body, 2=Face, 3=BlendShape, 4=Export
+    int bodySubTab = 0;
+    int faceSubTab = 0;
+    
+    // Preview
+    bool autoRotate = true;
+    float rotationY = 0.0f;
+    
+    // Character name
+    char characterName[256] = "MyCharacter";
+    
+    // Preset system
+    int selectedPresetCategory = 0;  // 0=All, 1=Realistic, 2=Anime, 3=Cartoon, etc.
+    int selectedPresetIndex = -1;
+    std::string selectedPresetId;
+    bool showPresetBrowser = false;
+    bool presetApplied = false;
+    
+    // Body parameters (local copy for UI)
+    int gender = 0;  // 0=Male, 1=Female, 2=Neutral
+    int ageGroup = 3;  // 0=Child, 1=Teen, 2=YoungAdult, 3=Adult, 4=Senior
+    float height = 0.5f;
+    float weight = 0.5f;
+    float muscularity = 0.3f;
+    float bodyFat = 0.3f;
+    float shoulderWidth = 0.5f;
+    float chestSize = 0.5f;
+    float waistSize = 0.5f;
+    float hipWidth = 0.5f;
+    float armLength = 0.5f;
+    float armThickness = 0.5f;
+    float legLength = 0.5f;
+    float thighThickness = 0.5f;
+    float bustSize = 0.5f;  // For female
+    float skinColor[3] = {0.85f, 0.65f, 0.5f};
+    
+    // Face parameters
+    float faceWidth = 0.5f;
+    float faceLength = 0.5f;
+    float faceRoundness = 0.5f;
+    float eyeSize = 0.5f;
+    float eyeSpacing = 0.5f;
+    float eyeHeight = 0.5f;
+    float eyeAngle = 0.5f;
+    float eyeColor[3] = {0.3f, 0.4f, 0.2f};
+    float noseLength = 0.5f;
+    float noseWidth = 0.5f;
+    float noseHeight = 0.5f;
+    float noseBridge = 0.5f;
+    float mouthWidth = 0.5f;
+    float upperLipThickness = 0.5f;
+    float lowerLipThickness = 0.5f;
+    float jawWidth = 0.5f;
+    float jawLine = 0.5f;
+    float chinLength = 0.5f;
+    float chinWidth = 0.5f;
+    
+    // BlendShape direct control
+    std::vector<std::pair<std::string, float>> blendShapeWeights;
+    
+    // Export
+    int exportFormat = 0;  // 0=GLB, 1=glTF, 2=FBX, 3=OBJ, 4=VRM
+    bool exportSkeleton = true;
+    bool exportBlendShapes = true;
+    bool exportTextures = true;
+    bool exportMaterials = true;
+    bool embedTextures = true;
+    char exportPath[512] = "";
+    bool exportInProgress = false;
+    float exportProgress = 0.0f;
+    std::string exportStatus;
+    std::string lastExportPath;
+    bool exportSuccess = false;
+    
+    // Statistics
+    uint32_t vertexCount = 0;
+    uint32_t triangleCount = 0;
+    uint32_t blendShapeCount = 0;
+    uint32_t boneCount = 0;
+    
+    // AI Model status
+    bool showAIModelSetup = false;
+    bool aiModelsReady = false;
+    std::string aiModelStatus;
+    
+    // Clothing state
+    int clothingCategory = 0;  // Current category being viewed
+    std::string selectedClothingId;
+    float clothingColorEdit[3] = {1.0f, 1.0f, 1.0f};
+    std::vector<std::pair<std::string, std::string>> equippedClothing;  // slot, assetId
+    
+    // Animation/Pose state
+    int poseCategory = 0;
+    std::string selectedPose;
+    std::string currentAnimation;
+    float animationTime = 0.0f;
+    bool animationPlaying = false;
+    float animationSpeed = 1.0f;
+    
+    // Stylized rendering state
+    int renderingStyle = 0;  // 0=Realistic, 1=Anime, 2=Cartoon, 3=Painterly, 4=Sketch
+    bool outlineEnabled = false;
+    float outlineThickness = 0.003f;
+    float outlineColor[3] = {0.1f, 0.1f, 0.15f};
+    int celShadingBands = 3;
+    bool rimLightEnabled = true;
+    float rimLightIntensity = 0.4f;
+    float colorVibrancy = 1.0f;
+    
+    // Texture state
+    int skinPreset = 0;  // 0=Caucasian, 1=Asian, 2=African, 3=Latino, 4=MiddleEastern
+    float skinSaturation = 1.0f;
+    float skinBrightness = 1.0f;
+    float skinRoughness = 0.5f;
+    float poreIntensity = 0.5f;
+    float wrinkleIntensity = 0.0f;
+    float freckleIntensity = 0.0f;
+    float freckleColor[3] = {0.6f, 0.4f, 0.3f};
+    float sssIntensity = 0.3f;
+    
+    // Eye texture
+    int eyeColorPreset = 0;  // 0=Brown, 1=Blue, 2=Green, 3=Hazel, 4=Gray
+    float irisSize = 0.5f;
+    float pupilSize = 0.3f;
+    float irisDetail = 0.7f;
+    float scleraVeins = 0.1f;
+    float eyeWetness = 0.8f;
+    
+    // Lip texture
+    float lipColor[3] = {0.75f, 0.45f, 0.45f};
+    float lipGlossiness = 0.4f;
+    float lipChapped = 0.0f;
+    
+    // Texture generation
+    int textureResolution = 1;  // 0=512, 1=1024, 2=2048
+    bool textureNeedsUpdate = true;
+    
+    // Hair state
+    int hairStyleIndex = 0;
+    int hairColorPreset = 0;  // 0=Black, 1=DarkBrown, 2=Brown, etc.
+    float hairColor[3] = {0.15f, 0.1f, 0.05f};
+    bool useCustomHairColor = false;
+    bool hairNeedsUpdate = true;
+    std::vector<std::string> availableHairStyles;
+    
+    // Callbacks
+    std::function<void()> onInitialize;
+    std::function<void()> onRandomize;
+    std::function<void(int category)> onRandomizeInStyle;  // Random within category
+    std::function<void(int)> onPresetSelect;
+    std::function<void(const std::string& presetId)> onApplyPreset;
+    std::function<void()> onPhotoImport;
+    std::function<void(const std::string&)> onPhotoProcess;  // Actual processing
+    std::function<void(const std::string& path, int format, bool skeleton, bool blendShapes, bool textures)> onExport;
+    std::function<void()> onParameterChanged;
+    std::function<void(const std::string&, float)> onBlendShapeChanged;
+    std::function<void(const std::string&, const std::string&)> onImportAIModel;
+    
+    // Clothing callbacks
+    std::function<void(const std::string&)> onEquipClothing;
+    std::function<void(const std::string&)> onUnequipClothing;
+    std::function<void(const std::string&, float, float, float)> onClothingColorChange;
+    std::function<std::vector<std::pair<std::string, std::string>>()> getAvailableClothing;  // Returns id, name pairs
+    
+    // Animation callbacks
+    std::function<void(const std::string&)> onApplyPose;
+    std::function<void(const std::string&)> onPlayAnimation;
+    std::function<void()> onStopAnimation;
+    
+    // Style callbacks
+    std::function<void(int)> onStyleChange;
+    std::function<void()> onStyleSettingsChange;
+    
+    // Texture callbacks
+    std::function<void()> onTextureUpdate;
+    std::function<void(int)> onSkinPresetChange;
+    std::function<void(int)> onEyeColorPresetChange;
+    
+    // Hair callbacks
+    std::function<void(const std::string&)> onHairStyleChange;
+    std::function<void(int)> onHairColorPresetChange;
+    std::function<void(float, float, float)> onHairColorChange;
+    
+    // === NEW: Pose Editor State ===
+    int poseEditorBoneCategory = 0;  // 0=All, 1=Spine, 2=LeftArm, 3=RightArm, 4=LeftLeg, 5=RightLeg, 6=Head
+    std::string selectedBoneName;
+    float boneRotationX = 0.0f;
+    float boneRotationY = 0.0f;
+    float boneRotationZ = 0.0f;
+    bool showPoseLibrary = true;
+    int selectedPoseCategory = 0;  // 0=Reference, 1=Standing, 2=Action, 3=Sitting, 4=Gesture
+    std::string selectedPoseName;
+    bool poseAutoMirror = false;
+    
+    // === NEW: Material Library State ===
+    int materialCategory = 0;  // 0=All, 1=Metal, 2=Wood, 3=Stone, etc.
+    std::string selectedMaterialId;
+    bool showMaterialBrowser = false;
+    
+    // === NEW: Advanced Hair Rendering ===
+    float hairSpecularStrength = 1.0f;
+    float hairSpecularShift = 0.1f;
+    float hairTransmission = 0.3f;
+    float hairScatter = 0.2f;
+    float hairCurlFrequency = 2.0f;
+    float hairCurlAmplitude = 0.01f;
+    float hairFrizz = 0.005f;
+    float hairClumping = 0.3f;
+    
+    // === NEW: Eye Rendering ===
+    float eyeIrisDepth = 0.02f;
+    float eyeCorneaBulge = 0.03f;
+    float eyeCausticStrength = 0.3f;
+    float eyeReflection = 0.5f;
+    float eyePupilDilation = 0.0f;  // -1 to 1
+    
+    // === NEW: Skin SSS ===
+    float skinSubsurfaceStrength = 0.5f;
+    float skinSubsurfaceRadius = 0.01f;
+    float skinTranslucency = 0.3f;
+    float skinOilAmount = 0.3f;
+    float skinPoreDepth = 0.1f;
+    float skinBlush = 0.0f;
+    float skinBlushColor[3] = {0.9f, 0.4f, 0.4f};
+    
+    // === NEW: Animation Editor State ===
+    bool showAnimationTimeline = false;
+    bool showCurveEditor = false;
+    int animEditorSelectedTrack = -1;
+    float animEditorZoom = 1.0f;
+    float animEditorScroll = 0.0f;
+    bool animEditorAutoKey = false;
+    bool animEditorSnapToFrame = true;
+    int animEditorInterpolation = 1;  // 0=Constant, 1=Linear, 2=Bezier, etc.
+    bool animEditorShowGhosts = false;
+    int animEditorGhostFrames = 3;
+    
+    // === NEW: Pose Editor Callbacks ===
+    std::function<void(const std::string&)> onBoneSelect;
+    std::function<void(const std::string&, float, float, float)> onBoneRotate;
+    std::function<void()> onPoseReset;
+    std::function<void()> onPoseMirror;
+    std::function<void(const std::string&)> onPoseLoad;
+    std::function<void(const std::string&)> onPoseSave;
+    
+    // === NEW: Material Callbacks ===
+    std::function<void(const std::string&)> onMaterialSelect;
+    std::function<std::vector<std::pair<std::string, std::string>>()> getMaterialList;  // id, name
+    
+    // === NEW: Advanced Rendering Callbacks ===
+    std::function<void()> onHairRenderingUpdate;
+    std::function<void()> onEyeRenderingUpdate;
+    std::function<void()> onSkinRenderingUpdate;
+    
+    // === NEW: Animation Editor Callbacks ===
+    std::function<void(float)> onAnimEditorSeek;
+    std::function<void()> onAnimEditorAddKeyframe;
+    std::function<void()> onAnimEditorDeleteKeyframe;
+    std::function<void(int)> onAnimEditorSetInterpolation;
+    
+    // Initialized
+    bool initialized = false;
+};
+
+// ===== Character Creator Panel =====
+inline void drawCharacterCreatorPanel(CharacterCreatorState& state, EditorState& editorState) {
+    if (!editorState.showCharacterCreator) return;
+    
+    ImGui::SetNextWindowSize(ImVec2(420, 650), ImGuiCond_FirstUseEver);
+    ImGui::SetNextWindowPos(ImVec2(50, 80), ImGuiCond_FirstUseEver);
+    
+    if (ImGui::Begin("Character Creator", &editorState.showCharacterCreator)) {
+        
+        // Initialize button if not initialized
+        if (!state.initialized) {
+            ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.2f, 1.0f), "Character Creator not initialized");
+            ImGui::Separator();
+            ImGui::TextWrapped("Click 'Initialize' to create a new character with procedural model.");
+            ImGui::TextWrapped("The character will appear in the 3D viewport to the right of the scene center.");
+            ImGui::Spacing();
+            if (ImGui::Button("Initialize Character Creator", ImVec2(-1, 40))) {
+                if (state.onInitialize) {
+                    state.onInitialize();
+                }
+                state.initialized = true;
+            }
+            ImGui::End();
+            return;
+        }
+        
+        // Character name
+        ImGui::InputText("Name", state.characterName, sizeof(state.characterName));
+        ImGui::Separator();
+        
+        // Tab bar
+        if (ImGui::BeginTabBar("CharacterTabs")) {
+            // === Presets Tab ===
+            if (ImGui::BeginTabItem("Presets")) {
+                state.currentTab = 0;
+                
+                ImGui::TextColored(ImVec4(0.4f, 0.8f, 1.0f, 1.0f), "Quick Start Presets");
+                ImGui::TextDisabled("Select a preset to start quickly");
+                ImGui::Separator();
+                
+                // Category filter
+                const char* categories[] = {"All", "Fantasy", "Wuxia", "Gufeng", "Anime", "Cartoon", "Sci-Fi", "Realistic"};
+                ImGui::SetNextItemWidth(150);
+                ImGui::Combo("Category", &state.selectedPresetCategory, categories, 8);
+                
+                ImGui::SameLine();
+                
+                // Randomize button
+                if (ImGui::Button("Randomize")) {
+                    if (state.selectedPresetCategory == 0) {
+                        if (state.onRandomize) state.onRandomize();
+                    } else {
+                        if (state.onRandomizeInStyle) state.onRandomizeInStyle(state.selectedPresetCategory - 1);
+                    }
+                }
+                
+                ImGui::Separator();
+                ImGui::Spacing();
+                
+                // Preset grid (2 columns)
+                float buttonWidth = (ImGui::GetContentRegionAvail().x - 10) / 2;
+                float buttonHeight = 80;
+                
+                // Define presets with their categories
+                struct PresetInfo {
+                    const char* id;
+                    const char* name;
+                    const char* nameCN;
+                    int category;  // 1=Realistic, 2=Anime, 3=Cartoon, 4=Fantasy, 5=SciFi
+                    ImVec4 skinColor;
+                    ImVec4 hairColor;
+                };
+                
+                // Category: 1=Fantasy, 2=Wuxia, 3=Gufeng, 4=Anime, 5=Cartoon, 6=SciFi, 7=Realistic
+                PresetInfo presets[] = {
+                    // === 西幻 Fantasy ===
+                    {"fantasy_elf", "Elf", "精灵", 1, {0.98f, 0.95f, 0.92f, 1}, {0.95f, 0.92f, 0.85f, 1}},
+                    {"fantasy_paladin", "Paladin", "圣骑士", 1, {0.88f, 0.75f, 0.65f, 1}, {0.8f, 0.65f, 0.4f, 1}},
+                    {"fantasy_dark_mage", "Dark Mage", "暗黑法师", 1, {0.85f, 0.82f, 0.8f, 1}, {0.08f, 0.05f, 0.12f, 1}},
+                    {"fantasy_orc", "Orc Warrior", "兽人战士", 1, {0.4f, 0.55f, 0.35f, 1}, {0.1f, 0.1f, 0.1f, 1}},
+                    // === 武侠 Wuxia ===
+                    {"wuxia_swordsman", "Swordsman", "剑客", 2, {0.9f, 0.78f, 0.65f, 1}, {0.08f, 0.06f, 0.04f, 1}},
+                    {"wuxia_female_knight", "Female Knight", "女侠", 2, {0.95f, 0.85f, 0.75f, 1}, {0.05f, 0.03f, 0.02f, 1}},
+                    {"wuxia_monk", "Martial Monk", "武僧", 2, {0.85f, 0.7f, 0.55f, 1}, {0.5f, 0.5f, 0.5f, 1}},
+                    // === 古风 Gufeng ===
+                    {"gufeng_xianxia_hero", "Xianxia Hero", "仙侠少年", 3, {0.95f, 0.88f, 0.8f, 1}, {0.05f, 0.03f, 0.02f, 1}},
+                    {"gufeng_fairy", "Fairy Maiden", "仙子", 3, {0.98f, 0.95f, 0.92f, 1}, {0.1f, 0.08f, 0.05f, 1}},
+                    {"gufeng_emperor", "Emperor", "帝王", 3, {0.92f, 0.82f, 0.72f, 1}, {0.05f, 0.03f, 0.02f, 1}},
+                    {"gufeng_princess", "Princess", "公主", 3, {0.96f, 0.9f, 0.85f, 1}, {0.05f, 0.03f, 0.02f, 1}},
+                    // === 动漫 Anime ===
+                    {"anime_girl", "Anime Girl", "动漫少女", 4, {0.98f, 0.92f, 0.88f, 1}, {1.0f, 0.6f, 0.7f, 1}},
+                    {"anime_boy", "Anime Boy", "动漫少年", 4, {0.95f, 0.88f, 0.82f, 1}, {0.05f, 0.05f, 0.1f, 1}},
+                    {"anime_chibi", "Chibi", "Q版角色", 4, {1.0f, 0.95f, 0.9f, 1}, {0.9f, 0.7f, 0.3f, 1}},
+                    // === 卡通 Cartoon ===
+                    {"cartoon_western", "Western Cartoon", "西方卡通", 5, {0.95f, 0.85f, 0.7f, 1}, {0.1f, 0.08f, 0.05f, 1}},
+                    {"cartoon_pixar", "Pixar Style", "皮克斯风格", 5, {0.92f, 0.78f, 0.65f, 1}, {0.35f, 0.22f, 0.12f, 1}},
+                    // === 科幻 Sci-Fi ===
+                    {"scifi_cyborg", "Cyborg", "赛博格", 6, {0.75f, 0.72f, 0.7f, 1}, {0.3f, 0.3f, 0.3f, 1}},
+                    {"scifi_alien", "Alien", "外星人", 6, {0.6f, 0.7f, 0.8f, 1}, {0.5f, 0.5f, 0.5f, 1}},
+                    // === 写实 Realistic ===
+                    {"realistic_athlete", "Athlete", "运动员", 7, {0.75f, 0.55f, 0.4f, 1}, {0.05f, 0.05f, 0.05f, 1}},
+                    {"realistic_child", "Child", "儿童", 7, {0.92f, 0.78f, 0.68f, 1}, {0.35f, 0.22f, 0.12f, 1}},
+                    {"realistic_elderly", "Elderly", "老年人", 7, {0.88f, 0.72f, 0.62f, 1}, {0.7f, 0.7f, 0.7f, 1}},
+                    {"realistic_business_man", "Business Man", "商务男士", 7, {0.85f, 0.7f, 0.6f, 1}, {0.15f, 0.1f, 0.05f, 1}},
+                    {"realistic_business_woman", "Business Woman", "商务女士", 7, {0.9f, 0.75f, 0.65f, 1}, {0.2f, 0.12f, 0.08f, 1}},
+                };
+                
+                int count = sizeof(presets) / sizeof(presets[0]);
+                int col = 0;
+                
+                for (int i = 0; i < count; i++) {
+                    // Filter by category
+                    if (state.selectedPresetCategory != 0 && presets[i].category != state.selectedPresetCategory) {
+                        continue;
+                    }
+                    
+                    bool isSelected = (state.selectedPresetId == presets[i].id);
+                    
+                    ImGui::PushID(i);
+                    
+                    // Styled button with preview colors
+                    ImVec2 pos = ImGui::GetCursorScreenPos();
+                    
+                    if (isSelected) {
+                        ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.3f, 0.5f, 0.8f, 1.0f));
+                    }
+                    
+                    if (ImGui::Button("##preset", ImVec2(buttonWidth, buttonHeight))) {
+                        state.selectedPresetId = presets[i].id;
+                        if (state.onApplyPreset) {
+                            state.onApplyPreset(presets[i].id);
+                        }
+                    }
+                    
+                    if (isSelected) {
+                        ImGui::PopStyleColor();
+                    }
+                    
+                    // Draw preview colors on button
+                    ImDrawList* dl = ImGui::GetWindowDrawList();
+                    float circleY = pos.y + 25;
+                    
+                    // Skin color circle
+                    dl->AddCircleFilled(ImVec2(pos.x + 25, circleY), 12, 
+                        ImGui::ColorConvertFloat4ToU32(presets[i].skinColor));
+                    dl->AddCircle(ImVec2(pos.x + 25, circleY), 12, 
+                        IM_COL32(100, 100, 100, 255));
+                    
+                    // Hair color circle
+                    dl->AddCircleFilled(ImVec2(pos.x + 50, circleY), 12, 
+                        ImGui::ColorConvertFloat4ToU32(presets[i].hairColor));
+                    dl->AddCircle(ImVec2(pos.x + 50, circleY), 12, 
+                        IM_COL32(100, 100, 100, 255));
+                    
+                    // Text
+                    dl->AddText(ImVec2(pos.x + 70, pos.y + 15), IM_COL32(255, 255, 255, 255), presets[i].name);
+                    dl->AddText(ImVec2(pos.x + 70, pos.y + 35), IM_COL32(180, 180, 180, 255), presets[i].nameCN);
+                    
+                    // Category badge: 1=Fantasy, 2=Wuxia, 3=Gufeng, 4=Anime, 5=Cartoon, 6=SciFi, 7=Realistic
+                    const char* catBadges[] = {"", "F", "W", "G", "A", "C", "S", "R"};
+                    ImVec4 catColors[] = {
+                        {0, 0, 0, 0},
+                        {0.6f, 0.4f, 0.8f, 1},  // Fantasy - purple
+                        {0.8f, 0.5f, 0.2f, 1},  // Wuxia - orange
+                        {0.9f, 0.3f, 0.4f, 1},  // Gufeng - red
+                        {1.0f, 0.5f, 0.7f, 1},  // Anime - pink
+                        {0.9f, 0.7f, 0.2f, 1},  // Cartoon - yellow
+                        {0.3f, 0.7f, 0.9f, 1},  // SciFi - cyan
+                        {0.3f, 0.6f, 0.3f, 1}   // Realistic - green
+                    };
+                    
+                    dl->AddRectFilled(
+                        ImVec2(pos.x + buttonWidth - 25, pos.y + 5),
+                        ImVec2(pos.x + buttonWidth - 5, pos.y + 22),
+                        ImGui::ColorConvertFloat4ToU32(catColors[presets[i].category]),
+                        4.0f);
+                    dl->AddText(ImVec2(pos.x + buttonWidth - 20, pos.y + 5), 
+                        IM_COL32(255, 255, 255, 255), catBadges[presets[i].category]);
+                    
+                    ImGui::PopID();
+                    
+                    col++;
+                    if (col < 2) {
+                        ImGui::SameLine();
+                    } else {
+                        col = 0;
+                    }
+                }
+                
+                ImGui::EndTabItem();
+            }
+            
+            // === Body Tab ===
+            if (ImGui::BeginTabItem("Body")) {
+                state.currentTab = 1;
+                
+                // Gender selection
+                ImGui::Text("Gender");
+                bool genderChanged = false;
+                if (ImGui::RadioButton("Male", &state.gender, 0)) genderChanged = true;
+                ImGui::SameLine();
+                if (ImGui::RadioButton("Female", &state.gender, 1)) genderChanged = true;
+                ImGui::SameLine();
+                if (ImGui::RadioButton("Neutral", &state.gender, 2)) genderChanged = true;
+                
+                if (genderChanged && state.onParameterChanged) {
+                    state.onParameterChanged();
+                }
+                
+                ImGui::Separator();
+                
+                // Presets
+                if (ImGui::CollapsingHeader("Presets", ImGuiTreeNodeFlags_DefaultOpen)) {
+                    const char* malePresets[] = {"Slim", "Average", "Muscular", "Heavy", "Elderly"};
+                    const char* femalePresets[] = {"Slim", "Average", "Curvy", "Athletic", "Elderly"};
+                    const char** presets = (state.gender == 1) ? femalePresets : malePresets;
+                    
+                    for (int i = 0; i < 5; i++) {
+                        if (ImGui::Button(presets[i], ImVec2(72, 0))) {
+                            int presetIdx = (state.gender == 1) ? (i + 5) : i;
+                            if (state.onPresetSelect) state.onPresetSelect(presetIdx);
+                        }
+                        if (i < 4) ImGui::SameLine();
+                    }
+                }
+                
+                ImGui::Separator();
+                
+                // Overall parameters
+                if (ImGui::CollapsingHeader("Overall", ImGuiTreeNodeFlags_DefaultOpen)) {
+                    bool changed = false;
+                    changed |= ImGui::SliderFloat("Height", &state.height, 0.0f, 1.0f);
+                    changed |= ImGui::SliderFloat("Weight", &state.weight, 0.0f, 1.0f);
+                    changed |= ImGui::SliderFloat("Muscularity", &state.muscularity, 0.0f, 1.0f);
+                    changed |= ImGui::SliderFloat("Body Fat", &state.bodyFat, 0.0f, 1.0f);
+                    
+                    if (changed && state.onParameterChanged) state.onParameterChanged();
+                }
+                
+                // Torso
+                if (ImGui::CollapsingHeader("Torso")) {
+                    bool changed = false;
+                    changed |= ImGui::SliderFloat("Shoulder Width", &state.shoulderWidth, 0.0f, 1.0f);
+                    changed |= ImGui::SliderFloat("Chest Size", &state.chestSize, 0.0f, 1.0f);
+                    changed |= ImGui::SliderFloat("Waist Size", &state.waistSize, 0.0f, 1.0f);
+                    changed |= ImGui::SliderFloat("Hip Width", &state.hipWidth, 0.0f, 1.0f);
+                    
+                    if (state.gender == 1) {
+                        changed |= ImGui::SliderFloat("Bust Size", &state.bustSize, 0.0f, 1.0f);
+                    }
+                    
+                    if (changed && state.onParameterChanged) state.onParameterChanged();
+                }
+                
+                // Limbs
+                if (ImGui::CollapsingHeader("Limbs")) {
+                    bool changed = false;
+                    changed |= ImGui::SliderFloat("Arm Length", &state.armLength, 0.0f, 1.0f);
+                    changed |= ImGui::SliderFloat("Arm Thickness", &state.armThickness, 0.0f, 1.0f);
+                    changed |= ImGui::SliderFloat("Leg Length", &state.legLength, 0.0f, 1.0f);
+                    changed |= ImGui::SliderFloat("Thigh Thickness", &state.thighThickness, 0.0f, 1.0f);
+                    
+                    if (changed && state.onParameterChanged) state.onParameterChanged();
+                }
+                
+                // Skin color
+                if (ImGui::CollapsingHeader("Skin")) {
+                    if (ImGui::ColorEdit3("Skin Color", state.skinColor)) {
+                        if (state.onParameterChanged) state.onParameterChanged();
+                    }
+                    
+                    ImGui::Text("Presets:");
+                    struct SkinPreset { const char* name; float r, g, b; };
+                    SkinPreset skinPresets[] = {
+                        {"Fair", 0.95f, 0.80f, 0.70f},
+                        {"Light", 0.90f, 0.72f, 0.60f},
+                        {"Medium", 0.80f, 0.60f, 0.45f},
+                        {"Olive", 0.70f, 0.55f, 0.40f},
+                        {"Brown", 0.55f, 0.40f, 0.30f},
+                        {"Dark", 0.35f, 0.25f, 0.20f}
+                    };
+                    
+                    for (int i = 0; i < 6; i++) {
+                        ImVec4 c(skinPresets[i].r, skinPresets[i].g, skinPresets[i].b, 1.0f);
+                        if (ImGui::ColorButton(skinPresets[i].name, c, 0, ImVec2(30, 30))) {
+                            state.skinColor[0] = skinPresets[i].r;
+                            state.skinColor[1] = skinPresets[i].g;
+                            state.skinColor[2] = skinPresets[i].b;
+                            if (state.onParameterChanged) state.onParameterChanged();
+                        }
+                        ImGui::SameLine();
+                        ImGui::Text("%s", skinPresets[i].name);
+                        if (i < 5 && (i % 2 == 0)) ImGui::SameLine(200);
+                    }
+                }
+                
+                ImGui::EndTabItem();
+            }
+            
+            // === Face Tab ===
+            if (ImGui::BeginTabItem("Face")) {
+                state.currentTab = 1;
+                
+                // AI Photo Import Section
+                if (ImGui::CollapsingHeader("Photo to Face (AI)", ImGuiTreeNodeFlags_DefaultOpen)) {
+                    // AI Model status
+                    if (state.aiModelsReady) {
+                        ImGui::TextColored(ImVec4(0.2f, 1.0f, 0.2f, 1.0f), "[OK] AI Models Ready");
+                    } else {
+                        ImGui::TextColored(ImVec4(1.0f, 0.5f, 0.0f, 1.0f), "[!] AI Models Not Configured");
+                        ImGui::TextWrapped("Import ONNX models to enable photo-to-face feature.");
+                    }
+                    
+                    if (ImGui::Button("AI Model Setup...", ImVec2(150, 0))) {
+                        state.showAIModelSetup = true;
+                    }
+                    ImGui::SameLine();
+                    
+                    // Photo import button
+                    if (!state.aiModelsReady) {
+                        ImGui::BeginDisabled();
+                    }
+                    if (ImGui::Button("Import from Photo...", ImVec2(-1, 0))) {
+                        if (state.onPhotoImport) state.onPhotoImport();
+                    }
+                    if (!state.aiModelsReady) {
+                        ImGui::EndDisabled();
+                    }
+                    
+                    if (!state.aiModelStatus.empty()) {
+                        ImGui::TextWrapped("%s", state.aiModelStatus.c_str());
+                    }
+                }
+                
+                ImGui::Separator();
+                
+                // Face shape
+                if (ImGui::CollapsingHeader("Face Shape", ImGuiTreeNodeFlags_DefaultOpen)) {
+                    bool changed = false;
+                    changed |= ImGui::SliderFloat("Face Width", &state.faceWidth, 0.0f, 1.0f);
+                    changed |= ImGui::SliderFloat("Face Length", &state.faceLength, 0.0f, 1.0f);
+                    changed |= ImGui::SliderFloat("Face Roundness", &state.faceRoundness, 0.0f, 1.0f);
+                    if (changed && state.onParameterChanged) state.onParameterChanged();
+                }
+                
+                // Eyes
+                if (ImGui::CollapsingHeader("Eyes")) {
+                    bool changed = false;
+                    changed |= ImGui::SliderFloat("Eye Size", &state.eyeSize, 0.0f, 1.0f);
+                    changed |= ImGui::SliderFloat("Eye Spacing", &state.eyeSpacing, 0.0f, 1.0f);
+                    changed |= ImGui::SliderFloat("Eye Height", &state.eyeHeight, 0.0f, 1.0f);
+                    changed |= ImGui::SliderFloat("Eye Angle", &state.eyeAngle, 0.0f, 1.0f);
+                    
+                    if (ImGui::ColorEdit3("Eye Color", state.eyeColor)) changed = true;
+                    
+                    if (changed && state.onParameterChanged) state.onParameterChanged();
+                }
+                
+                // Nose
+                if (ImGui::CollapsingHeader("Nose")) {
+                    bool changed = false;
+                    changed |= ImGui::SliderFloat("Nose Length", &state.noseLength, 0.0f, 1.0f);
+                    changed |= ImGui::SliderFloat("Nose Width", &state.noseWidth, 0.0f, 1.0f);
+                    changed |= ImGui::SliderFloat("Nose Height", &state.noseHeight, 0.0f, 1.0f);
+                    changed |= ImGui::SliderFloat("Nose Bridge", &state.noseBridge, 0.0f, 1.0f);
+                    if (changed && state.onParameterChanged) state.onParameterChanged();
+                }
+                
+                // Mouth
+                if (ImGui::CollapsingHeader("Mouth")) {
+                    bool changed = false;
+                    changed |= ImGui::SliderFloat("Mouth Width", &state.mouthWidth, 0.0f, 1.0f);
+                    changed |= ImGui::SliderFloat("Upper Lip", &state.upperLipThickness, 0.0f, 1.0f);
+                    changed |= ImGui::SliderFloat("Lower Lip", &state.lowerLipThickness, 0.0f, 1.0f);
+                    if (changed && state.onParameterChanged) state.onParameterChanged();
+                }
+                
+                // Jaw
+                if (ImGui::CollapsingHeader("Jaw & Chin")) {
+                    bool changed = false;
+                    changed |= ImGui::SliderFloat("Jaw Width", &state.jawWidth, 0.0f, 1.0f);
+                    changed |= ImGui::SliderFloat("Jaw Line", &state.jawLine, 0.0f, 1.0f);
+                    changed |= ImGui::SliderFloat("Chin Length", &state.chinLength, 0.0f, 1.0f);
+                    changed |= ImGui::SliderFloat("Chin Width", &state.chinWidth, 0.0f, 1.0f);
+                    if (changed && state.onParameterChanged) state.onParameterChanged();
+                }
+                
+                // Expressions (quick buttons)
+                if (ImGui::CollapsingHeader("Expressions")) {
+                    if (ImGui::Button("Neutral", ImVec2(70, 0))) {}
+                    ImGui::SameLine();
+                    if (ImGui::Button("Smile", ImVec2(70, 0))) {}
+                    ImGui::SameLine();
+                    if (ImGui::Button("Frown", ImVec2(70, 0))) {}
+                    
+                    if (ImGui::Button("Surprise", ImVec2(70, 0))) {}
+                    ImGui::SameLine();
+                    if (ImGui::Button("Angry", ImVec2(70, 0))) {}
+                    ImGui::SameLine();
+                    if (ImGui::Button("Sad", ImVec2(70, 0))) {}
+                }
+                
+                ImGui::EndTabItem();
+            }
+            
+            // === BlendShape Tab ===
+            if (ImGui::BeginTabItem("BlendShapes")) {
+                state.currentTab = 2;
+                
+                ImGui::Text("BlendShape Channels: %zu", state.blendShapeWeights.size());
+                ImGui::Separator();
+                
+                // Direct BlendShape control
+                if (ImGui::CollapsingHeader("Direct Control", ImGuiTreeNodeFlags_DefaultOpen)) {
+                    // Sample BlendShapes for demo
+                    if (state.blendShapeWeights.empty()) {
+                        state.blendShapeWeights = {
+                            {"body_height", 0.0f},
+                            {"body_weight", 0.0f},
+                            {"body_muscle", 0.0f},
+                            {"body_fat", 0.0f},
+                            {"face_width", 0.0f},
+                            {"face_length", 0.0f},
+                            {"eye_size", 0.0f},
+                            {"nose_length", 0.0f}
+                        };
+                    }
+                    
+                    for (auto& [name, weight] : state.blendShapeWeights) {
+                        if (ImGui::SliderFloat(name.c_str(), &weight, -1.0f, 1.0f)) {
+                            if (state.onBlendShapeChanged) {
+                                state.onBlendShapeChanged(name, weight);
+                            }
+                        }
+                    }
+                }
+                
+                ImGui::Separator();
+                if (ImGui::Button("Reset All", ImVec2(-1, 30))) {
+                    for (auto& [name, weight] : state.blendShapeWeights) {
+                        weight = 0.0f;
+                    }
+                }
+                
+                ImGui::EndTabItem();
+            }
+            
+            // === Clothing Tab ===
+            if (ImGui::BeginTabItem("Clothing")) {
+                state.currentTab = 3;
+                
+                // Category selector
+                const char* categories[] = {"Tops", "Bottoms", "Footwear", "Accessories"};
+                ImGui::Combo("Category", &state.clothingCategory, categories, 4);
+                
+                ImGui::Separator();
+                
+                // Available items grid
+                if (ImGui::CollapsingHeader("Available Items", ImGuiTreeNodeFlags_DefaultOpen)) {
+                    ImGui::BeginChild("ClothingGrid", ImVec2(0, 200), true);
+                    
+                    // Sample clothing items based on category
+                    struct ClothingPreview {
+                        const char* id;
+                        const char* name;
+                        float color[3];
+                    };
+                    
+                    std::vector<ClothingPreview> items;
+                    
+                    if (state.clothingCategory == 0) {  // Tops
+                        items = {
+                            {"tshirt_white", "T-Shirt (White)", {0.95f, 0.95f, 0.95f}},
+                            {"tshirt_black", "T-Shirt (Black)", {0.1f, 0.1f, 0.1f}},
+                            {"tshirt_red", "T-Shirt (Red)", {0.8f, 0.15f, 0.15f}},
+                            {"tshirt_blue", "T-Shirt (Blue)", {0.2f, 0.3f, 0.7f}}
+                        };
+                    } else if (state.clothingCategory == 1) {  // Bottoms
+                        items = {
+                            {"pants_jeans", "Jeans (Blue)", {0.2f, 0.3f, 0.5f}},
+                            {"pants_black", "Pants (Black)", {0.1f, 0.1f, 0.1f}},
+                            {"pants_khaki", "Pants (Khaki)", {0.76f, 0.69f, 0.57f}},
+                            {"skirt_black", "Skirt (Black)", {0.1f, 0.1f, 0.1f}},
+                            {"skirt_red", "Skirt (Red)", {0.7f, 0.15f, 0.15f}}
+                        };
+                    } else if (state.clothingCategory == 2) {  // Footwear
+                        items = {
+                            {"shoes_black", "Shoes (Black)", {0.1f, 0.1f, 0.1f}},
+                            {"shoes_brown", "Shoes (Brown)", {0.4f, 0.25f, 0.15f}}
+                        };
+                    }
+                    
+                    int columns = 3;
+                    for (size_t i = 0; i < items.size(); i++) {
+                        ImGui::PushID(items[i].id);
+                        
+                        // Check if equipped
+                        bool isEquipped = false;
+                        for (const auto& [slot, id] : state.equippedClothing) {
+                            if (id == items[i].id) {
+                                isEquipped = true;
+                                break;
+                            }
+                        }
+                        
+                        // Color preview button
+                        ImVec4 col(items[i].color[0], items[i].color[1], items[i].color[2], 1.0f);
+                        
+                        if (isEquipped) {
+                            ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.2f, 0.6f, 0.2f, 1.0f));
+                        }
+                        
+                        if (ImGui::ColorButton(items[i].name, col, 0, ImVec2(60, 60))) {
+                            state.selectedClothingId = items[i].id;
+                            state.clothingColorEdit[0] = items[i].color[0];
+                            state.clothingColorEdit[1] = items[i].color[1];
+                            state.clothingColorEdit[2] = items[i].color[2];
+                        }
+                        
+                        if (isEquipped) {
+                            ImGui::PopStyleColor();
+                        }
+                        
+                        // Tooltip
+                        if (ImGui::IsItemHovered()) {
+                            ImGui::BeginTooltip();
+                            ImGui::Text("%s", items[i].name);
+                            if (isEquipped) {
+                                ImGui::TextColored(ImVec4(0.2f, 0.8f, 0.2f, 1.0f), "(Equipped)");
+                            }
+                            ImGui::EndTooltip();
+                        }
+                        
+                        if ((i + 1) % columns != 0 && i < items.size() - 1) {
+                            ImGui::SameLine();
+                        }
+                        
+                        ImGui::PopID();
+                    }
+                    
+                    ImGui::EndChild();
+                }
+                
+                ImGui::Separator();
+                
+                // Selected item controls
+                if (!state.selectedClothingId.empty()) {
+                    ImGui::Text("Selected: %s", state.selectedClothingId.c_str());
+                    
+                    // Color editor
+                    if (ImGui::ColorEdit3("Color", state.clothingColorEdit)) {
+                        if (state.onClothingColorChange) {
+                            state.onClothingColorChange(state.selectedClothingId,
+                                state.clothingColorEdit[0],
+                                state.clothingColorEdit[1],
+                                state.clothingColorEdit[2]);
+                        }
+                    }
+                    
+                    // Equip/Unequip buttons
+                    bool isEquipped = false;
+                    for (const auto& [slot, id] : state.equippedClothing) {
+                        if (id == state.selectedClothingId) {
+                            isEquipped = true;
+                            break;
+                        }
+                    }
+                    
+                    if (isEquipped) {
+                        if (ImGui::Button("Unequip", ImVec2(-1, 30))) {
+                            if (state.onUnequipClothing) {
+                                state.onUnequipClothing(state.selectedClothingId);
+                            }
+                        }
+                    } else {
+                        if (ImGui::Button("Equip", ImVec2(-1, 30))) {
+                            if (state.onEquipClothing) {
+                                state.onEquipClothing(state.selectedClothingId);
+                            }
+                        }
+                    }
+                }
+                
+                ImGui::Separator();
+                
+                // Currently equipped
+                if (ImGui::CollapsingHeader("Currently Equipped", ImGuiTreeNodeFlags_DefaultOpen)) {
+                    if (state.equippedClothing.empty()) {
+                        ImGui::TextDisabled("No clothing equipped");
+                    } else {
+                        for (const auto& [slot, id] : state.equippedClothing) {
+                            ImGui::BulletText("%s: %s", slot.c_str(), id.c_str());
+                            ImGui::SameLine();
+                            ImGui::PushID(id.c_str());
+                            if (ImGui::SmallButton("X")) {
+                                if (state.onUnequipClothing) {
+                                    state.onUnequipClothing(id);
+                                }
+                            }
+                            ImGui::PopID();
+                        }
+                    }
+                }
+                
+                ImGui::EndTabItem();
+            }
+            
+            // === Animation Tab (Enhanced with Pose Editor) ===
+            if (ImGui::BeginTabItem("Animation")) {
+                state.currentTab = 4;
+                
+                // Sub-tabs for Animation vs Pose
+                static int animSubTab = 0;
+                ImGui::RadioButton("Pose Library", &animSubTab, 0);
+                ImGui::SameLine();
+                ImGui::RadioButton("Bone Editor", &animSubTab, 1);
+                ImGui::SameLine();
+                ImGui::RadioButton("Playback", &animSubTab, 2);
+                ImGui::SameLine();
+                ImGui::RadioButton("Timeline", &animSubTab, 3);
+                
+                ImGui::Separator();
+                
+                if (animSubTab == 0) {
+                    // === Pose Library ===
+                    const char* poseCategories[] = {"Reference", "Standing", "Action", "Sitting", "Gesture"};
+                    ImGui::Combo("Category", &state.selectedPoseCategory, poseCategories, 5);
+                    
+                    ImGui::Separator();
+                    
+                    struct PosePreset {
+                        const char* id;
+                        const char* name;
+                        const char* nameCN;
+                        int category;
+                    };
+                    PosePreset poses[] = {
+                        // Reference (0)
+                        {"t_pose", "T-Pose", "T字姿势", 0},
+                        {"a_pose", "A-Pose", "A字姿势", 0},
+                        {"relaxed", "Relaxed", "放松", 0},
+                        // Standing (1)
+                        {"standing_neutral", "Neutral", "中立站姿", 1},
+                        {"standing_heroic", "Heroic", "英雄站姿", 1},
+                        {"standing_casual", "Casual", "随意站姿", 1},
+                        {"contrapposto", "Contrapposto", "对立式", 1},
+                        // Action (2)
+                        {"fighting_stance", "Fighting", "战斗姿势", 2},
+                        {"running", "Running", "奔跑", 2},
+                        {"jumping", "Jumping", "跳跃", 2},
+                        {"punching", "Punching", "出拳", 2},
+                        {"kicking", "Kicking", "踢腿", 2},
+                        // Sitting (3)
+                        {"sitting", "Sitting", "坐姿", 3},
+                        {"sitting_cross_legged", "Cross-Legged", "盘腿坐", 3},
+                        {"kneeling", "Kneeling", "跪姿", 3},
+                        // Gesture (4)
+                        {"waving", "Waving", "挥手", 4},
+                        {"pointing", "Pointing", "指向", 4},
+                        {"thinking", "Thinking", "思考", 4},
+                        {"arms_raised", "Arms Raised", "举手", 4},
+                        {"arms_crossed", "Arms Crossed", "双臂交叉", 4}
+                    };
+                    
+                    ImGui::BeginChild("PoseList", ImVec2(0, 200), true);
+                    float buttonWidth = (ImGui::GetContentRegionAvail().x - 10) / 2;
+                    int col = 0;
+                    
+                    for (const auto& pose : poses) {
+                        if (pose.category != state.selectedPoseCategory) continue;
+                        
+                        bool isSelected = (state.selectedPoseName == pose.id);
+                        ImGui::PushID(pose.id);
+                        
+                        if (isSelected) ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.3f, 0.5f, 0.8f, 1.0f));
+                        
+                        if (ImGui::Button(pose.name, ImVec2(buttonWidth, 35))) {
+                            state.selectedPoseName = pose.id;
+                            if (state.onPoseLoad) state.onPoseLoad(pose.id);
+                        }
+                        
+                        if (isSelected) ImGui::PopStyleColor();
+                        
+                        // Show Chinese name as tooltip
+                        if (ImGui::IsItemHovered()) {
+                            ImGui::SetTooltip("%s", pose.nameCN);
+                        }
+                        
+                        ImGui::PopID();
+                        
+                        col++;
+                        if (col < 2) ImGui::SameLine();
+                        else col = 0;
+                    }
+                    ImGui::EndChild();
+                    
+                    // Pose actions
+                    ImGui::Separator();
+                    if (ImGui::Button("Reset Pose", ImVec2(-1, 0))) {
+                        if (state.onPoseReset) state.onPoseReset();
+                    }
+                    if (ImGui::Button("Mirror Pose", ImVec2(-1, 0))) {
+                        if (state.onPoseMirror) state.onPoseMirror();
+                    }
+                    ImGui::Checkbox("Auto Mirror", &state.poseAutoMirror);
+                    
+                } else if (animSubTab == 1) {
+                    // === Bone Editor ===
+                    ImGui::TextColored(ImVec4(0.4f, 0.8f, 1.0f, 1.0f), "Manual Bone Adjustment");
+                    ImGui::TextDisabled("Select bone and adjust rotation");
+                    
+                    const char* boneCategories[] = {"All", "Spine", "Left Arm", "Right Arm", "Left Leg", "Right Leg", "Head"};
+                    ImGui::Combo("Body Part", &state.poseEditorBoneCategory, boneCategories, 7);
+                    
+                    ImGui::Separator();
+                    
+                    // Bone list based on category
+                    struct BoneInfo { const char* name; const char* display; int category; };
+                    BoneInfo bones[] = {
+                        // Spine (1)
+                        {"Hips", "Hips 髋部", 1},
+                        {"Spine", "Spine 脊椎", 1},
+                        {"Chest", "Chest 胸部", 1},
+                        // Left Arm (2)
+                        {"LeftShoulder", "L Shoulder 左肩", 2},
+                        {"LeftUpperArm", "L Upper Arm 左上臂", 2},
+                        {"LeftLowerArm", "L Lower Arm 左前臂", 2},
+                        {"LeftHand", "L Hand 左手", 2},
+                        // Right Arm (3)
+                        {"RightShoulder", "R Shoulder 右肩", 3},
+                        {"RightUpperArm", "R Upper Arm 右上臂", 3},
+                        {"RightLowerArm", "R Lower Arm 右前臂", 3},
+                        {"RightHand", "R Hand 右手", 3},
+                        // Left Leg (4)
+                        {"LeftUpperLeg", "L Upper Leg 左大腿", 4},
+                        {"LeftLowerLeg", "L Lower Leg 左小腿", 4},
+                        {"LeftFoot", "L Foot 左脚", 4},
+                        // Right Leg (5)
+                        {"RightUpperLeg", "R Upper Leg 右大腿", 5},
+                        {"RightLowerLeg", "R Lower Leg 右小腿", 5},
+                        {"RightFoot", "R Foot 右脚", 5},
+                        // Head (6)
+                        {"Neck", "Neck 脖子", 6},
+                        {"Head", "Head 头部", 6}
+                    };
+                    
+                    ImGui::BeginChild("BoneList", ImVec2(0, 120), true);
+                    for (const auto& bone : bones) {
+                        if (state.poseEditorBoneCategory != 0 && bone.category != state.poseEditorBoneCategory) continue;
+                        
+                        bool isSelected = (state.selectedBoneName == bone.name);
+                        if (ImGui::Selectable(bone.display, isSelected)) {
+                            state.selectedBoneName = bone.name;
+                            state.boneRotationX = 0;
+                            state.boneRotationY = 0;
+                            state.boneRotationZ = 0;
+                            if (state.onBoneSelect) state.onBoneSelect(bone.name);
+                        }
+                    }
+                    ImGui::EndChild();
+                    
+                    ImGui::Separator();
+                    
+                    // Rotation controls
+                    if (!state.selectedBoneName.empty()) {
+                        ImGui::Text("Bone: %s", state.selectedBoneName.c_str());
+                        
+                        bool changed = false;
+                        changed |= ImGui::SliderFloat("Rot X (Pitch)", &state.boneRotationX, -180.0f, 180.0f, "%.1f°");
+                        changed |= ImGui::SliderFloat("Rot Y (Yaw)", &state.boneRotationY, -180.0f, 180.0f, "%.1f°");
+                        changed |= ImGui::SliderFloat("Rot Z (Roll)", &state.boneRotationZ, -180.0f, 180.0f, "%.1f°");
+                        
+                        if (changed && state.onBoneRotate) {
+                            float rx = state.boneRotationX * 3.14159f / 180.0f;
+                            float ry = state.boneRotationY * 3.14159f / 180.0f;
+                            float rz = state.boneRotationZ * 3.14159f / 180.0f;
+                            state.onBoneRotate(state.selectedBoneName, rx, ry, rz);
+                        }
+                        
+                        if (ImGui::Button("Reset Bone", ImVec2(-1, 0))) {
+                            state.boneRotationX = state.boneRotationY = state.boneRotationZ = 0;
+                            if (state.onBoneRotate) state.onBoneRotate(state.selectedBoneName, 0, 0, 0);
+                        }
+                    } else {
+                        ImGui::TextDisabled("Select a bone to edit");
+                    }
+                    
+                } else if (animSubTab == 2) {
+                    // === Animation Playback ===
+                    struct AnimPreset { const char* id; const char* name; const char* nameCN; };
+                    AnimPreset animations[] = {
+                        {"idle", "Idle", "待机"},
+                        {"idle_breathing", "Idle Breathing", "呼吸待机"},
+                        {"walk", "Walk", "行走"},
+                        {"run", "Run", "跑步"},
+                        {"wave", "Wave", "挥手"}
+                    };
+                    
+                    ImGui::Text("Built-in Animations:");
+                    ImGui::Separator();
+                    
+                    for (const auto& anim : animations) {
+                        bool isPlaying = (state.currentAnimation == anim.id && state.animationPlaying);
+                        
+                        ImGui::PushID(anim.id);
+                        if (isPlaying) {
+                            ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.8f, 0.3f, 0.3f, 1.0f));
+                            if (ImGui::Button("Stop", ImVec2(60, 0))) {
+                                state.animationPlaying = false;
+                                state.currentAnimation = "";
+                                if (state.onStopAnimation) state.onStopAnimation();
+                            }
+                            ImGui::PopStyleColor();
+                        } else {
+                            ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.3f, 0.6f, 0.3f, 1.0f));
+                            if (ImGui::Button("Play", ImVec2(60, 0))) {
+                                state.currentAnimation = anim.id;
+                                state.animationPlaying = true;
+                                state.animationTime = 0.0f;
+                                if (state.onPlayAnimation) state.onPlayAnimation(anim.id);
+                            }
+                            ImGui::PopStyleColor();
+                        }
+                        ImGui::SameLine();
+                        ImGui::Text("%s (%s)", anim.name, anim.nameCN);
+                        ImGui::PopID();
+                    }
+                    
+                    if (state.animationPlaying) {
+                        ImGui::Separator();
+                        ImGui::SliderFloat("Speed", &state.animationSpeed, 0.1f, 2.0f);
+                        
+                        // Progress bar
+                        float progress = fmod(state.animationTime * state.animationSpeed, 1.0f);
+                        char buf[32];
+                        snprintf(buf, sizeof(buf), "%.2fs", state.animationTime);
+                        ImGui::ProgressBar(progress, ImVec2(-1, 0), buf);
+                    }
+                    
+                } else if (animSubTab == 3) {
+                    // === Animation Timeline (Editor) ===
+                    ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.2f, 1.0f), "Animation Editor");
+                    ImGui::TextDisabled("Keyframe-based animation editing");
+                    
+                    ImGui::Separator();
+                    
+                    // Toolbar
+                    if (ImGui::Button(state.animationPlaying ? "||" : ">", ImVec2(30, 0))) {
+                        state.animationPlaying = !state.animationPlaying;
+                    }
+                    ImGui::SameLine();
+                    if (ImGui::Button("|<", ImVec2(30, 0))) {
+                        state.animationTime = 0;
+                        if (state.onAnimEditorSeek) state.onAnimEditorSeek(0);
+                    }
+                    ImGui::SameLine();
+                    if (ImGui::Button("<", ImVec2(30, 0))) {
+                        state.animationTime = std::max(0.0f, state.animationTime - 1.0f/30.0f);
+                        if (state.onAnimEditorSeek) state.onAnimEditorSeek(state.animationTime);
+                    }
+                    ImGui::SameLine();
+                    if (ImGui::Button(">", ImVec2(30, 0))) {
+                        state.animationTime += 1.0f/30.0f;
+                        if (state.onAnimEditorSeek) state.onAnimEditorSeek(state.animationTime);
+                    }
+                    ImGui::SameLine();
+                    ImGui::SetNextItemWidth(100);
+                    if (ImGui::DragFloat("##time", &state.animationTime, 0.01f, 0, 10.0f, "%.2fs")) {
+                        if (state.onAnimEditorSeek) state.onAnimEditorSeek(state.animationTime);
+                    }
+                    
+                    ImGui::Separator();
+                    
+                    // Keyframe tools
+                    ImGui::Text("Keyframe Tools:");
+                    if (ImGui::Button("+ Add Key", ImVec2(80, 0))) {
+                        if (state.onAnimEditorAddKeyframe) state.onAnimEditorAddKeyframe();
+                    }
+                    ImGui::SameLine();
+                    if (ImGui::Button("- Delete", ImVec2(80, 0))) {
+                        if (state.onAnimEditorDeleteKeyframe) state.onAnimEditorDeleteKeyframe();
+                    }
+                    
+                    const char* interpTypes[] = {"Constant", "Linear", "Bezier", "EaseIn", "EaseOut", "EaseInOut"};
+                    ImGui::SetNextItemWidth(120);
+                    if (ImGui::Combo("Interpolation", &state.animEditorInterpolation, interpTypes, 6)) {
+                        if (state.onAnimEditorSetInterpolation) state.onAnimEditorSetInterpolation(state.animEditorInterpolation);
+                    }
+                    
+                    ImGui::Separator();
+                    
+                    // Settings
+                    ImGui::Checkbox("Auto Key", &state.animEditorAutoKey);
+                    ImGui::SameLine();
+                    ImGui::Checkbox("Snap to Frame", &state.animEditorSnapToFrame);
+                    
+                    ImGui::Checkbox("Show Ghosts", &state.animEditorShowGhosts);
+                    if (state.animEditorShowGhosts) {
+                        ImGui::SameLine();
+                        ImGui::SetNextItemWidth(80);
+                        ImGui::SliderInt("Frames", &state.animEditorGhostFrames, 1, 10);
+                    }
+                    
+                    ImGui::Separator();
+                    
+                    // Simple timeline visualization
+                    ImGui::Text("Timeline:");
+                    ImVec2 timelineSize(ImGui::GetContentRegionAvail().x, 60);
+                    ImVec2 pos = ImGui::GetCursorScreenPos();
+                    
+                    ImDrawList* dl = ImGui::GetWindowDrawList();
+                    dl->AddRectFilled(pos, ImVec2(pos.x + timelineSize.x, pos.y + timelineSize.y), 
+                                      IM_COL32(40, 40, 45, 255));
+                    
+                    // Draw time markers
+                    float duration = 5.0f;  // 5 second timeline
+                    for (int i = 0; i <= 5; i++) {
+                        float x = pos.x + (i / 5.0f) * timelineSize.x;
+                        dl->AddLine(ImVec2(x, pos.y), ImVec2(x, pos.y + timelineSize.y), IM_COL32(80, 80, 80, 255));
+                        char label[8];
+                        snprintf(label, sizeof(label), "%ds", i);
+                        dl->AddText(ImVec2(x + 2, pos.y + 2), IM_COL32(150, 150, 150, 255), label);
+                    }
+                    
+                    // Draw playhead
+                    float playheadX = pos.x + (state.animationTime / duration) * timelineSize.x;
+                    playheadX = std::clamp(playheadX, pos.x, pos.x + timelineSize.x);
+                    dl->AddLine(ImVec2(playheadX, pos.y), ImVec2(playheadX, pos.y + timelineSize.y), 
+                               IM_COL32(255, 100, 100, 255), 2.0f);
+                    
+                    // Make timeline clickable
+                    ImGui::InvisibleButton("timeline", timelineSize);
+                    if (ImGui::IsItemClicked()) {
+                        ImVec2 mousePos = ImGui::GetMousePos();
+                        float t = (mousePos.x - pos.x) / timelineSize.x * duration;
+                        state.animationTime = std::clamp(t, 0.0f, duration);
+                        if (state.onAnimEditorSeek) state.onAnimEditorSeek(state.animationTime);
+                    }
+                }
+                
+                ImGui::EndTabItem();
+            }
+            
+            // === Style Tab ===
+            if (ImGui::BeginTabItem("Style")) {
+                state.currentTab = 5;
+                
+                // Style preset
+                const char* styles[] = {"Realistic", "Anime", "Cartoon", "Painterly", "Sketch"};
+                if (ImGui::Combo("Rendering Style", &state.renderingStyle, styles, 5)) {
+                    // Apply preset defaults
+                    switch (state.renderingStyle) {
+                        case 1:  // Anime
+                            state.outlineEnabled = true;
+                            state.outlineThickness = 0.004f;
+                            state.celShadingBands = 3;
+                            state.rimLightEnabled = true;
+                            state.rimLightIntensity = 0.5f;
+                            state.colorVibrancy = 1.15f;
+                            break;
+                        case 2:  // Cartoon
+                            state.outlineEnabled = true;
+                            state.outlineThickness = 0.006f;
+                            state.celShadingBands = 2;
+                            state.rimLightEnabled = false;
+                            state.colorVibrancy = 1.3f;
+                            break;
+                        case 3:  // Painterly
+                            state.outlineEnabled = false;
+                            state.celShadingBands = 5;
+                            state.rimLightEnabled = true;
+                            state.colorVibrancy = 1.2f;
+                            break;
+                        case 4:  // Sketch
+                            state.outlineEnabled = true;
+                            state.outlineThickness = 0.002f;
+                            state.celShadingBands = 2;
+                            state.rimLightEnabled = false;
+                            state.colorVibrancy = 0.3f;
+                            break;
+                        default:  // Realistic
+                            state.outlineEnabled = false;
+                            state.celShadingBands = 1;
+                            state.rimLightEnabled = false;
+                            state.colorVibrancy = 1.0f;
+                            break;
+                    }
+                    if (state.onStyleChange) {
+                        state.onStyleChange(state.renderingStyle);
+                    }
+                }
+                
+                ImGui::Separator();
+                
+                // Outline settings
+                if (ImGui::CollapsingHeader("Outline", ImGuiTreeNodeFlags_DefaultOpen)) {
+                    bool changed = false;
+                    changed |= ImGui::Checkbox("Enable Outline", &state.outlineEnabled);
+                    
+                    if (state.outlineEnabled) {
+                        changed |= ImGui::SliderFloat("Thickness", &state.outlineThickness, 0.001f, 0.01f, "%.4f");
+                        changed |= ImGui::ColorEdit3("Color", state.outlineColor);
+                    }
+                    
+                    if (changed && state.onStyleSettingsChange) {
+                        state.onStyleSettingsChange();
+                    }
+                }
+                
+                // Cel shading settings
+                if (ImGui::CollapsingHeader("Cel Shading", ImGuiTreeNodeFlags_DefaultOpen)) {
+                    bool changed = false;
+                    changed |= ImGui::SliderInt("Shading Bands", &state.celShadingBands, 1, 5);
+                    
+                    ImGui::TextDisabled("1 = Smooth, 2-3 = Standard, 4-5 = Detailed");
+                    
+                    if (changed && state.onStyleSettingsChange) {
+                        state.onStyleSettingsChange();
+                    }
+                }
+                
+                // Rim light settings
+                if (ImGui::CollapsingHeader("Rim Light")) {
+                    bool changed = false;
+                    changed |= ImGui::Checkbox("Enable Rim Light", &state.rimLightEnabled);
+                    
+                    if (state.rimLightEnabled) {
+                        changed |= ImGui::SliderFloat("Intensity", &state.rimLightIntensity, 0.0f, 1.0f);
+                    }
+                    
+                    if (changed && state.onStyleSettingsChange) {
+                        state.onStyleSettingsChange();
+                    }
+                }
+                
+                // Color settings
+                if (ImGui::CollapsingHeader("Color")) {
+                    bool changed = false;
+                    changed |= ImGui::SliderFloat("Vibrancy", &state.colorVibrancy, 0.0f, 2.0f);
+                    
+                    ImGui::TextDisabled("0 = Grayscale, 1 = Normal, 2 = Saturated");
+                    
+                    if (changed && state.onStyleSettingsChange) {
+                        state.onStyleSettingsChange();
+                    }
+                }
+                
+                ImGui::Separator();
+                
+                // Preview comparison
+                ImGui::Text("Style: %s", styles[state.renderingStyle]);
+                if (state.renderingStyle > 0) {
+                    ImGui::TextWrapped("Non-realistic styles require stylized shaders to render correctly. "
+                                      "Preview shows approximation.");
+                }
+                
+                ImGui::EndTabItem();
+            }
+            
+            // === Texture Tab ===
+            if (ImGui::BeginTabItem("Texture")) {
+                state.currentTab = 6;
+                
+                // Resolution selection
+                const char* resolutions[] = {"512x512", "1024x1024", "2048x2048"};
+                if (ImGui::Combo("Resolution", &state.textureResolution, resolutions, 3)) {
+                    state.textureNeedsUpdate = true;
+                }
+                
+                ImGui::Separator();
+                
+                // === Skin Texture ===
+                if (ImGui::CollapsingHeader("Skin Texture", ImGuiTreeNodeFlags_DefaultOpen)) {
+                    // Skin preset
+                    const char* skinPresets[] = {"Caucasian", "Asian", "African", "Latino", "Middle Eastern", "Custom"};
+                    if (ImGui::Combo("Skin Tone Preset", &state.skinPreset, skinPresets, 6)) {
+                        // Apply preset skin colors
+                        switch (state.skinPreset) {
+                            case 0:  // Caucasian
+                                state.skinColor[0] = 0.9f; state.skinColor[1] = 0.75f; state.skinColor[2] = 0.65f;
+                                break;
+                            case 1:  // Asian
+                                state.skinColor[0] = 0.95f; state.skinColor[1] = 0.82f; state.skinColor[2] = 0.7f;
+                                break;
+                            case 2:  // African
+                                state.skinColor[0] = 0.45f; state.skinColor[1] = 0.3f; state.skinColor[2] = 0.2f;
+                                break;
+                            case 3:  // Latino
+                                state.skinColor[0] = 0.75f; state.skinColor[1] = 0.55f; state.skinColor[2] = 0.4f;
+                                break;
+                            case 4:  // Middle Eastern
+                                state.skinColor[0] = 0.8f; state.skinColor[1] = 0.6f; state.skinColor[2] = 0.45f;
+                                break;
+                        }
+                        state.textureNeedsUpdate = true;
+                        if (state.onSkinPresetChange) {
+                            state.onSkinPresetChange(state.skinPreset);
+                        }
+                    }
+                    
+                    // Custom skin color (only shown for Custom preset)
+                    if (state.skinPreset == 5) {
+                        if (ImGui::ColorEdit3("Skin Color", state.skinColor)) {
+                            state.textureNeedsUpdate = true;
+                        }
+                    }
+                    
+                    ImGui::Spacing();
+                    
+                    // Skin parameters
+                    bool skinChanged = false;
+                    skinChanged |= ImGui::SliderFloat("Saturation", &state.skinSaturation, 0.5f, 1.5f);
+                    skinChanged |= ImGui::SliderFloat("Brightness", &state.skinBrightness, 0.7f, 1.3f);
+                    
+                    ImGui::Spacing();
+                    ImGui::Text("Surface Detail");
+                    skinChanged |= ImGui::SliderFloat("Roughness", &state.skinRoughness, 0.2f, 0.8f);
+                    skinChanged |= ImGui::SliderFloat("Pore Intensity", &state.poreIntensity, 0.0f, 1.0f);
+                    
+                    ImGui::Spacing();
+                    ImGui::Text("Age & Variation");
+                    skinChanged |= ImGui::SliderFloat("Wrinkle Intensity", &state.wrinkleIntensity, 0.0f, 1.0f);
+                    skinChanged |= ImGui::SliderFloat("Freckle Intensity", &state.freckleIntensity, 0.0f, 1.0f);
+                    if (state.freckleIntensity > 0.0f) {
+                        skinChanged |= ImGui::ColorEdit3("Freckle Color", state.freckleColor);
+                    }
+                    
+                    ImGui::Spacing();
+                    ImGui::Text("Subsurface Scattering");
+                    skinChanged |= ImGui::SliderFloat("SSS Intensity", &state.sssIntensity, 0.0f, 0.6f);
+                    ImGui::TextDisabled("Simulates light passing through skin");
+                    
+                    // === Advanced SSS (NEW) ===
+                    if (ImGui::TreeNode("Advanced SSS Settings")) {
+                        skinChanged |= ImGui::SliderFloat("SSS Strength", &state.skinSubsurfaceStrength, 0.0f, 1.0f);
+                        ImGui::TextDisabled("Overall subsurface scattering strength");
+                        
+                        skinChanged |= ImGui::SliderFloat("SSS Radius", &state.skinSubsurfaceRadius, 0.001f, 0.05f, "%.3f");
+                        ImGui::TextDisabled("How far light scatters under skin");
+                        
+                        skinChanged |= ImGui::SliderFloat("Translucency", &state.skinTranslucency, 0.0f, 1.0f);
+                        ImGui::TextDisabled("Backlit effect (ears, fingers)");
+                        
+                        skinChanged |= ImGui::SliderFloat("Oil/Moisture", &state.skinOilAmount, 0.0f, 1.0f);
+                        ImGui::TextDisabled("Surface shine layer");
+                        
+                        skinChanged |= ImGui::SliderFloat("Pore Depth", &state.skinPoreDepth, 0.0f, 0.3f);
+                        ImGui::TextDisabled("Micro surface detail");
+                        
+                        ImGui::Spacing();
+                        ImGui::Text("Blush Effect");
+                        skinChanged |= ImGui::SliderFloat("Blush Amount", &state.skinBlush, 0.0f, 1.0f);
+                        if (state.skinBlush > 0.0f) {
+                            skinChanged |= ImGui::ColorEdit3("Blush Color", state.skinBlushColor);
+                        }
+                        
+                        if (skinChanged && state.onSkinRenderingUpdate) {
+                            state.onSkinRenderingUpdate();
+                        }
+                        
+                        ImGui::TreePop();
+                    }
+                    
+                    if (skinChanged) {
+                        state.textureNeedsUpdate = true;
+                    }
+                }
+                
+                // === Eye Texture ===
+                if (ImGui::CollapsingHeader("Eye Texture", ImGuiTreeNodeFlags_DefaultOpen)) {
+                    // Eye color preset
+                    const char* eyeColors[] = {"Brown", "Blue", "Green", "Hazel", "Gray", "Custom"};
+                    if (ImGui::Combo("Eye Color", &state.eyeColorPreset, eyeColors, 6)) {
+                        // Apply preset eye colors
+                        switch (state.eyeColorPreset) {
+                            case 0:  // Brown
+                                state.eyeColor[0] = 0.4f; state.eyeColor[1] = 0.25f; state.eyeColor[2] = 0.15f;
+                                break;
+                            case 1:  // Blue
+                                state.eyeColor[0] = 0.3f; state.eyeColor[1] = 0.5f; state.eyeColor[2] = 0.8f;
+                                break;
+                            case 2:  // Green
+                                state.eyeColor[0] = 0.35f; state.eyeColor[1] = 0.55f; state.eyeColor[2] = 0.35f;
+                                break;
+                            case 3:  // Hazel
+                                state.eyeColor[0] = 0.5f; state.eyeColor[1] = 0.4f; state.eyeColor[2] = 0.25f;
+                                break;
+                            case 4:  // Gray
+                                state.eyeColor[0] = 0.5f; state.eyeColor[1] = 0.55f; state.eyeColor[2] = 0.6f;
+                                break;
+                        }
+                        state.textureNeedsUpdate = true;
+                        if (state.onEyeColorPresetChange) {
+                            state.onEyeColorPresetChange(state.eyeColorPreset);
+                        }
+                    }
+                    
+                    // Custom eye color
+                    if (state.eyeColorPreset == 5) {
+                        if (ImGui::ColorEdit3("Iris Color", state.eyeColor)) {
+                            state.textureNeedsUpdate = true;
+                        }
+                    }
+                    
+                    ImGui::Spacing();
+                    
+                    bool eyeChanged = false;
+                    eyeChanged |= ImGui::SliderFloat("Iris Size", &state.irisSize, 0.3f, 0.7f);
+                    eyeChanged |= ImGui::SliderFloat("Pupil Size", &state.pupilSize, 0.1f, 0.5f);
+                    eyeChanged |= ImGui::SliderFloat("Iris Detail", &state.irisDetail, 0.3f, 1.0f);
+                    
+                    ImGui::Spacing();
+                    eyeChanged |= ImGui::SliderFloat("Sclera Veins", &state.scleraVeins, 0.0f, 0.4f);
+                    eyeChanged |= ImGui::SliderFloat("Eye Wetness", &state.eyeWetness, 0.3f, 1.0f);
+                    
+                    // === Advanced Eye Rendering (NEW) ===
+                    if (ImGui::TreeNode("Advanced Eye Settings")) {
+                        ImGui::TextColored(ImVec4(0.4f, 0.8f, 1.0f, 1.0f), "Refraction & Depth");
+                        
+                        eyeChanged |= ImGui::SliderFloat("Iris Depth", &state.eyeIrisDepth, 0.0f, 0.05f, "%.3f");
+                        ImGui::TextDisabled("Parallax depth effect for iris");
+                        
+                        eyeChanged |= ImGui::SliderFloat("Cornea Bulge", &state.eyeCorneaBulge, 0.0f, 0.06f, "%.3f");
+                        ImGui::TextDisabled("Dome over iris for realistic refraction");
+                        
+                        ImGui::Spacing();
+                        ImGui::TextColored(ImVec4(0.4f, 0.8f, 1.0f, 1.0f), "Lighting Effects");
+                        
+                        eyeChanged |= ImGui::SliderFloat("Caustics", &state.eyeCausticStrength, 0.0f, 1.0f);
+                        ImGui::TextDisabled("Light patterns from cornea refraction");
+                        
+                        eyeChanged |= ImGui::SliderFloat("Reflection", &state.eyeReflection, 0.0f, 1.0f);
+                        ImGui::TextDisabled("Environment reflection on cornea");
+                        
+                        ImGui::Spacing();
+                        ImGui::TextColored(ImVec4(0.4f, 0.8f, 1.0f, 1.0f), "Pupil");
+                        
+                        eyeChanged |= ImGui::SliderFloat("Pupil Dilation", &state.eyePupilDilation, -1.0f, 1.0f);
+                        ImGui::TextDisabled("-1 = constricted, +1 = dilated");
+                        
+                        if (eyeChanged && state.onEyeRenderingUpdate) {
+                            state.onEyeRenderingUpdate();
+                        }
+                        
+                        ImGui::TreePop();
+                    }
+                    
+                    if (eyeChanged) {
+                        state.textureNeedsUpdate = true;
+                    }
+                }
+                
+                // === Lip Texture ===
+                if (ImGui::CollapsingHeader("Lip Texture")) {
+                    bool lipChanged = false;
+                    lipChanged |= ImGui::ColorEdit3("Lip Color", state.lipColor);
+                    lipChanged |= ImGui::SliderFloat("Glossiness", &state.lipGlossiness, 0.0f, 1.0f);
+                    lipChanged |= ImGui::SliderFloat("Chapped", &state.lipChapped, 0.0f, 1.0f);
+                    
+                    if (lipChanged) {
+                        state.textureNeedsUpdate = true;
+                    }
+                }
+                
+                ImGui::Separator();
+                
+                // Generate/Update button
+                if (state.textureNeedsUpdate) {
+                    ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.2f, 0.6f, 0.2f, 1.0f));
+                    if (ImGui::Button("Generate Textures", ImVec2(-1, 35))) {
+                        if (state.onTextureUpdate) {
+                            state.onTextureUpdate();
+                        }
+                        state.textureNeedsUpdate = false;
+                    }
+                    ImGui::PopStyleColor();
+                    ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.2f, 1.0f), "Parameters changed - click to update textures");
+                } else {
+                    if (ImGui::Button("Regenerate Textures", ImVec2(-1, 35))) {
+                        if (state.onTextureUpdate) {
+                            state.onTextureUpdate();
+                        }
+                    }
+                }
+                
+                ImGui::EndTabItem();
+            }
+            
+            // === Hair Tab ===
+            if (ImGui::BeginTabItem("Hair")) {
+                state.currentTab = 7;
+                
+                ImGui::Text("Hair Style");
+                ImGui::Separator();
+                
+                // Hair style selection
+                if (state.availableHairStyles.empty()) {
+                    ImGui::TextDisabled("Loading hair styles...");
+                } else {
+                    // Style dropdown
+                    const char* currentStyle = state.hairStyleIndex < (int)state.availableHairStyles.size() ?
+                        state.availableHairStyles[state.hairStyleIndex].c_str() : "None";
+                    
+                    if (ImGui::BeginCombo("Style", currentStyle)) {
+                        for (int i = 0; i < (int)state.availableHairStyles.size(); i++) {
+                            bool isSelected = (state.hairStyleIndex == i);
+                            if (ImGui::Selectable(state.availableHairStyles[i].c_str(), isSelected)) {
+                                state.hairStyleIndex = i;
+                                state.hairNeedsUpdate = true;
+                                if (state.onHairStyleChange) {
+                                    state.onHairStyleChange(state.availableHairStyles[i]);
+                                }
+                            }
+                            if (isSelected) {
+                                ImGui::SetItemDefaultFocus();
+                            }
+                        }
+                        ImGui::EndCombo();
+                    }
+                }
+                
+                ImGui::Spacing();
+                ImGui::Separator();
+                ImGui::Text("Hair Color");
+                
+                // Color preset
+                const char* hairColors[] = {
+                    "Black", "Dark Brown", "Brown", "Auburn", "Red",
+                    "Blonde", "Platinum", "Gray", "White",
+                    "Blue", "Pink", "Purple", "Green"
+                };
+                
+                if (ImGui::Combo("Color Preset", &state.hairColorPreset, hairColors, 13)) {
+                    state.useCustomHairColor = false;
+                    state.hairNeedsUpdate = true;
+                    
+                    // Set color based on preset
+                    switch (state.hairColorPreset) {
+                        case 0:  // Black
+                            state.hairColor[0] = 0.02f; state.hairColor[1] = 0.02f; state.hairColor[2] = 0.02f;
+                            break;
+                        case 1:  // Dark Brown
+                            state.hairColor[0] = 0.08f; state.hairColor[1] = 0.05f; state.hairColor[2] = 0.03f;
+                            break;
+                        case 2:  // Brown
+                            state.hairColor[0] = 0.15f; state.hairColor[1] = 0.1f; state.hairColor[2] = 0.05f;
+                            break;
+                        case 3:  // Auburn
+                            state.hairColor[0] = 0.35f; state.hairColor[1] = 0.15f; state.hairColor[2] = 0.08f;
+                            break;
+                        case 4:  // Red
+                            state.hairColor[0] = 0.5f; state.hairColor[1] = 0.15f; state.hairColor[2] = 0.08f;
+                            break;
+                        case 5:  // Blonde
+                            state.hairColor[0] = 0.75f; state.hairColor[1] = 0.6f; state.hairColor[2] = 0.4f;
+                            break;
+                        case 6:  // Platinum
+                            state.hairColor[0] = 0.9f; state.hairColor[1] = 0.88f; state.hairColor[2] = 0.8f;
+                            break;
+                        case 7:  // Gray
+                            state.hairColor[0] = 0.5f; state.hairColor[1] = 0.5f; state.hairColor[2] = 0.52f;
+                            break;
+                        case 8:  // White
+                            state.hairColor[0] = 0.85f; state.hairColor[1] = 0.85f; state.hairColor[2] = 0.87f;
+                            break;
+                        case 9:  // Blue
+                            state.hairColor[0] = 0.1f; state.hairColor[1] = 0.2f; state.hairColor[2] = 0.5f;
+                            break;
+                        case 10: // Pink
+                            state.hairColor[0] = 0.7f; state.hairColor[1] = 0.3f; state.hairColor[2] = 0.5f;
+                            break;
+                        case 11: // Purple
+                            state.hairColor[0] = 0.3f; state.hairColor[1] = 0.1f; state.hairColor[2] = 0.4f;
+                            break;
+                        case 12: // Green
+                            state.hairColor[0] = 0.1f; state.hairColor[1] = 0.35f; state.hairColor[2] = 0.15f;
+                            break;
+                    }
+                    
+                    if (state.onHairColorPresetChange) {
+                        state.onHairColorPresetChange(state.hairColorPreset);
+                    }
+                }
+                
+                // Custom color option
+                ImGui::Checkbox("Custom Color", &state.useCustomHairColor);
+                
+                if (state.useCustomHairColor) {
+                    if (ImGui::ColorEdit3("Hair Color", state.hairColor)) {
+                        state.hairNeedsUpdate = true;
+                        if (state.onHairColorChange) {
+                            state.onHairColorChange(state.hairColor[0], state.hairColor[1], state.hairColor[2]);
+                        }
+                    }
+                }
+                
+                ImGui::Spacing();
+                ImGui::Separator();
+                
+                // === Advanced Hair Rendering (NEW) ===
+                if (ImGui::CollapsingHeader("Advanced Hair Rendering")) {
+                    ImGui::TextColored(ImVec4(0.4f, 0.8f, 1.0f, 1.0f), "Specular (Marschner Model)");
+                    
+                    bool hairChanged = false;
+                    hairChanged |= ImGui::SliderFloat("Specular Strength", &state.hairSpecularStrength, 0.0f, 2.0f);
+                    ImGui::TextDisabled("Primary highlight intensity");
+                    
+                    hairChanged |= ImGui::SliderFloat("Specular Shift", &state.hairSpecularShift, -0.3f, 0.3f);
+                    ImGui::TextDisabled("Highlight position along hair");
+                    
+                    hairChanged |= ImGui::SliderFloat("Transmission", &state.hairTransmission, 0.0f, 1.0f);
+                    ImGui::TextDisabled("Light passing through hair strands");
+                    
+                    hairChanged |= ImGui::SliderFloat("Scatter", &state.hairScatter, 0.0f, 1.0f);
+                    ImGui::TextDisabled("Back-scatter from light");
+                    
+                    ImGui::Spacing();
+                    ImGui::TextColored(ImVec4(0.4f, 0.8f, 1.0f, 1.0f), "Strand Shape");
+                    
+                    hairChanged |= ImGui::SliderFloat("Curl Frequency", &state.hairCurlFrequency, 0.0f, 10.0f);
+                    ImGui::TextDisabled("Number of curls per strand");
+                    
+                    hairChanged |= ImGui::SliderFloat("Curl Amplitude", &state.hairCurlAmplitude, 0.0f, 0.05f, "%.3f");
+                    ImGui::TextDisabled("How tight the curls are");
+                    
+                    hairChanged |= ImGui::SliderFloat("Frizz", &state.hairFrizz, 0.0f, 0.02f, "%.3f");
+                    ImGui::TextDisabled("Random strand variation");
+                    
+                    hairChanged |= ImGui::SliderFloat("Clumping", &state.hairClumping, 0.0f, 1.0f);
+                    ImGui::TextDisabled("How much strands group together");
+                    
+                    if (hairChanged) {
+                        state.hairNeedsUpdate = true;
+                        if (state.onHairRenderingUpdate) {
+                            state.onHairRenderingUpdate();
+                        }
+                    }
+                }
+                
+                ImGui::Spacing();
+                ImGui::Separator();
+                
+                // Hair info
+                ImGui::TextDisabled("Tip: Hair styles can be imported from external files.");
+                ImGui::TextDisabled("Supported: OBJ, FBX, glTF with proper UV mapping.");
+                
+                ImGui::EndTabItem();
+            }
+            
+            // === Export Tab ===
+            if (ImGui::BeginTabItem("Export")) {
+                state.currentTab = 8;
+                
+                ImGui::TextColored(ImVec4(0.4f, 0.8f, 1.0f, 1.0f), "Export Character");
+                ImGui::Separator();
+                
+                // Character name
+                ImGui::Text("Name:");
+                ImGui::SetNextItemWidth(-1);
+                ImGui::InputText("##exportName", state.characterName, 256);
+                
+                ImGui::Spacing();
+                
+                // Format selection with descriptions
+                ImGui::Text("Format:");
+                const char* formats[] = {
+                    "GLB (Recommended)", 
+                    "glTF (JSON + files)", 
+                    "FBX (Maya, 3ds Max)", 
+                    "OBJ (Simple mesh)", 
+                    "VRM (VTuber)"
+                };
+                ImGui::SetNextItemWidth(-1);
+                ImGui::Combo("##exportFormat", &state.exportFormat, formats, 5);
+                
+                // Format description
+                const char* formatDescs[] = {
+                    "Single binary file. Best for Unity, Unreal, Blender, Web.",
+                    "JSON format with separate files. Good for debugging.",
+                    "Industry standard. Best for Maya, Cinema 4D, 3ds Max.",
+                    "Simple mesh only. No skeleton or animation support.",
+                    "VTuber avatar format. For VRChat, VSeeFace."
+                };
+                ImGui::TextDisabled("%s", formatDescs[state.exportFormat]);
+                
+                ImGui::Spacing();
+                ImGui::Separator();
+                ImGui::Spacing();
+                
+                // Export options based on format
+                ImGui::Text("Options:");
+                
+                bool canExportSkeleton = (state.exportFormat != 3);  // Not OBJ
+                bool canExportBlendShapes = (state.exportFormat != 3);
+                
+                ImGui::BeginDisabled(!canExportSkeleton);
+                ImGui::Checkbox("Include Skeleton", &state.exportSkeleton);
+                ImGui::EndDisabled();
+                
+                ImGui::BeginDisabled(!canExportBlendShapes);
+                ImGui::Checkbox("Include BlendShapes", &state.exportBlendShapes);
+                ImGui::EndDisabled();
+                
+                ImGui::Checkbox("Include Textures", &state.exportTextures);
+                ImGui::Checkbox("Include Materials", &state.exportMaterials);
+                
+                if (state.exportFormat == 0 || state.exportFormat == 1) {  // GLB or glTF
+                    ImGui::Checkbox("Embed Textures in File", &state.embedTextures);
+                }
+                
+                ImGui::Spacing();
+                ImGui::Separator();
+                ImGui::Spacing();
+                
+                // Export button
+                if (state.exportInProgress) {
+                    ImGui::BeginDisabled(true);
+                    ImGui::Button("Exporting...", ImVec2(-1, 45));
+                    ImGui::EndDisabled();
+                    
+                    ImGui::ProgressBar(state.exportProgress, ImVec2(-1, 0));
+                    ImGui::TextDisabled("%s", state.exportStatus.c_str());
+                } else {
+                    if (ImGui::Button("Export Character...", ImVec2(-1, 45))) {
+                        if (state.onExport) {
+                            state.onExport(
+                                state.characterName, 
+                                state.exportFormat,
+                                state.exportSkeleton,
+                                state.exportBlendShapes,
+                                state.exportTextures
+                            );
+                        }
+                    }
+                }
+                
+                // Show last export result
+                if (!state.lastExportPath.empty()) {
+                    ImGui::Spacing();
+                    if (state.exportSuccess) {
+                        ImGui::TextColored(ImVec4(0.2f, 0.9f, 0.2f, 1.0f), "Success!");
+                        ImGui::TextWrapped("Saved to: %s", state.lastExportPath.c_str());
+                    } else {
+                        ImGui::TextColored(ImVec4(1.0f, 0.3f, 0.3f, 1.0f), "Export failed");
+                        ImGui::TextWrapped("%s", state.exportStatus.c_str());
+                    }
+                }
+                
+                ImGui::Spacing();
+                ImGui::Separator();
+                ImGui::Spacing();
+                
+                // Stats
+                ImGui::Text("Model Statistics:");
+                ImGui::Columns(2, "stats", false);
+                ImGui::BulletText("Vertices:"); ImGui::NextColumn();
+                ImGui::Text("%u", state.vertexCount); ImGui::NextColumn();
+                ImGui::BulletText("Triangles:"); ImGui::NextColumn();
+                ImGui::Text("%u", state.triangleCount); ImGui::NextColumn();
+                ImGui::BulletText("BlendShapes:"); ImGui::NextColumn();
+                ImGui::Text("%u", state.blendShapeCount); ImGui::NextColumn();
+                ImGui::BulletText("Bones:"); ImGui::NextColumn();
+                ImGui::Text("%u", state.boneCount); ImGui::NextColumn();
+                ImGui::Columns(1);
+                
+                // Format compatibility info
+                ImGui::Spacing();
+                if (ImGui::CollapsingHeader("Format Compatibility")) {
+                    ImGui::TextDisabled("GLB/glTF:");
+                    ImGui::BulletText("Unity (via glTFast)");
+                    ImGui::BulletText("Unreal Engine (native)");
+                    ImGui::BulletText("Blender (native)");
+                    ImGui::BulletText("Three.js / Web");
+                    
+                    ImGui::Spacing();
+                    ImGui::TextDisabled("VRM:");
+                    ImGui::BulletText("VRChat");
+                    ImGui::BulletText("VSeeFace");
+                    ImGui::BulletText("VMagicMirror");
+                    ImGui::BulletText("VTube Studio");
+                }
+                
+                ImGui::EndTabItem();
+            }
+            
+            ImGui::EndTabBar();
+        }
+        
+        ImGui::Separator();
+        
+        // Bottom controls
+        ImGui::Checkbox("Auto Rotate", &state.autoRotate);
+        ImGui::SameLine();
+        
+        if (!state.autoRotate) {
+            ImGui::SetNextItemWidth(150);
+            float rotDeg = state.rotationY * 57.2958f;
+            if (ImGui::SliderFloat("##rotation", &rotDeg, -180.0f, 180.0f, "%.0f deg")) {
+                state.rotationY = rotDeg / 57.2958f;
+            }
+        }
+        
+        ImGui::SameLine(ImGui::GetWindowWidth() - 100);
+        if (ImGui::Button("Randomize", ImVec2(90, 0))) {
+            if (state.onRandomize) state.onRandomize();
+        }
+    }
+    ImGui::End();
+    
+    // === AI Model Setup Window ===
+    if (state.showAIModelSetup) {
+        ImGui::SetNextWindowSize(ImVec2(500, 400), ImGuiCond_FirstUseEver);
+        if (ImGui::Begin("AI Model Setup", &state.showAIModelSetup)) {
+            ImGui::TextWrapped(
+                "The Photo-to-Face feature requires AI models in ONNX format. "
+                "Please import the following models to enable this feature."
+            );
+            ImGui::Separator();
+            
+            // Model list
+            struct ModelEntry {
+                const char* id;
+                const char* name;
+                const char* description;
+                bool required;
+            };
+            ModelEntry models[] = {
+                {"face_detector", "Face Detector", "Detects faces in photos (MediaPipe compatible)", true},
+                {"face_mesh", "Face Mesh", "Extracts 468 3D landmarks (MediaPipe Face Mesh)", true},
+                {"3dmm", "3DMM Regressor", "FLAME/DECA model for shape parameters", false},
+                {"face_recognition", "Face Recognition", "Identity preservation (ArcFace)", false}
+            };
+            
+            ImGui::Text("Required Models:");
+            for (const auto& m : models) {
+                if (!m.required) continue;
+                
+                ImGui::PushID(m.id);
+                
+                // Status indicator (placeholder)
+                ImGui::TextColored(ImVec4(1.0f, 0.5f, 0.0f, 1.0f), "[Not Found]");
+                ImGui::SameLine();
+                ImGui::Text("%s", m.name);
+                ImGui::SameLine(300);
+                if (ImGui::Button("Import...")) {
+                    if (state.onImportAIModel) {
+                        state.onImportAIModel(m.id, m.name);
+                    }
+                }
+                ImGui::TextDisabled("  %s", m.description);
+                
+                ImGui::PopID();
+            }
+            
+            ImGui::Separator();
+            ImGui::Text("Optional Models:");
+            for (const auto& m : models) {
+                if (m.required) continue;
+                
+                ImGui::PushID(m.id);
+                
+                ImGui::TextColored(ImVec4(0.5f, 0.5f, 0.5f, 1.0f), "[Optional]");
+                ImGui::SameLine();
+                ImGui::Text("%s", m.name);
+                ImGui::SameLine(300);
+                if (ImGui::Button("Import...")) {
+                    if (state.onImportAIModel) {
+                        state.onImportAIModel(m.id, m.name);
+                    }
+                }
+                ImGui::TextDisabled("  %s", m.description);
+                
+                ImGui::PopID();
+            }
+            
+            ImGui::Separator();
+            ImGui::TextWrapped(
+                "Recommended models:\n"
+                "- MediaPipe Face Detection: https://developers.google.com/mediapipe\n"
+                "- MediaPipe Face Mesh: https://developers.google.com/mediapipe\n"
+                "- DECA/EMOCA: https://github.com/yfeng95/DECA\n"
+                "\n"
+                "Models must be converted to ONNX format."
+            );
+        }
+        ImGui::End();
+    }
 }
 
 // ===== Apply Editor Theme =====

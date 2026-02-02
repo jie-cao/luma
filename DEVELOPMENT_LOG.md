@@ -6,6 +6,80 @@
 
 ## 📋 已完成功能
 
+### 角色创建系统 (Phase 21-32)
+- [x] **角色模板系统**
+  - CharacterTemplate 抽象接口
+  - Human/Cartoon/Mascot 模板实现
+  - BodyProportions 身体比例预设
+
+- [x] **身体部件系统**
+  - 可组合的头/躯干/四肢/尾巴/翅膀
+  - 程序化形状生成（球/椭球/胶囊/圆柱/圆锥/盒子）
+  - 自动骨骼生成
+
+- [x] **卡通特征系统**
+  - 多种眼睛样式（Circle/Oval/Dot/Button/Anime/Disney）
+  - 多种耳朵样式（MouseRound/CatPointed/BunnyLong/BearRound）
+  - 鼻子和嘴巴样式（支持无嘴设计）
+  - 配饰（蝴蝶结/项圈等）
+
+- [x] **服装系统**
+  - 服装加载器（OBJ/glTF/FBX）
+  - 布料物理模拟（质点-弹簧）
+  - 程序化布料纹理（棉/牛仔/丝绸/皮革/羊毛）
+  - 自动骨骼蒙皮
+
+- [x] **贴图系统**
+  - 皮肤/眼睛/嘴唇程序化纹理
+  - UV 映射优化
+  - 法线贴图和粗糙度贴图
+
+- [x] **发型系统**
+  - 发型库（平头/中长发/马尾等）
+  - 13 种颜色预设
+  - 程序化发型生成
+
+- [x] **标准绑定系统（Standard Rig）**
+  - 支持 Mixamo / Unity Humanoid / VRM / Unreal 骨骼标准
+  - 自动骨骼命名转换和动画重定向
+  - ARKit 52 BlendShapes 面部绑定
+  - VRM 表情和 Viseme（口型同步）支持
+  - 自动骨骼权重生成（距离/热扩散）
+
+### 编辑器系统 (Phase 31-32)
+- [x] **撤销/重做系统**
+  - Command Pattern 实现
+  - 命令合并（连续滑块调整）
+  - 复合命令支持
+  - 内存限制管理
+
+- [x] **快捷键系统**
+  - 60+ 预设快捷键
+  - 用户自定义绑定
+  - 冲突检测和配置保存
+
+- [x] **渲染预设系统**
+  - 5 档质量预设（Preview → Ultra）
+  - 完整渲染参数控制
+  - 高质量输出设置
+
+- [x] **Lip Sync 口型同步**
+  - 27 种 Viseme 口型
+  - 音频实时分析驱动
+  - ARKit BlendShape 映射
+
+- [x] **场景布置系统**
+  - 多物体层级管理
+  - 6 种图层分类
+  - 6 套场景预设
+  - 对齐/分布工具
+
+- [x] **相机动画系统**
+  - 关键帧时间轴
+  - 9 种预设运动
+  - Bezier 曲线插值
+  - 景深动画支持
+
 ### 核心渲染系统
 - [x] **DirectX 12 渲染后端**
   - DX12 设备初始化、命令队列、命令列表
@@ -966,28 +1040,68 @@ Scene ──▶ HDR Target (RGBA16F) ──▶ Bloom Threshold ──▶ Blur H 
 
 ---
 
-## 阶段 14：平台扩展 📋
+## 阶段 14：平台扩展 ✅
 
 > 目标：将 LUMA Studio 扩展到多个平台
 
-### 14.1 iOS 查看器
-- [ ] iOS Metal 渲染器
-- [ ] 触摸手势 (旋转/缩放/平移)
-- [ ] ARKit 支持 (可选)
-- [ ] 移动端 UI 适配
-- [ ] 性能优化 (LOD/剔除)
+### 14.1 iOS 查看器 ✅
+- [x] iOS Metal 渲染器 (`apps/luma_viewer_ios/`)
+- [x] 触摸手势 (单指旋转/双指平移/捏合缩放/双击重置)
+- [x] 移动端 UI 适配 (Info Label + Toolbar)
+- [x] 性能优化 (Frustum Culling + LOD)
+- [ ] ARKit 支持 (待实现)
 
-### 14.2 Android 查看器
-- [ ] Vulkan 渲染器
-- [ ] 触摸交互
-- [ ] 多设备兼容
-- [ ] 内存优化
+**文件:**
+- `apps/luma_viewer_ios/LumaViewController.mm` - 主视图控制器
+- `apps/luma_viewer_ios/Info.plist` - iOS 应用配置
+- `apps/luma_viewer_ios/LaunchScreen.storyboard` - 启动屏幕
 
-### 14.3 Web 版本
-- [ ] WebGPU 渲染器
-- [ ] WebGL 2.0 回退
-- [ ] 资源流式加载
-- [ ] Web Worker 多线程
+**构建:**
+```bash
+# 生成 iOS Xcode 项目
+cmake -G Xcode -DCMAKE_SYSTEM_NAME=iOS -DCMAKE_OSX_DEPLOYMENT_TARGET=14.0 -B build-ios
+# 在 Xcode 中打开并运行
+open build-ios/luma.xcodeproj
+```
+
+### 14.2 Android 查看器 ✅
+- [x] Vulkan 渲染器 (`apps/luma_viewer_android/`)
+- [x] 触摸交互 (单指轨道/双指平移/捏合缩放)
+- [x] JNI 桥接 (Kotlin ↔ C++)
+- [x] 基础 UI (信息面板 + 工具栏)
+
+**文件:**
+- `apps/luma_viewer_android/app/src/main/cpp/vulkan_renderer.cpp` - Vulkan 渲染器
+- `apps/luma_viewer_android/app/src/main/cpp/jni_bridge.cpp` - JNI 接口
+- `apps/luma_viewer_android/app/src/main/java/com/luma/viewer/MainActivity.kt` - 主 Activity
+
+**构建:**
+```bash
+cd apps/luma_viewer_android
+./gradlew assembleDebug
+# APK 输出: app/build/outputs/apk/debug/app-debug.apk
+```
+
+### 14.3 Web 版本 ✅
+- [x] WebGPU 渲染器 (`apps/luma_viewer_web/`)
+- [x] WGSL 着色器 (PBR 光照)
+- [x] 鼠标/触摸交互 (轨道/平移/缩放)
+- [x] 现代 Web UI (HTML5 + CSS3)
+- [ ] WebGL 2.0 回退 (待实现)
+- [ ] 资源流式加载 (待实现)
+
+**文件:**
+- `apps/luma_viewer_web/src/renderer.ts` - WebGPU 渲染器
+- `apps/luma_viewer_web/src/camera.ts` - 轨道相机
+- `apps/luma_viewer_web/src/geometry.ts` - 几何体工具
+
+**构建:**
+```bash
+cd apps/luma_viewer_web
+npm install
+npm run dev    # 开发模式
+npm run build  # 生产构建
+```
 
 ---
 
@@ -2696,7 +2810,1638 @@ CONFIG("name")->getInt("key") // 获取配置
 
 ---
 
+## 🚀 Phase 16: 产品完善计划
+
+### 16.1 优先级规划
+
+#### P0 - 必须做（能用）
+| 任务 | 状态 | 说明 |
+|------|------|------|
+| 整合测试 | ⏳ 待做 | 确保所有系统协同工作 |
+| 基础示例项目 | ✅ 已完成 | A-D 四个示例项目 |
+| 快速入门文档 | ✅ 已完成 | GOLDEN_PATH.md |
+
+#### P1 - 应该做（好用）
+| 任务 | 状态 | 说明 |
+|------|------|------|
+| 项目模板 | ⏳ 待做 | 空白/2D/3D 模板 |
+| 自动保存 & 崩溃恢复 | ⏳ 待做 | 防止用户丢失工作 |
+| Undo/Redo 完善 | ✅ 已完成 | Command 系统 |
+| 快捷键系统 | ⏳ 待做 | 提高工作效率 |
+| 资产导入向导 | ⏳ 待做 | 简化模型/纹理导入 |
+
+#### P2 - 可以做（易用）
+| 任务 | 状态 | 说明 |
+|------|------|------|
+| 欢迎页面/最近项目 | ⏳ 待做 | 更好的首次体验 |
+| 偏好设置面板 | ⏳ 待做 | 自定义编辑器 |
+| Console/日志面板 | ⏳ 待做 | 调试信息可视化 |
+| 资产浏览器 | 🔄 进行中 | 管理项目资源 |
+
+#### P3 - 未来考虑
+| 任务 | 状态 | 说明 |
+|------|------|------|
+| 插件/扩展系统 | ⏳ 待做 | 社区贡献 |
+| 可视化脚本 | 🔄 进行中 | 非程序员友好 |
+| 协作编辑 | ⏳ 待做 | 团队工作流 |
+
+---
+
+### 16.2 资产浏览器（Asset Browser）
+
+设计目标：提供直观的项目资源管理界面
+
+#### 功能设计
+1. **目录树视图**
+   - 显示项目文件夹结构
+   - 支持文件夹展开/折叠
+   - 拖拽组织文件
+
+2. **资产网格视图**
+   - 缩略图预览（模型、纹理、材质）
+   - 列表/网格切换
+   - 搜索过滤
+
+3. **资产类型支持**
+   - 模型：.fbx, .obj, .gltf
+   - 纹理：.png, .jpg, .hdr
+   - 材质：.mat
+   - 场景：.luma
+   - 脚本：.lua
+   - 音频：.wav, .mp3
+
+4. **操作功能**
+   - 双击打开/预览
+   - 右键菜单（重命名、删除、复制）
+   - 拖拽到场景
+   - 导入新资产
+
+---
+
+### 16.3 角色创建系统（Character Creation System）
+
+**日期**: 2026-01-23
+
+设计目标：实现"照片 → 可编辑 3D 角色 → 可穿戴 → 可动画"的完整角色生产流水线。
+
+#### 已完成模块
+
+1. **BlendShape 系统** (`engine/character/blend_shape.h`)
+   - BlendShapeTarget: 存储顶点偏移数据（位置、法线、切线）
+   - BlendShapeChannel: 权重控制，支持多目标混合
+   - BlendShapeMesh: 统一管理所有 BlendShape 数据
+   - BlendShapePreset: 预设系统（表情、体型）
+   - CPU 混合计算支持
+   - 稀疏存储优化（只存储变化的顶点）
+
+2. **BlendShape GPU 计算** (`engine/renderer/shaders/blend_shape.metal`)
+   - 稀疏 Delta 应用 Kernel
+   - 稠密 Per-Vertex 应用 Kernel
+   - 预索引优化 Kernel（最高效）
+   - BlendShape + 骨骼蒙皮联合计算 Kernel
+   - 从 Base Mesh 初始化 Kernel
+
+3. **身体参数系统** (`engine/character/character_body.h`)
+   - Gender: 男/女/中性
+   - AgeGroup: 幼年/青少年/青年/成年/老年
+   - BodyPreset: 15+ 预设体型
+   - BodyMeasurements: 20+ 细节参数（身高、体重、肌肉、肩宽...）
+   - BlendShape 映射系统（参数 → 权重）
+   - 序列化/反序列化支持
+
+4. **脸部参数系统** (`engine/character/character_face.h`)
+   - FaceShapeParams: 50+ 脸部形状参数
+   - FaceExpressionParams: ARKit 52 兼容表情参数
+   - FaceTextureParams: 肤色、眼色、唇色、化妆等
+   - PhotoFaceResult: AI 照片重建结果数据结构
+   - 脸部预设库支持
+
+5. **角色整合系统** (`engine/character/character.h`)
+   - Character: 统一角色类（Face + Body + Clothing + Animation）
+   - CharacterClothing: 服装管理（装备、分层、颜色定制）
+   - CharacterAnimationState: 动画状态管理
+   - CharacterFactory: 角色创建工厂
+   - CharacterManager: 多角色管理
+   - 标准 Humanoid 骨骼（30+ 骨骼）
+   - 导出支持（glTF, FBX, VRM 预留）
+
+6. **角色创建 UI** (`engine/character/character_creator_ui.h`)
+   - ImGui 集成界面
+   - 分 Tab 设计（Body/Face/Clothing/Animation/Export）
+   - 身体子面板（Preset/Overall/Torso/Arms/Legs/Skin）
+   - 脸部子面板（Shape/Eyes/Nose/Mouth/Texture/Expression）
+   - 滑块 + 重置按钮
+   - 颜色选择器 + 预设
+   - 预设网格展示
+
+#### 产品规划文档
+
+详细产品规划参见: `docs/CHARACTER_CREATION_SPEC.md`
+
+7. **基础人体模型加载** (`engine/character/base_human_loader.h`)
+   - BaseHumanModel: 统一模型数据结构
+   - BaseHumanLoader: 支持 OBJ 和 MakeHuman target 文件
+   - ProceduralHumanGenerator: 程序化人体生成（用于测试）
+   - BaseHumanModelLibrary: 模型库管理
+
+8. **AI 推理引擎** (`engine/character/ai/ai_inference.h`)
+   - Tensor: 多维张量数据结构
+   - InferenceSession: ONNX Runtime 封装
+   - AIModelManager: 模型管理器
+   - ImagePreprocess: 图像预处理工具（resize, normalize, NCHW转换）
+
+9. **照片→脸部 Pipeline** (`engine/character/ai/face_reconstruction.h`)
+   - FaceLandmarks: 468点 MediaPipe 兼容
+   - FaceDetector: 人脸检测
+   - FaceMeshEstimator: 人脸网格估计
+   - FLAME3DMMParams: FLAME 模型参数
+   - Face3DMMRegressor: 3DMM 参数回归
+   - FaceParameterMapper: 3DMM→LUMA 参数映射
+   - FaceTextureExtractor: 脸部贴图提取
+   - PhotoToFacePipeline: 完整照片到脸部流程
+
+10. **角色渲染器** (`engine/character/character_renderer.h`)
+    - CharacterGPUData: 管理基础网格和变形后网格
+    - CharacterRenderer: 渲染集成类
+    - 自动更新 BlendShape 并同步到 GPU
+
+11. **角色创建演示** (`examples/07_character_creator.h`)
+    - CharacterCreatorDemo: 完整演示应用
+    - ImGui 界面集成
+    - 实时预览和调整
+    - Body/Face/BlendShape/Export 标签页
+
+12. **使用文档** (`docs/tutorials/07_character_creation.md`)
+    - 完整的使用教程
+    - API 参考
+    - 代码示例
+    - 常见问题解答
+
+13. **编辑器 UI 集成** (`engine/ui/editor_ui.h`, `apps/luma_studio_macos/LumaView.mm`)
+    - CharacterCreatorState: 角色创建 UI 状态
+    - drawCharacterCreatorPanel: ImGui 角色创建面板
+    - 菜单入口: Window → Tools → Character Creator
+    - 回调系统: 随机化、预设、参数变化、照片导入、导出
+
+14. **角色实时渲染预览**
+    - initializeCharacter: 初始化角色和网格
+    - updateAndRenderCharacter: 每帧更新和渲染角色
+    - 参数变化自动同步到 BlendShape
+    - 角色显示在场景右侧
+
+15. **AI 模型管理** (`engine/character/ai/ai_model_manager.h`)
+    - AIModelInfo: 模型信息结构
+    - ModelRegistry: 已知模型注册表
+    - AIModelManager: 管理模型下载、验证、加载
+    - AI Model Setup 弹窗用于导入 ONNX 模型
+
+16. **角色导出** (`engine/character/character_exporter.h`)
+    - OBJExporter: Wavefront OBJ 格式导出
+    - GLTFExporter: glTF 2.0 (.glb) 格式导出
+    - CharacterExporter: 统一导出接口
+    - 支持导出选项: 骨骼、BlendShape、缩放
+
+17. **服装系统** (`engine/character/clothing_system.h`)
+    - ClothingAsset: 服装资产定义
+    - ClothingManager: 穿戴管理
+    - ProceduralClothingGenerator: 程序化生成服装
+    - 自动适配不同体型
+    - UI 集成: Clothing 标签页
+
+18. **动画重定向** (`engine/character/animation_retargeting.h`)
+    - HumanoidBoneMapping: 标准人形骨骼映射
+    - AnimationPose: 姿势数据
+    - PoseLibrary: 姿势库
+    - RetargetableClip: 可重定向动画片段
+    - AnimationRetargeter: 重定向器
+    - UI 集成: Animation 标签页
+
+19. **风格化渲染** (`engine/character/stylized_rendering.h`)
+    - CelShadingParams: 卡通着色参数
+    - OutlineParams: 轮廓线参数
+    - AnimeFeatures: 动漫特效
+    - StylizedRenderingSettings: 完整设置
+    - StylizedRenderingManager: 管理器
+    - 支持: 写实、动漫、卡通、绘画、素描风格
+    - UI 集成: Style 标签页
+
+20. **MakeHuman 集成** (`engine/character/makehuman_integration.h`)
+    - MakeHumanTargetLoader: 加载 .target 文件
+    - MakeHumanSkeletonMapping: 骨骼映射
+    - MakeHumanLoader: 模型加载器
+    - MakeHumanAssetManager: 资产管理
+    - 支持加载 MakeHuman 导出的模型和变形目标
+
+#### 下一步计划
+
+1. **实际模型部署**
+   - 下载并部署 ONNX 格式的 AI 模型
+   - 测试端到端照片处理流程
+
+2. **服装系统**
+   - 服装数据格式定义
+   - 服装自动适配不同体型
+   - 多层服装系统
+
+3. **高级功能**
+   - 动画重定向
+   - 实时面部捕捉
+   - 风格化渲染 (动漫/卡通)
+
+---
+
+### 21. 角色贴图系统（Character Texture System）
+
+**文件**: `engine/character/texture_system.h`
+
+#### 核心功能
+
+1. **皮肤贴图生成**
+   - Diffuse/Albedo 贴图
+   - Normal Map（皮肤细节、毛孔、皱纹）
+   - Roughness Map（粗糙度变化）
+   - 多种族预设（Caucasian、Asian、African、Latino、Middle Eastern）
+
+2. **眼睛贴图**
+   - 虹膜纹理（放射状纤维图案）
+   - 瞳孔大小可调
+   - 眼白（巩膜）血丝效果
+   - 多种眼睛颜色预设
+
+3. **嘴唇贴图**
+   - 颜色、光泽度控制
+   - 龟裂效果
+
+4. **参数系统**
+   - SkinTextureParams: 皮肤色调、饱和度、毛孔、雀斑、皱纹、SSS
+   - EyeTextureParams: 虹膜颜色/大小、瞳孔大小、细节、湿润度
+   - LipTextureParams: 颜色、光泽、龟裂
+
+5. **UI 集成**
+   - 新增 "Texture" 标签页
+   - 皮肤/眼睛/嘴唇预设选择
+   - 实时参数调节
+   - 分辨率选择（512/1024/2048）
+   - 一键生成贴图
+
+---
+
+### 22. UV 映射优化（UV Mapping System）
+
+**文件**: `engine/character/uv_mapping.h`
+
+#### 核心功能
+
+1. **UV 投影方法**
+   - 圆柱形投影（身体）
+   - 盒式投影（头部）
+   - 球形投影（面部）
+   - 平面投影（正面）
+
+2. **切线计算**
+   - 自动从 UV 计算切线向量
+   - Gram-Schmidt 正交化
+   - 支持法线贴图
+
+3. **UV 修复**
+   - 自动检测和修复 UV 接缝
+   - 区域重映射
+
+4. **布局预设**
+   - Cylindrical: 简单圆柱投影
+   - Atlas: 优化的分区布局
+
+---
+
+### 23. 发型库系统（Hair Style System）
+
+**文件**: `engine/character/hair_system.h`
+
+#### 核心功能
+
+1. **发型资产**
+   - HairStyleAsset: 发型定义
+   - HairCategory: 短发/中发/长发/盘发/光头
+   - 支持外部模型导入
+
+2. **发型材质**
+   - HairMaterial: 基色、高光、粗糙度、各向异性
+   - 13种颜色预设（黑/棕/金/红/灰/白 + 幻想色）
+   - 自定义颜色支持
+
+3. **程序化发型生成**
+   - generateBuzzCut(): 平头
+   - generateMediumHair(): 中长发（发片法）
+   - generatePonytail(): 马尾
+
+4. **发型管理器**
+   - HairManager: 角色发型管理
+   - HairStyleLibrary: 发型库（单例）
+   - 动态换发型/换发色
+
+5. **UI 集成**
+   - 新增 "Hair" 标签页
+   - 发型下拉选择
+   - 颜色预设 + 自定义颜色
+   - 实时预览
+
+---
+
+### 24. 服装加载器（Clothing Loader）
+
+**文件**: `engine/character/clothing_loader.h`
+
+#### 核心功能
+
+1. **模型格式支持**
+   - OBJ, glTF/GLB, FBX, DAE, 3DS
+   - 利用 Assimp 统一加载
+
+2. **元数据系统**
+   - `.meta` 边车文件支持
+   - 简单 key=value 格式
+   - 自动分类和槽位识别
+
+3. **自动适配形状生成**
+   - 基于网格分析自动生成 BlendShape
+   - 身高/体重/胸围/臀围适配
+
+4. **批量加载**
+   - `loadDirectory()` 批量导入目录
+   - `loadAndRegister()` 加载并注册到库
+
+---
+
+### 25. 布料物理系统（Cloth Simulation）
+
+**文件**: `engine/character/cloth_simulation.h`
+
+#### 核心功能
+
+1. **质点-弹簧模型**
+   - ClothParticle: 质点（位置/速度/质量）
+   - ClothSpring: 弹簧约束（结构/剪切/弯曲）
+   - Verlet 积分
+
+2. **物理参数**
+   - 重力、阻尼、空气阻力
+   - 弹簧刚度（结构/剪切/弯曲分离）
+   - 最大拉伸限制
+
+3. **碰撞检测**
+   - CollisionSphere: 球体碰撞
+   - CollisionCapsule: 胶囊体碰撞
+   - 碰撞摩擦
+
+4. **身体碰撞生成器**
+   - BodyCollisionGenerator
+   - 自动从身体参数生成碰撞体
+
+---
+
+### 26. 服装贴图系统（Clothing Textures）
+
+**文件**: `engine/character/clothing_textures.h`
+
+#### 核心功能
+
+1. **布料类型**
+   - Cotton, Denim, Silk, Leather, Wool
+   - Polyester, Velvet, Linen, Satin, Canvas
+
+2. **程序化纹理生成**
+   - generateDiffuse(): 基础颜色纹理
+   - generateNormal(): 法线贴图
+   - generateRoughness(): 粗糙度贴图
+
+3. **布料特征**
+   - 棉布编织纹理
+   - 牛仔斜纹
+   - 丝绸光泽
+   - 皮革纹理
+   - 羊毛纤维
+
+4. **材质集管理**
+   - ClothingMaterialSet: 完整材质包
+   - ClothingTextureManager: 缓存和管理
+
+---
+
+### 27. 服装骨骼蒙皮（Clothing Skinning）
+
+**文件**: `engine/character/clothing_skinning.h`
+
+#### 核心功能
+
+1. **自动权重生成**
+   - 基于距离的权重计算
+   - 热扩散权重平滑
+   - 最多4骨骼影响
+
+2. **蒙皮数据结构**
+   - VertexSkinData: 顶点权重
+   - ClothingSkinData: 整件服装蒙皮
+   - 逆绑定矩阵
+
+3. **蒙皮变形器**
+   - ClothingSkinningDeformer
+   - 实时骨骼矩阵变形
+   - 法线同步变换
+
+4. **管理器**
+   - ClothingSkinningManager: 缓存蒙皮数据
+   - 按需生成或加载
+
+---
+
+### 28. 角色模板系统（Character Template System）
+
+**文件**: `engine/character/character_template.h`
+
+#### 核心功能
+
+1. **模板接口**
+   - ICharacterTemplate: 抽象接口
+   - CharacterType: Human/Anime/Cartoon/Mascot/Animal/Robot/Fantasy/Chibi
+   - CharacterParams: 统一参数结构
+   - BodyProportions: 身体比例预设
+
+2. **模板注册表**
+   - CharacterTemplateRegistry: 单例管理
+   - 按类型注册/获取模板
+   - createCharacter(): 统一创建接口
+
+3. **基类实现**
+   - BaseCharacterTemplate: 通用功能
+   - 自动边界计算
+   - 参数验证
+
+---
+
+### 29. 身体部件系统（Body Part System）
+
+**文件**: `engine/character/body_part_system.h`
+
+#### 核心功能
+
+1. **部件类型**
+   - BodyPartType: Head/Torso/Arms/Legs/Hands/Feet
+   - 面部特征: Eyes/Nose/Mouth/Ears
+   - 额外部件: Tail/Wings/Antenna
+   - 配饰: Hat/Bow/Collar
+
+2. **形状生成**
+   - PartShape: Sphere/Ellipsoid/Capsule/Cylinder/Cone/Box/Custom
+   - ProceduralPartGenerator: 程序化生成各种形状
+   - 自动 UV/法线/切线
+
+3. **部件组装**
+   - BodyPartAssembly: 组装管理
+   - 父子关系/附着点
+   - combineMesh(): 合并为单一网格
+   - createSkeleton(): 自动生成骨骼
+
+---
+
+### 30. 卡通特征系统（Cartoon Features）
+
+**文件**: `engine/character/cartoon_features.h`
+
+#### 核心功能
+
+1. **眼睛样式**
+   - CartoonEyeStyle: Circle/Oval/Dot/Button/Anime/Disney/Pie
+   - 虹膜、瞳孔、高光、轮廓
+   - 眼睑（用于表情）
+
+2. **耳朵样式**
+   - CartoonEarStyle: MouseRound/CatPointed/BunnyLong/BearRound/DogFloppy
+   - 内外颜色、尖度、弯曲度
+
+3. **鼻子样式**
+   - CartoonNoseStyle: Dot/Triangle/Button/Animal/Beak/Snout
+   - 大小、颜色、光泽
+
+4. **嘴巴样式**
+   - CartoonMouthStyle: None/Line/Smile/Open/Cat
+   - Hello Kitty 无嘴支持！
+
+5. **配饰**
+   - Bow（蝴蝶结）、Collar（项圈）
+   - 可自定义颜色和位置
+
+---
+
+### 31. 角色模板实现（Character Templates）
+
+**文件**: `engine/character/character_templates.h`
+
+#### 实现的模板
+
+1. **HumanTemplate**
+   - 写实人类角色
+   - 7.5头身比例
+   - 完整骨骼（21+骨骼）
+   - 复用现有 ProceduralHumanGenerator
+
+2. **MascotTemplate (Hello Kitty 风格)**
+   - 大头小身（1.5头身）
+   - 猫耳、蝴蝶结
+   - 无嘴设计！
+   - 简单骨骼（耳朵可动）
+   - 黄色鼻子、黑色点眼
+
+3. **CartoonTemplate (米奇风格)**
+   - 卡通比例（4头身）
+   - 大圆耳朵
+   - 黑身体 + 浅色脸
+   - 红色短裤、黄色大鞋
+   - 白色手套
+   - 尾巴支持
+
+#### 使用方式
+
+```cpp
+// 注册模板
+luma::registerDefaultTemplates();
+
+// 创建 Hello Kitty 风格角色
+auto& registry = luma::getTemplateRegistry();
+luma::CharacterParams params;
+params.type = luma::CharacterType::Mascot;
+params.primaryColor = luma::Vec3(1, 1, 1);  // 白色
+params.accentColor = luma::Vec3(1, 0.3f, 0.4f);  // 粉色蝴蝶结
+
+auto result = registry.createCharacter(luma::CharacterType::Mascot, params);
+```
+
+---
+
+### 16.4 可视化脚本（Visual Scripting）
+
+设计目标：让非程序员也能创建游戏逻辑
+
+#### 核心概念
+1. **节点类型**
+   - 事件节点（OnStart, OnUpdate, OnCollision）
+   - 逻辑节点（If, Loop, Switch）
+   - 数学节点（Add, Multiply, Lerp）
+   - 变量节点（Get, Set）
+   - 动作节点（Move, Rotate, PlaySound）
+
+2. **连接系统**
+   - 执行流（白色线）
+   - 数据流（彩色线按类型）
+   - 自动类型转换
+
+3. **与 Lua 集成**
+   - 可视化脚本编译为 Lua
+   - 支持调用自定义 Lua 函数
+   - 双向调试
+
+---
+
+### 32. 插件系统（Plugin System）
+
+**文件**:
+- `engine/plugin/plugin_system.h` - 插件接口定义
+- `engine/plugin/plugin_manager.h` - 插件加载和管理
+- `engine/plugin/plugin_examples.h` - 示例插件
+- `docs/PLUGIN_DEVELOPMENT.md` - 插件开发指南
+
+#### 支持的插件类型
+
+| 类型 | 说明 | 接口 |
+|------|------|------|
+| CharacterTemplate | 角色模板 | `ICharacterTemplatePlugin` |
+| Clothing | 服装 | `IClothingPlugin` |
+| Hair | 发型 | `IHairPlugin` |
+| Accessory | 配饰 | `IPlugin` |
+| Animation | 动画 | `IPlugin` |
+| Expression | 表情 | `IPlugin` |
+| Material | 材质 | `IPlugin` |
+| BodyPart | 身体部件 | `IPlugin` |
+
+#### 插件包结构
+
+```
+my-plugin.lumapkg/
+├── manifest.json      # 元数据
+├── thumbnail.png      # 预览图
+├── assets/
+│   ├── meshes/       # 3D 模型
+│   ├── textures/     # 贴图
+│   └── configs/      # 配置
+└── lib/              # 原生库 (可选)
+```
+
+#### 使用方式
+
+```cpp
+#include "engine/plugin/plugin_manager.h"
+
+auto& pm = luma::getPluginManager();
+
+// 添加插件目录
+pm.addPluginDirectory("/path/to/plugins");
+
+// 发现并加载插件
+auto discovered = pm.discoverPlugins();
+for (const auto& meta : discovered) {
+    auto result = pm.loadPlugin(meta.id);
+    if (result.success) {
+        std::cout << "Loaded: " << meta.name << std::endl;
+    }
+}
+
+// 获取所有服装插件
+auto clothingPlugins = luma::getClothingPlugins();
+for (auto& plugin : clothingPlugins) {
+    for (const auto& item : plugin->getClothingItems()) {
+        std::cout << "  - " << item.name << std::endl;
+    }
+}
+
+// 搜索资源
+auto results = pm.searchAssets("striped", luma::PluginType::Clothing);
+```
+
+#### 创建简单服装插件
+
+1. 创建目录 `my-clothing/`
+2. 添加 `manifest.json`:
+```json
+{
+  "id": "com.artist.my-clothing",
+  "name": "My Clothing Pack",
+  "type": "clothing",
+  "version": "1.0.0"
+}
+```
+3. 添加模型到 `assets/meshes/`
+4. 添加配置到 `assets/configs/item.json`
+
+详见 `docs/PLUGIN_DEVELOPMENT.md`
+
+---
+
+### 33. 标准绑定系统（Standard Rig System）
+
+**文件**:
+- `engine/character/standard_rig.h` - 标准骨骼规范
+- `engine/character/facial_rig.h` - 面部绑定系统
+- `engine/character/auto_rig.h` - 自动绑定生成
+
+#### 32.1 支持的骨骼标准
+
+| 标准 | 用途 | 骨骼数 |
+|------|------|--------|
+| Luma | 内部标准（超集） | 65+ |
+| Mixamo | Adobe 动画库 | 65 |
+| Unity Humanoid | Unity Avatar 系统 | 55 |
+| VRM | VTuber/虚拟角色 | 55 |
+| Unreal Mannequin | UE5 骨骼 | 67 |
+
+#### 32.2 骨骼命名规范
+
+```cpp
+namespace StandardBones {
+    // 脊椎链
+    Hips -> Spine -> Spine1 -> Spine2 -> Chest -> Neck -> Head
+    
+    // 手臂（左/右）
+    Shoulder_L/R -> UpperArm_L/R -> LowerArm_L/R -> Hand_L/R
+    
+    // 腿（左/右）
+    UpperLeg_L/R -> LowerLeg_L/R -> Foot_L/R -> Toes_L/R
+    
+    // 手指（每根3节）
+    Thumb1/2/3, Index1/2/3, Middle1/2/3, Ring1/2/3, Pinky1/2/3
+    
+    // 面部
+    Jaw, Eye_L/R, Eyebrow_L/R, EyelidUpper/Lower_L/R, Tongue1/2
+}
+```
+
+#### 32.3 骨骼名称转换
+
+```cpp
+// 在不同标准间转换骨骼名称
+auto& mapping = BoneMappingTable::getInstance();
+std::string mixamoName = mapping.convertBoneName(
+    "upperArm_L",           // Luma 名称
+    RigStandard::Luma,      // 源标准
+    RigStandard::Mixamo     // 目标标准
+);
+// 结果: "mixamorig:LeftArm"
+```
+
+#### 32.4 面部绑定（ARKit 52 BlendShapes）
+
+**眼睛 (14)**
+- eyeBlink/LookDown/LookIn/LookOut/LookUp/Squint/Wide (L/R)
+
+**嘴巴 (28)**
+- jaw: Forward, Left, Right, Open
+- mouth: Close, Funnel, Pucker, Left, Right, Smile, Frown, Dimple, Stretch, Roll, Shrug, Press, LowerDown, UpperUp (L/R)
+
+**眉毛 (5)**
+- browDown (L/R), browInnerUp, browOuterUp (L/R)
+
+**脸颊/鼻子 (5)**
+- cheekPuff, cheekSquint (L/R), noseSneer (L/R)
+
+**舌头 (1)**
+- tongueOut
+
+#### 32.5 表情预设
+
+```cpp
+// 使用预设表情
+auto& library = ExpressionLibrary::getInstance();
+
+// 可用预设
+// - neutral, happy, sad, angry, surprised, fear, disgust
+// - blink, wink_left, wink_right
+
+FacialRigController controller;
+controller.setExpression("happy", 0.8f);  // 80% 强度
+controller.setExpression("angry", 0.3f, true);  // 叠加 30%
+```
+
+#### 32.6 Viseme 口型同步
+
+```cpp
+// 15 种口型
+Visemes::sil   // 静默
+Visemes::PP    // p, b, m
+Visemes::FF    // f, v
+Visemes::TH    // th
+Visemes::DD    // t, d
+Visemes::kk    // k, g
+Visemes::CH    // ch, j, sh
+Visemes::SS    // s, z
+Visemes::nn    // n, l
+Visemes::RR    // r
+Visemes::aa    // A 元音
+Visemes::E     // E 元音
+Visemes::ih    // I 元音
+Visemes::oh    // O 元音
+Visemes::ou    // U 元音
+
+VisemeController viseme;
+viseme.setViseme(Visemes::aa, 0.8f);
+viseme.applyToFacialRig(facialController);
+```
+
+#### 32.7 自动绑定生成
+
+```cpp
+// 为网格自动生成骨骼权重
+AutoRigParams params;
+params.method = AutoRigParams::WeightMethod::DistanceBased;
+params.falloffDistance = 0.3f;
+params.smoothIterations = 3;
+
+MeshSkinData skinData = AutoRigGenerator::generateWeights(
+    mesh, skeleton, params);
+
+// 验证权重
+if (AutoRigGenerator::validateWeights(skinData)) {
+    skinData.applyToMesh(mesh);
+}
+```
+
+#### 32.8 创建完整绑定角色
+
+```cpp
+// 一键创建标准绑定角色
+auto result = CharacterRigManager::createRiggedCharacter(
+    mesh,
+    1.8f,                       // 身高
+    RigStandard::Mixamo         // 输出标准
+);
+
+if (result.success) {
+    Skeleton& skeleton = result.skeleton;
+    // 骨骼可直接导入 Mixamo 动画
+}
+```
+
+#### 32.9 导出兼容性
+
+```cpp
+// 检查骨骼兼容性
+std::string report = RigExporter::getCompatibilityReport(
+    skeleton, RigStandard::UnityHumanoid);
+
+// 导出为 JSON（Unity/Blender 可用）
+std::string json = RigExporter::exportToJson(skinData, skeleton);
+```
+
+---
+
+### 34. 导出系统（Export System）
+
+**文件**:
+- `engine/export/gltf_exporter.h` - glTF/GLB 导出器
+- `engine/export/model_exporter.h` - 统一导出接口
+
+#### 支持的格式
+
+| 格式 | 骨骼 | BlendShapes | 动画 | 推荐用途 |
+|------|------|-------------|------|----------|
+| GLB | ✅ | ✅ | ✅ | Unity, Unreal, Blender, Web |
+| glTF | ✅ | ✅ | ✅ | 需要分离文件时 |
+| FBX | ✅ | ✅ | ✅ | Maya, 3ds Max, Cinema 4D |
+| OBJ | ❌ | ❌ | ❌ | 简单网格导出 |
+| VRM | ✅ | ✅ | ❌ | VTuber, VRChat |
+
+#### 使用方式
+
+```cpp
+#include "engine/export/model_exporter.h"
+
+// 导出为 GLB
+ExportOptions options;
+options.format = ExportFormat::GLB;
+options.exportSkeleton = true;
+options.exportBlendShapes = true;
+options.embedTextures = true;
+
+auto result = ModelExporter::exportCharacter(characterData, "character.glb", options);
+if (result.success) {
+    std::cout << "Exported: " << result.outputPath << std::endl;
+    std::cout << "Vertices: " << result.vertexCount << std::endl;
+}
+```
+
+---
+
+### 35. 项目文件系统（Project File System）
+
+**文件**: `engine/project/project_file.h`
+
+#### 项目文件格式 (.luma)
+
+JSON 格式，包含：
+- 角色参数（身体、面部）
+- 贴图设置
+- 发型和颜色
+- 服装列表
+- BlendShape 权重
+- 视图设置
+
+#### 使用方式
+
+```cpp
+#include "engine/project/project_file.h"
+
+auto& pm = luma::getProjectManager();
+
+// 保存项目
+pm.currentProject.name = "MyCharacter";
+pm.saveProjectAs("/path/to/character.luma");
+
+// 加载项目
+pm.loadProject("/path/to/character.luma");
+
+// 最近项目
+for (const auto& path : pm.recentProjects) {
+    std::cout << path << std::endl;
+}
+
+// 自动保存
+pm.enableAutoSave(true, 60);  // 每 60 秒
+```
+
+---
+
+### 36. 动画预览系统（Animation Preview）
+
+**文件**: `engine/animation/animation_preview.h`
+
+#### 内置动画
+
+| ID | 名称 | 类别 | 说明 |
+|----|------|------|------|
+| idle | Idle | Basic | 待机呼吸动画 |
+| tpose | T-Pose | Reference | T 姿势参考 |
+| apose | A-Pose | Reference | A 姿势参考 |
+| wave | Wave | Gesture | 挥手 |
+| walk | Walk | Locomotion | 行走循环 |
+| run | Run | Locomotion | 跑步循环 |
+
+#### 使用方式
+
+```cpp
+#include "engine/animation/animation_preview.h"
+
+// 获取动画库
+auto& lib = luma::getAnimationLibrary();
+
+// 播放动画
+AnimationPlayer player;
+player.setSkeleton(&skeleton);
+player.play("walk");
+
+// 更新（每帧）
+player.update(deltaTime);
+
+// 控制
+player.setPlaybackSpeed(1.5f);
+player.pause();
+player.resume();
+player.stop();
+```
+
+---
+
+### 37. 角色预设系统（Character Presets）
+
+**文件**: `engine/character/character_presets.h`
+
+#### 内置预设列表（游戏风格优先）
+
+| 分类 | 预设 ID | 名称 | 说明 |
+|------|---------|------|------|
+| **西幻 Fantasy** | fantasy_elf | 精灵 | 尖耳优雅精灵 |
+| | fantasy_paladin | 圣骑士 | 光明圣骑士 |
+| | fantasy_dark_mage | 暗黑法师 | 神秘黑暗魔法师 |
+| | fantasy_orc | 兽人战士 | 绿皮肌肉战士 |
+| **武侠 Wuxia** | wuxia_swordsman | 剑客 | 仗剑江湖侠士 |
+| | wuxia_female_knight | 女侠 | 飒爽英姿女侠 |
+| | wuxia_monk | 武僧 | 少林武僧 |
+| **古风 Gufeng** | gufeng_xianxia_hero | 仙侠少年 | 修仙少年英雄 |
+| | gufeng_fairy | 仙子 | 飘逸出尘仙子 |
+| | gufeng_emperor | 帝王 | 威严古代帝王 |
+| | gufeng_princess | 公主 | 端庄典雅公主 |
+| **动漫 Anime** | anime_girl | 动漫少女 | 大眼睛、粉色系 |
+| | anime_boy | 动漫少年 | 经典少年漫风格 |
+| | anime_chibi | Q版角色 | 超变形可爱风 |
+| **卡通 Cartoon** | cartoon_western | 西方卡通 | 美式卡通风格 |
+| | cartoon_pixar | 皮克斯风格 | 3D 动画电影风格 |
+| **科幻 Sci-Fi** | scifi_cyborg | 赛博格 | 人机混合体 |
+| | scifi_alien | 外星人 | 大眼无发外星生物 |
+| **写实 Realistic** | realistic_athlete | 运动员 | 健美体型 |
+| | realistic_child | 儿童 | 儿童比例 |
+| | realistic_elderly | 老年人 | 带年龄特征 |
+| | realistic_business_man | 商务男士 | 专业男性商务造型 |
+| | realistic_business_woman | 商务女士 | 专业女性商务造型 |
+
+#### 使用方式
+
+```cpp
+#include "engine/character/character_presets.h"
+
+// 获取预设库
+auto& lib = luma::getPresetLibrary();
+
+// 应用预设
+const auto* preset = lib.getPreset("anime_girl");
+if (preset) {
+    applyToCharacter(preset->data);
+}
+
+// 按分类筛选
+auto animePresets = lib.getPresetsByCategory(PresetCategory::Anime);
+
+// 随机生成
+CharacterRandomizer randomizer;
+auto randomData = randomizer.generateRandom();  // 完全随机
+auto randomAnime = randomizer.generateRandomInStyle(PresetCategory::Anime);  // 动漫风格随机
+```
+
+#### UI 功能
+
+- **分类筛选**: All / Realistic / Anime / Cartoon / Fantasy / Sci-Fi
+- **预设网格**: 2 列布局，显示预设名称、中文名、皮肤/发色预览
+- **分类徽章**: R(写实) A(动漫) C(卡通) F(奇幻) S(科幻)
+- **随机按钮**: 一键随机生成角色
+
+---
+
+---
+
+## Phase 29: 角色增强系统 ✅
+
+### 29.1 配饰系统 (`engine/character/accessory_system.h`)
+
+**配饰类型 (30+)**
+
+| 部位 | 类型 |
+|------|------|
+| 头部 | Hat, Glasses, Sunglasses, Mask, Headband, Hairpin, Crown, Helmet |
+| 耳部 | Earring, Earphone |
+| 脸部 | Beard, Makeup, FacePaint |
+| 颈部 | Necklace, Scarf, Tie, Bowtie, Choker |
+| 手臂 | Watch, Bracelet, Gloves |
+| 手部 | Ring |
+| 背部 | Wings, Cape, Backpack, Weapon |
+| 腰部 | Belt, Pouch |
+
+**功能特性:**
+- 骨骼挂载点自动绑定
+- 成对配饰支持（如耳环左右自动镜像）
+- 程序化配饰生成（眼镜、帽子、耳环、项链）
+- 颜色和材质自定义
+
+### 29.2 贴花系统 (`engine/character/decal_system.h`)
+
+**贴花类型:**
+- Tattoo (纹身), Scar (伤疤), Birthmark (胎记)
+- Makeup (妆容), BodyPaint (彩绘), FacePaint (脸绘)
+- Wound (伤口), Dirt (污渍), Blood (血迹)
+- Freckles (雀斑), Wrinkles (皱纹)
+
+**混合模式:**
+- Normal, Multiply, Overlay, Additive
+
+**程序化生成:**
+- 部落图腾纹身
+- 刀疤/抓伤
+- 雀斑
+- 腮红/口红
+- 伤口
+
+### 29.3 表情预设扩展 (`engine/character/expression_presets.h`)
+
+**6 大类别, 30+ 预设表情:**
+
+| 类别 | 表情 |
+|------|------|
+| Basic | happy, sad, angry, surprised, fear, disgust |
+| Emotion | smirk, pout, crying, laughing, thinking, sleepy, determined, embarrassed, confused, proud |
+| Communication | talking, whispering, shouting, kissing, whistling |
+| Action | sneezing, yawning, eating, drinking, biting_lip |
+| GameStyle | battle_cry, victory, defeat, concentration, pain, evil |
+| AnimeStyle | anime_shock, anime_cute, anime_smug, anime_dead, anime_sparkling |
+
+---
+
+## Phase 30: 环境系统 ✅
+
+### 30.1 天气系统 (`engine/environment/weather_system.h`)
+
+**天气类型 (13种):**
+- Clear, Cloudy, Overcast
+- LightRain, HeavyRain, Thunderstorm
+- LightSnow, HeavySnow, Blizzard
+- Fog, DenseFog
+- Hail, Sandstorm
+
+**功能特性:**
+- 降水粒子系统（雨滴/雪花）
+- 风力和风向
+- 雾效（距离雾、高度雾）
+- 云层覆盖
+- 闪电效果
+- 光照调整（太阳强度、环境色、阴影）
+- 平滑天气过渡
+
+### 30.2 日夜循环 (`engine/environment/day_night_cycle.h`)
+
+**时间系统:**
+- 24 小时循环
+- 7 种时段：Dawn, Morning, Noon, Afternoon, Dusk, Evening, Night
+- 自动推进或手动控制
+
+**太阳/月亮:**
+- 基于经纬度的太阳位置计算
+- 月相系统
+- 日出/日落颜色变化
+
+**天空:**
+- 7 种时段天空渐变（天顶色、地平线色）
+- 星星可见度（夜间）
+
+### 30.3 水体系统增强
+
+**基础水体 (`engine/environment/water_system.h`):**
+- WaterType: Lake, River, Ocean, Pond, Stream
+- Gerstner 波浪模拟
+- 多八度波叠加
+- 水面网格生成
+
+**涟漪交互 (`engine/environment/water_interaction.h`):**
+- RippleSimulation: 256x256 网格波动方程模拟
+- AnalyticalRippleSystem: 点源扩散涟漪
+- WaterInteractionManager: 入水/出水检测
+- 角色/物体移动产生涟漪
+
+**水下效果 (`engine/environment/underwater_effects.h`):**
+- 颜色吸收（深度越深红光衰减越多）
+- 散射雾
+- 动态焦散
+- 屏幕扭曲
+- 气泡系统（自动上浮、摇摆）
+- 浮游粒子
+- 暗角效果
+- 深度模糊
+
+**浮力物理 (`engine/environment/water_physics.h`):**
+- BuoyancySystem: 多采样点浮力计算
+- 线性/角速度阻力
+- SwimmingController: 角色游泳控制
+
+**视觉特效 (`engine/environment/water_effects.h`):**
+- SplashEffectSystem: 水花/水滴/喷雾粒子
+- FoamSystem: 水面泡沫漂浮
+- ShoreEffectSystem: 岸边波浪
+- CausticsGenerator: 程序化焦散纹理
+- WetSurfaceSystem: 湿润地面效果
+
+---
+
+## Phase 31: 编辑器增强系统 ✅
+
+### 31.1 撤销/重做系统 (`engine/editor/undo_system.h`)
+
+**命令模式实现:**
+- ICommand 抽象接口
+- 支持 execute/undo 操作
+- 命令合并（连续操作合并为一个）
+- 复合命令（多个命令打包）
+
+**内置命令类型:**
+```cpp
+// 值变化命令
+ValueChangeCommand<T>      // 任意类型值变化
+FloatSliderCommand         // 滑块调整（自动合并）
+ColorChangeCommand         // 颜色变化
+
+// 变换命令
+TransformCommand           // 位置/旋转/缩放
+BoneRotationCommand        // 骨骼旋转
+BlendShapeCommand          // 表情调整
+
+// 复合命令
+CompositeCommand           // 命令组
+PresetApplyCommand         // 预设应用
+LambdaCommand              // 简单 Lambda
+```
+
+**CommandHistory 管理器:**
+- 无限撤销/重做（可配置上限）
+- 内存限制管理
+- 命令合并时间窗口
+- 保存点追踪（脏标记）
+- 变更通知回调
+
+### 31.2 快捷键系统 (`engine/editor/hotkey_system.h`)
+
+**按键定义:**
+```cpp
+enum class KeyCode {
+    // 字母 A-Z
+    // 数字 0-9
+    // 功能键 F1-F12
+    // 特殊键 Space, Enter, Escape 等
+    // 小键盘
+};
+
+enum class KeyModifier {
+    Ctrl, Shift, Alt, Super  // macOS Cmd / Windows Win
+};
+```
+
+**预设快捷键:**
+| 快捷键 | 操作 | 说明 |
+|--------|------|------|
+| Ctrl+Z | Undo | 撤销 |
+| Ctrl+Shift+Z | Redo | 重做 |
+| Ctrl+S | Save | 保存 |
+| Ctrl+E | Export | 导出 |
+| Q/W/E/R | 工具切换 | 选择/移动/旋转/缩放 |
+| Space | Play/Pause | 播放/暂停动画 |
+| K | Add Keyframe | 添加关键帧 |
+| Numpad 1/3/7 | 视图切换 | 前/右/顶视图 |
+| F11 | Fullscreen | 全屏 |
+
+**特性:**
+- 用户自定义绑定
+- 冲突检测
+- 配置文件保存/加载
+- 上下文感知（不同面板不同快捷键）
+
+### 31.3 渲染预设系统 (`engine/rendering/render_presets.h`)
+
+**质量档位:**
+```cpp
+enum class RenderQuality {
+    Preview,   // 预览（0.5x 分辨率，无 AO/SSR）
+    Draft,     // 草稿（0.75x，基础效果）
+    Standard,  // 标准（1x，TAA + SSAO + SSR）
+    High,      // 高质量（GI + 体积雾）
+    Ultra      // 超高（1.5x 超采样，全部特效）
+};
+```
+
+**RenderSettings 完整参数:**
+- 分辨率和渲染缩放
+- 抗锯齿（FXAA/SMAA/TAA/MSAA）
+- 阴影（分辨率/级联数/软阴影/PCF）
+- 环境光遮蔽（SSAO/HBAO/GTAO）
+- 屏幕空间反射
+- 全局光照（光线追踪/采样/反弹）
+- 体积效果
+- 后处理（Bloom/DOF/动态模糊/色差/暗角/胶片颗粒）
+- 色调映射（Reinhard/ACES/Filmic/AgX）
+- 材质质量（各向异性/法线/视差/SSS）
+
+**高质量输出设置:**
+```cpp
+struct OutputSettings {
+    // 分辨率预设
+    enum class Resolution {
+        HD_720p, FullHD_1080p, QHD_1440p,
+        UHD_4K, UHD_8K,
+        Square_1K, Square_2K, Square_4K
+    };
+    
+    ImageFormat format;     // PNG/JPG/EXR/TGA
+    bool transparentBackground;
+    int samples;            // 累积采样
+    bool isSequence;        // 序列渲染
+};
+```
+
+---
+
+## Phase 32: 动画增强系统 ✅
+
+### 32.1 Lip Sync 口型同步 (`engine/animation/lip_sync.h`)
+
+**Viseme 定义（口型）:**
+```cpp
+enum class Viseme {
+    Silence,        // 静音
+    AA, AE, AH,     // 元音 a
+    AO, AW, AY,     // 元音 o
+    B_M_P,          // 双唇音
+    CH_J_SH,        // 齿音
+    D_T_N,          // 舌尖音
+    EH, ER, EY,     // 元音 e
+    F_V,            // 唇齿音
+    G_K_NG,         // 舌根音
+    IH, IY,         // 元音 i
+    L, R,           // 流音
+    OW, OY,         // 元音 o
+    S_Z, TH,        // 齿擦音
+    UH, UW,         // 元音 u
+    W, Y            // 半元音
+};
+```
+
+**Viseme → BlendShape 映射:**
+- 基于 ARKit 52 BlendShapes
+- 每个 Viseme 映射到多个 BlendShape 权重
+- 例如 B_M_P → mouthClose(0.8) + mouthPressLeft(0.3)
+
+**音频分析:**
+```cpp
+struct AudioFrame {
+    float amplitude;           // RMS 振幅
+    float pitch;               // 音高估计
+    std::array<float, 8> spectrum;  // 8 段频谱
+    float zeroCrossingRate;    // 过零率
+    float spectralCentroid;    // 频谱质心
+};
+```
+
+**LipSyncEngine:**
+- 基于频谱特征分类 Viseme
+- 平滑过渡
+- 振幅自适应
+- 可调节 jaw/lip 强调
+
+**LipSyncTrack:**
+- 预烘焙的口型时间轴
+- 从音频生成
+- 从音素时序生成（TTS）
+
+### 32.2 场景布置系统 (`engine/scene/scene_layout.h`)
+
+**SceneObject:**
+```cpp
+struct SceneObject {
+    string id, name;
+    SceneObjectType type;  // Character/Prop/Light/Camera/Environment
+    
+    Vec3 position;
+    Quat rotation;
+    Vec3 scale;
+    
+    string parentId;       // 层级
+    vector<string> childIds;
+    
+    bool visible, locked, selected;
+    string layerName;
+    
+    // 渲染
+    bool castShadow, receiveShadow;
+    float opacity;
+};
+```
+
+**场景图层:**
+- Default / Characters / Props / Environment / Lights / Effects
+- 图层可见性/锁定
+- 图层颜色标记
+
+**场景预设:**
+| 预设 | 说明 |
+|------|------|
+| Simple Studio | 三点光源摄影棚 |
+| Photo Studio | 专业摄影环境 |
+| Park | 户外公园 |
+| City Street | 城市街道 |
+| Castle Hall | 城堡大厅（奇幻） |
+| Spaceship Interior | 飞船内部（科幻） |
+
+**场景操作:**
+- 添加/删除/复制物体
+- 层级管理（父子关系）
+- 分组/取消分组
+- 对齐（X/Y/Z 轴）
+- 分布（均匀排列）
+- 多选操作
+
+### 32.3 相机动画系统 (`engine/animation/camera_animation.h`)
+
+**CameraKeyframe:**
+```cpp
+struct CameraKeyframe {
+    float time;
+    Vec3 position, target, up;
+    
+    float fov;
+    float nearPlane, farPlane;
+    
+    // 景深
+    float focusDistance, aperture;
+    bool dofEnabled;
+    
+    // 插值
+    EaseType easeIn, easeOut;
+    Vec3 inTangent, outTangent;  // Bezier
+};
+```
+
+**CameraPath:**
+- 关键帧序列
+- 循环支持
+- 时间轴编辑
+
+**预设相机运动:**
+| 运动 | 说明 |
+|------|------|
+| Orbit | 环绕目标旋转 |
+| Dolly | 推拉（前后移动） |
+| Truck | 横移（左右移动） |
+| Crane | 升降 |
+| Zoom | 变焦（改变 FOV） |
+| Dolly Zoom | 希区柯克眩晕效果 |
+| Arc | 弧形移动 |
+| Focus Pull | 焦点转移 |
+| Shake | 震动效果 |
+
+**CameraInterpolator:**
+- 线性/缓入/缓出/缓入缓出/Bezier 插值
+- 位置：Bezier 曲线
+- 方向：球面插值
+- 属性：线性插值
+
+**CameraAnimationPlayer:**
+- 播放/暂停/停止
+- 时间控制
+- 速度调节
+- 循环播放
+- 完成回调
+
+---
+
+## Phase 33: 性能优化系统 ✅
+
+### 33.1 LOD 系统 (`engine/renderer/lod_system.h`)
+
+**LOD 层级定义:**
+```cpp
+struct LODLevel {
+    int level;              // 0 = 最高质量
+    float screenSize;       // 屏幕占比阈值
+    float distance;         // 距离阈值
+    
+    shared_ptr<Mesh> mesh;
+    shared_ptr<Mesh> shadowMesh;  // 阴影专用低模
+    
+    int vertexCount, triangleCount;
+    float reductionPercent;
+};
+```
+
+**LOD 生成器:**
+- 基于边折叠的网格简化
+- 可配置简化目标（50%/25%/10%）
+- 可配置距离/屏幕尺寸阈值
+- UV/法线/边界保持选项
+- 阴影 LOD 额外简化
+
+**LOD 实例管理:**
+- 自动距离选择
+- 平滑过渡（Cross-fade）
+- LOD 偏移（全局质量调节）
+- 强制 LOD 级别
+
+### 33.2 GPU Instancing (`engine/renderer/gpu_instancing.h`)
+
+**实例数据:**
+```cpp
+struct InstanceData {
+    Mat4 transform;
+    Vec4 color;
+    Vec4 customData;      // 自定义着色器数据
+    Vec3 boundingCenter;
+    float boundingRadius;
+};
+```
+
+**实例批次管理:**
+- 按 Mesh + Material 分组
+- 自动视锥剔除
+- 实例缓冲区管理
+- 批量添加/更新/移除
+
+**植被实例化:**
+```cpp
+class VegetationInstancer {
+    void addType(typeId, meshId, density, scaleRange);
+    void generateForArea(typeId, min, max, heightmap, densityMap);
+    vector<InstanceData> getInstanceData(typeId, time);  // 含风动画
+};
+```
+
+**便捷功能:**
+- `scatter()`: 随机散布
+- `grid()`: 网格排列
+
+---
+
+## Phase 34: 编辑器面板系统 ✅
+
+### 34.1 资源浏览器 (`engine/editor/asset_browser.h`)
+
+**资源类型:**
+- 3D: Model, Mesh, Skeleton, Animation
+- 纹理: Texture, Cubemap
+- 材质: Material, Shader
+- 音频: Audio
+- 数据: Prefab, Scene, Project, Config
+- 角色: Character, Clothing, HairStyle
+- 脚本: Script
+
+**资源信息:**
+```cpp
+struct AssetInfo {
+    string id, name, path;
+    AssetType type;
+    size_t fileSize;
+    vector<string> tags;
+    vector<string> dependencies;
+    bool isLoaded, isModified;
+};
+```
+
+**浏览器功能:**
+- 文件夹导航（历史/前进/后退/上级）
+- 视图模式（列表/网格/缩略图）
+- 搜索和类型过滤
+- 排序（名称/类型/大小/日期）
+- 拖放导入
+- 多选操作
+
+**导入设置:**
+- ModelImportSettings: 缩放、动画、材质、LOD
+- TextureImportSettings: Mipmap、sRGB、压缩
+- AudioImportSettings: 采样率、压缩、流式
+
+### 34.2 历史记录面板 (`engine/editor/history_panel.h`)
+
+**历史条目:**
+```cpp
+struct HistoryEntry {
+    int index;
+    string description;
+    string type;
+    bool isCurrent, isUndone;
+    string icon;
+    Vec3 color;
+};
+```
+
+**面板功能:**
+- 显示撤销/重做堆栈
+- 当前状态标记
+- 跳转到任意历史点
+- 过滤和搜索
+- 保存点标记（脏标志）
+
+### 34.3 属性检查器 (`engine/editor/property_inspector.h`)
+
+**属性类型:**
+- 基础: Bool, Int, Float, String
+- 向量: Vec2, Vec3, Vec4, Quat
+- 颜色: Color3, Color4
+- 复杂: Enum, Flags, Asset, Object, Array
+
+**属性元数据:**
+```cpp
+struct PropertyMeta {
+    string name, displayName, tooltip, category;
+    PropertyType type;
+    
+    bool readOnly, hidden;
+    float minValue, maxValue, step;
+    bool slider, logarithmic;
+    
+    vector<string> enumValues;
+    string assetType;
+};
+```
+
+**检查器功能:**
+- 分类分组显示
+- 搜索过滤
+- 修改追踪（高亮显示）
+- 只读属性支持
+- 嵌套对象展开
+- 数组编辑
+
+**IInspectable 接口:**
+```cpp
+class IInspectable {
+    virtual vector<PropertyDef> getProperties() = 0;
+    virtual string getDisplayName() const = 0;
+    virtual string getTypeName() const = 0;
+};
+```
+
+### 34.4 视口工具 (`engine/editor/viewport_tools.h`)
+
+**测量工具:**
+```cpp
+struct Measurement {
+    enum Type { Distance, Angle, Area, Volume };
+    vector<Vec3> points;
+    float value;
+    string displayValue;  // 带单位格式化
+};
+```
+
+- 两点距离测量（自动 mm/cm/m 单位）
+- 三点角度测量
+- 多边形面积计算
+- 包围盒体积计算
+
+**标注系统:**
+```cpp
+struct Annotation {
+    enum Type { Note, Warning, Todo, Question };
+    string text;
+    Vec3 worldPosition;
+    string attachedObjectId;
+    bool pinned, resolved;
+};
+```
+
+- 4 种标注类型（不同颜色图标）
+- 附着到物体
+- 可折叠/解决状态
+
+**参考图:**
+```cpp
+struct ReferenceImage {
+    string path;
+    Vec3 position;
+    Quat rotation;
+    Vec2 size;
+    float opacity;
+    
+    enum View { Front, Back, Left, Right, Top, Bottom };
+    void setView(View v);  // 快速设置标准视图
+};
+```
+
+**网格设置:**
+- 可见性/尺寸/细分
+- 主次网格颜色
+- 轴线颜色
+- 吸附到网格
+
+---
+
 ## 🔗 相关文档
 
 - [README.md](README.md) - 项目概览和快速开始
 - [GOLDEN_PATH.md](GOLDEN_PATH.md) - 30 分钟上手指南
+- [docs/PLUGIN_DEVELOPMENT.md](docs/PLUGIN_DEVELOPMENT.md) - 插件开发指南

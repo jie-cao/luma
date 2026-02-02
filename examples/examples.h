@@ -20,6 +20,9 @@
 // Performance optimization
 #include "06_performance.h"
 
+// Character creation system
+#include "07_character_creator.h"
+
 namespace luma {
 namespace examples {
 
@@ -149,6 +152,10 @@ inline std::vector<ExampleCategory> getExampleCategories() {
             {"Render Optimizer", example_RenderOptimizer},
             {"Benchmark", example_Benchmark},
             {"Optimization Tips", example_OptimizationTips}
+        }},
+        {"Character", {
+            // Note: CharacterCreatorDemo is an interactive demo class
+            // Use CharacterCreatorDemo in your application instead
         }}
     };
 }

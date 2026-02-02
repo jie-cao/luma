@@ -2,6 +2,19 @@
 // Cascaded Shadow Maps (CSM), PCSS, Contact Hardening Shadows
 #pragma once
 
+// Prevent Windows macros from interfering
+#ifdef _WIN32
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#ifdef near
+#undef near
+#endif
+#ifdef far
+#undef far
+#endif
+#endif
+
 #include "../foundation/math_types.h"
 #include <vector>
 #include <array>

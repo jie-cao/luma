@@ -56,10 +56,10 @@ struct RHICameraParams {
 
 // ===== Shadow Settings =====
 struct ShadowSettings {
-    bool enabled = true;
+    bool enabled = true;            // Shadow mapping enabled
     uint32_t mapSize = 2048;        // Shadow map resolution
     float bias = 0.005f;            // Depth bias to prevent acne
-    float normalBias = 0.02f;       // Normal-based bias
+    float normalBias = 0.02f;       // Normal-based bias for grazing angles
     int pcfSamples = 3;             // PCF kernel size (1, 2, 3 = 3x3, 5x5, 7x7)
     float softness = 1.0f;          // PCF sampling spread
     float distance = 50.0f;         // Shadow distance from scene center
@@ -248,10 +248,16 @@ public:
     // Returns false if not available
     bool getViewProjectionInverse(float* outMatrix16) const;
     
+    // Post-processing / UI rendering separation
+    // Call after all 3D rendering, before UI rendering
+    // This applies post-processing (if enabled) and switches render target to swapchain
+    void finishSceneRendering();
+    
     // Native handle access (for ImGui integration)
     void* getNativeDevice() const;
     void* getNativeQueue() const;
     void* getNativeCommandEncoder() const;  // For ImGui rendering
+    void* getNativeSrvHeap() const;         // For ImGui font texture
     
     void waitForGPU();
     

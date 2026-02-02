@@ -22,7 +22,12 @@ set(ASSIMP_BUILD_SAMPLES OFF CACHE BOOL "" FORCE)
 set(ASSIMP_INSTALL OFF CACHE BOOL "" FORCE)
 set(ASSIMP_INJECT_DEBUG_POSTFIX OFF CACHE BOOL "" FORCE)
 set(ASSIMP_WARNINGS_AS_ERRORS OFF CACHE BOOL "" FORCE)  # Fix for Chinese Windows
-set(ASSIMP_BUILD_ZLIB OFF CACHE BOOL "" FORCE)  # Use system zlib on macOS
+# Windows needs Assimp to build zlib, macOS has system zlib
+if(WIN32)
+    set(ASSIMP_BUILD_ZLIB ON CACHE BOOL "" FORCE)
+else()
+    set(ASSIMP_BUILD_ZLIB OFF CACHE BOOL "" FORCE)
+endif()
 FetchContent_Declare(
     assimp
     GIT_REPOSITORY https://github.com/assimp/assimp.git
@@ -34,6 +39,8 @@ FetchContent_MakeAvailable(assimp)
 # Fix encoding issues on Chinese Windows
 if(MSVC)
     target_compile_options(assimp PRIVATE /wd4819)
+    # Enable UTF-8 source and execution character set for all targets
+    add_compile_options(/utf-8)
 endif()
 
 # Fetch stb for image loading (header-only)
@@ -226,5 +233,121 @@ if(APPLE)
             "${SHADER_SOURCE}"
             "$<TARGET_BUNDLE_CONTENT_DIR:luma_studio_macos>/Resources/pbr.metal"
         COMMENT "Copying Metal shader to bundle"
+    )
+endif()
+
+# ===== iOS LUMA Viewer =====
+# Build with: cmake -G Xcode -DCMAKE_SYSTEM_NAME=iOS -DCMAKE_OSX_DEPLOYMENT_TARGET=14.0 ..
+if(CMAKE_SYSTEM_NAME STREQUAL "iOS")
+    message(STATUS "Building for iOS")
+    
+    # Fetch ImGui for iOS Metal (if not already fetched)
+    if(NOT TARGET imgui_metal_ios)
+        FetchContent_Declare(
+            imgui
+            URL https://github.com/ocornut/imgui/archive/refs/tags/v1.89.9.zip
+        )
+        FetchContent_GetProperties(imgui)
+        if(NOT imgui_POPULATED)
+            FetchContent_Populate(imgui)
+        endif()
+    endif()
+    
+    # iOS Core library (Metal renderer)
+    set(LUMA_IOS_CORE_SOURCES
+        engine/foundation/log.cpp
+        engine/scene/scene.cpp
+        engine/actions/action.cpp
+        engine/engine_facade.cpp
+        engine/asset/pipeline.cpp
+        engine/asset/model_loader.cpp
+        engine/asset/async_texture_loader.cpp
+        engine/asset/hdr_loader.cpp
+        engine/renderer/ibl_generator.cpp
+        engine/util/file_watcher.cpp
+        engine/script/script_engine.cpp
+        engine/renderer/unified_renderer_metal.mm
+    )
+    
+    add_library(luma_core_ios STATIC ${LUMA_IOS_CORE_SOURCES})
+    
+    target_include_directories(luma_core_ios PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
+    target_include_directories(luma_core_ios PRIVATE ${assimp_SOURCE_DIR}/include ${assimp_BINARY_DIR}/include ${stb_SOURCE_DIR})
+    target_link_libraries(luma_core_ios PUBLIC assimp)
+    
+    # iOS frameworks
+    find_library(METAL_FRAMEWORK Metal REQUIRED)
+    find_library(METALKIT_FRAMEWORK MetalKit REQUIRED)
+    find_library(QUARTZCORE_FRAMEWORK QuartzCore REQUIRED)
+    find_library(UIKIT_FRAMEWORK UIKit REQUIRED)
+    find_library(FOUNDATION_FRAMEWORK Foundation REQUIRED)
+    
+    target_link_libraries(luma_core_ios PUBLIC 
+        ${METAL_FRAMEWORK}
+        ${METALKIT_FRAMEWORK}
+        ${QUARTZCORE_FRAMEWORK}
+        ${UIKIT_FRAMEWORK}
+        ${FOUNDATION_FRAMEWORK}
+    )
+    
+    set_source_files_properties(
+        engine/renderer/unified_renderer_metal.mm
+        PROPERTIES COMPILE_FLAGS "-fobjc-arc"
+    )
+    
+    # iOS Application
+    set(LUMA_VIEWER_IOS_SOURCES
+        apps/luma_viewer_ios/main.mm
+        apps/luma_viewer_ios/AppDelegate.mm
+        apps/luma_viewer_ios/SceneDelegate.mm
+        apps/luma_viewer_ios/LumaViewController.mm
+    )
+    
+    set(LUMA_VIEWER_IOS_RESOURCES
+        apps/luma_viewer_ios/LaunchScreen.storyboard
+        apps/luma_viewer_ios/Info.plist
+    )
+    
+    add_executable(luma_viewer_ios MACOSX_BUNDLE
+        ${LUMA_VIEWER_IOS_SOURCES}
+        ${LUMA_VIEWER_IOS_RESOURCES}
+    )
+    
+    set_target_properties(luma_viewer_ios PROPERTIES
+        BUNDLE TRUE
+        MACOSX_BUNDLE_GUI_IDENTIFIER "com.luma.viewer"
+        MACOSX_BUNDLE_BUNDLE_NAME "LUMA Viewer"
+        MACOSX_BUNDLE_BUNDLE_VERSION "1.0"
+        MACOSX_BUNDLE_SHORT_VERSION_STRING "1.0"
+        MACOSX_BUNDLE_INFO_PLIST "${CMAKE_CURRENT_SOURCE_DIR}/apps/luma_viewer_ios/Info.plist"
+        XCODE_ATTRIBUTE_TARGETED_DEVICE_FAMILY "1,2"  # iPhone and iPad
+        XCODE_ATTRIBUTE_IPHONEOS_DEPLOYMENT_TARGET "14.0"
+        RESOURCE "${LUMA_VIEWER_IOS_RESOURCES}"
+    )
+    
+    target_include_directories(luma_viewer_ios PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+    
+    target_link_libraries(luma_viewer_ios PRIVATE 
+        luma_core_ios
+        ${METAL_FRAMEWORK}
+        ${METALKIT_FRAMEWORK}
+        ${QUARTZCORE_FRAMEWORK}
+        ${UIKIT_FRAMEWORK}
+        ${FOUNDATION_FRAMEWORK}
+    )
+    
+    # Enable ARC for Objective-C++ files
+    set_source_files_properties(
+        ${LUMA_VIEWER_IOS_SOURCES}
+        PROPERTIES COMPILE_FLAGS "-fobjc-arc"
+    )
+    
+    # Copy Metal shader to app bundle
+    set(SHADER_SOURCE "${CMAKE_CURRENT_SOURCE_DIR}/engine/renderer/shaders/pbr.metal")
+    add_custom_command(TARGET luma_viewer_ios POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "${SHADER_SOURCE}"
+            "$<TARGET_BUNDLE_CONTENT_DIR:luma_viewer_ios>/Resources/pbr.metal"
+        COMMENT "Copying Metal shader to iOS bundle"
     )
 endif()

@@ -10,6 +10,32 @@ namespace luma {
 // Maximum bones for skeletal animation (must match shader)
 constexpr uint32_t MAX_BONES = 128;
 
+// ===== Vec2 =====
+struct Vec2 {
+    float x = 0.0f;
+    float y = 0.0f;
+    
+    Vec2() = default;
+    Vec2(float x_, float y_) : x(x_), y(y_) {}
+    
+    Vec2 operator+(const Vec2& other) const { return {x + other.x, y + other.y}; }
+    Vec2 operator-(const Vec2& other) const { return {x - other.x, y - other.y}; }
+    Vec2 operator*(float s) const { return {x * s, y * s}; }
+    Vec2 operator/(float s) const { return {x / s, y / s}; }
+    
+    float length() const { return std::sqrt(x*x + y*y); }
+    float lengthSquared() const { return x*x + y*y; }
+    Vec2 normalized() const {
+        float len = length();
+        if (len < 0.0001f) return {0, 0};
+        return {x/len, y/len};
+    }
+    
+    float dot(const Vec2& other) const {
+        return x * other.x + y * other.y;
+    }
+};
+
 // ===== Vec3 =====
 struct Vec3 {
     float x = 0.0f;

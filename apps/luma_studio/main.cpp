@@ -20,6 +20,7 @@
 #include "imgui_impl_win32.h"
 
 // Engine modules
+#include "engine/foundation/math_types.h"
 #include "engine/renderer/unified_renderer.h"
 #include "engine/renderer/post_process.h"
 #include "engine/viewport/viewport.h"
@@ -27,6 +28,7 @@
 #include "engine/asset/model_loader.h"
 #include "engine/asset/asset_manager.h"
 #include "engine/scene/scene_graph.h"
+#include "engine/scene/picking.h"
 #include "engine/editor/gizmo.h"
 #include "engine/editor/command.h"
 #include "engine/editor/commands/transform_commands.h"
@@ -100,6 +102,62 @@ struct Application {
 static Application g_app;
 static bool g_imguiInitialized = false;
 
+// Helper: Create ray from mouse position (using OrbitCamera)
+luma::Ray getMouseRay(float mouseX, float mouseY) {
+    // Convert pixel to NDC
+    float ndcX = (2.0f * mouseX / g_app.width) - 1.0f;
+    float ndcY = 1.0f - (2.0f * mouseY / g_app.height);  // Y flipped
+    
+    // Get inverse view-projection matrix from renderer
+    float invViewProj[16];
+    if (g_app.renderer.getViewProjectionInverse(invViewProj)) {
+        // Unproject near and far points
+        auto unproject = [&](float z) -> luma::Vec3 {
+            float pt[4] = { ndcX, ndcY, z, 1.0f };
+            float out[4];
+            // Matrix multiply
+            for (int i = 0; i < 4; i++) {
+                out[i] = invViewProj[i] * pt[0] + invViewProj[4+i] * pt[1] + 
+                         invViewProj[8+i] * pt[2] + invViewProj[12+i] * pt[3];
+            }
+            // Perspective divide
+            return luma::Vec3(out[0]/out[3], out[1]/out[3], out[2]/out[3]);
+        };
+        
+        luma::Vec3 nearPt = unproject(0.0f);  // NDC z=0 is near plane
+        luma::Vec3 farPt = unproject(1.0f);   // NDC z=1 is far plane
+        luma::Vec3 rayDir = (farPt - nearPt).normalized();
+        
+        return luma::Ray(nearPt, rayDir);
+    }
+    
+    // Fallback: manual calculation
+    float sceneCenter[3] = {0, 0, 0};
+    g_app.getSceneCenter(sceneCenter);
+    float sceneRadius = g_app.getSceneRadius();
+    
+    float eye[3], target[3];
+    g_app.viewport.camera.getEyeAndTarget(sceneCenter, sceneRadius, eye, target);
+    
+    luma::Vec3 eyePos(eye[0], eye[1], eye[2]);
+    luma::Vec3 targetPos(target[0], target[1], target[2]);
+    luma::Vec3 forward = (targetPos - eyePos).normalized();
+    luma::Vec3 worldUp(0, 1, 0);
+    luma::Vec3 right = forward.cross(worldUp).normalized();
+    luma::Vec3 up = right.cross(forward).normalized();
+    
+    float aspect = (float)g_app.width / g_app.height;
+    float fovRad = 45.0f * 3.14159f / 180.0f;
+    float tanHalfFov = tanf(fovRad * 0.5f);
+    
+    float viewX = ndcX * tanHalfFov * aspect;
+    float viewY = ndcY * tanHalfFov;
+    
+    luma::Vec3 rayDir = (right * viewX + up * viewY + forward).normalized();
+    
+    return luma::Ray(eyePos, rayDir);
+}
+
 // ===== Window Procedure =====
 LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     if (g_imguiInitialized && ImGui_ImplWin32_WndProcHandler(hwnd, msg, wParam, lParam))
@@ -166,7 +224,27 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         
     case WM_LBUTTONDOWN:
         if (!imguiWantsMouse) {
-            g_app.viewport.onMouseDown(0, (float)GET_X_LPARAM(lParam), (float)GET_Y_LPARAM(lParam), altPressed);
+            float mouseX = (float)GET_X_LPARAM(lParam);
+            float mouseY = (float)GET_Y_LPARAM(lParam);
+            
+            // Try gizmo interaction first (if not holding Alt for camera control)
+            if (!altPressed && g_app.scene.getSelectedEntity()) {
+                luma::Ray ray = getMouseRay(mouseX, mouseY);
+                
+                // Calculate screen-space gizmo size (100 pixels on screen)
+                luma::Vec3 gizmoPos = g_app.scene.getSelectedEntity()->getWorldPosition();
+                luma::Vec3 cameraPos = ray.origin;  // Ray origin is camera position
+                float screenScale = luma::TransformGizmo::calculateScreenScale(
+                    gizmoPos, cameraPos, 100.0f, (float)g_app.height, 3.14159f / 4.0f);
+                
+                if (g_app.gizmo.beginDrag(ray, screenScale)) {
+                    SetCapture(hwnd);
+                    return 0;  // Gizmo captured the click
+                }
+            }
+            
+            // Otherwise, handle camera or selection
+            g_app.viewport.onMouseDown(0, mouseX, mouseY, altPressed);
             if (altPressed) SetCapture(hwnd);
         }
         return 0;
@@ -186,6 +264,12 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         return 0;
         
     case WM_LBUTTONUP:
+        // End gizmo drag
+        if (g_app.gizmo.isDragging()) {
+            g_app.gizmo.endDrag();
+            ReleaseCapture();
+            return 0;
+        }
         g_app.viewport.onMouseUp(0);
         if (g_app.viewport.cameraMode == luma::CameraMode::None) ReleaseCapture();
         return 0;
@@ -200,11 +284,28 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         if (g_app.viewport.cameraMode == luma::CameraMode::None) ReleaseCapture();
         return 0;
         
-    case WM_MOUSEMOVE:
+    case WM_MOUSEMOVE: {
+        float mouseX = (float)GET_X_LPARAM(lParam);
+        float mouseY = (float)GET_Y_LPARAM(lParam);
+        
+        // Handle gizmo drag
+        if (g_app.gizmo.isDragging()) {
+            luma::Ray ray = getMouseRay(mouseX, mouseY);
+            g_app.gizmo.updateDrag(ray);
+            
+            // Update the entity's world matrix after transform change
+            if (luma::Entity* target = g_app.scene.getSelectedEntity()) {
+                target->updateWorldMatrix();
+            }
+            return 0;
+        }
+        
+        // Handle camera movement
         if (g_app.viewport.cameraMode != luma::CameraMode::None) {
-            g_app.viewport.onMouseMove((float)GET_X_LPARAM(lParam), (float)GET_Y_LPARAM(lParam), g_app.getSceneRadius());
+            g_app.viewport.onMouseMove(mouseX, mouseY, g_app.getSceneRadius());
         }
         return 0;
+    }
         
     case WM_MOUSEWHEEL:
         if (!imguiWantsMouse) {
@@ -255,28 +356,44 @@ static ComPtr<ID3D12DescriptorHeap> g_imguiSrvHeap;
 static bool InitImGui() {
     IMGUI_CHECKVERSION();
     ImGui::CreateContext();
-    ImGui::GetIO().ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
+    
+    ImGuiIO& io = ImGui::GetIO();
+    io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
+    io.DisplaySize = ImVec2((float)g_app.width, (float)g_app.height);
     
     // Apply new editor theme
     luma::ui::applyEditorTheme();
     
     auto* device = static_cast<ID3D12Device*>(g_app.renderer.getNativeDevice());
     
-    // Create a dedicated SRV heap for ImGui
+    // Create dedicated SRV heap for ImGui (separate from renderer's heap)
     D3D12_DESCRIPTOR_HEAP_DESC srvHeapDesc = {};
     srvHeapDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
     srvHeapDesc.NumDescriptors = 1;
     srvHeapDesc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
-    device->CreateDescriptorHeap(&srvHeapDesc, IID_PPV_ARGS(&g_imguiSrvHeap));
+    HRESULT hr = device->CreateDescriptorHeap(&srvHeapDesc, IID_PPV_ARGS(&g_imguiSrvHeap));
+    if (FAILED(hr)) {
+        std::cerr << "[luma] Failed to create ImGui SRV heap" << std::endl;
+        return false;
+    }
     
-    ImGui_ImplWin32_Init(g_app.hwnd);
-    ImGui_ImplDX12_Init(device, 2, DXGI_FORMAT_R8G8B8A8_UNORM, g_imguiSrvHeap.Get(),
+    if (!ImGui_ImplWin32_Init(g_app.hwnd)) {
+        std::cerr << "[luma] Failed to init ImGui Win32" << std::endl;
+        return false;
+    }
+    
+    if (!ImGui_ImplDX12_Init(device, 2, DXGI_FORMAT_R8G8B8A8_UNORM, g_imguiSrvHeap.Get(),
         g_imguiSrvHeap->GetCPUDescriptorHandleForHeapStart(),
-        g_imguiSrvHeap->GetGPUDescriptorHandleForHeapStart());
+        g_imguiSrvHeap->GetGPUDescriptorHandleForHeapStart())) {
+        std::cerr << "[luma] Failed to init ImGui DX12" << std::endl;
+        return false;
+    }
+    
+    // Build font atlas
     ImGui_ImplDX12_CreateDeviceObjects();
     
     g_imguiInitialized = true;
-    std::cout << "[luma] ImGui initialized" << std::endl;
+    std::cout << "[luma] ImGui initialized successfully" << std::endl;
     return true;
 }
 
@@ -329,9 +446,9 @@ static void SetupEditorCallbacks() {
                 g_app.viewport.camera.yaw = loadedCamera.yaw;
                 g_app.viewport.camera.pitch = loadedCamera.pitch;
                 g_app.viewport.camera.distance = loadedCamera.distance;
-                g_app.viewport.camera.targetOffset.x = loadedCamera.targetOffsetX;
-                g_app.viewport.camera.targetOffset.y = loadedCamera.targetOffsetY;
-                g_app.viewport.camera.targetOffset.z = loadedCamera.targetOffsetZ;
+                g_app.viewport.camera.targetX = loadedCamera.targetOffsetX;
+                g_app.viewport.camera.targetY = loadedCamera.targetOffsetY;
+                g_app.viewport.camera.targetZ = loadedCamera.targetOffsetZ;
                 // Apply loaded post-process settings
                 g_app.postProcess = loadedPostProcess;
                 g_app.editorState.consoleLogs.push_back("[INFO] Scene loaded: " + loadPath);
@@ -668,22 +785,22 @@ int main() {
         // Render
         g_app.renderer.beginFrame();
         
-        // Set camera
+        // Get camera and scene parameters
         auto camParams = g_app.viewport.getCameraParams();
         float sceneRadius = g_app.getSceneRadius();
+        float sceneCenter[3];
+        g_app.getSceneCenter(sceneCenter);
         g_app.renderer.setCamera(camParams, sceneRadius);
         
-        // Shadow pass (if enabled)
-        if (g_app.renderSettings.shadowsEnabled) {
-            float sceneCenter[3];
-            g_app.getSceneCenter(sceneCenter);
-            g_app.renderer.beginShadowPass(sceneRadius, sceneCenter);
-            g_app.scene.traverseRenderables([&](luma::Entity* entity) {
-                g_app.renderer.renderModelShadow(entity->model, entity->worldMatrix.m);
-            });
-            g_app.renderer.endShadowPass();
-        }
+        // === Shadow Pass ===
+        // Render shadow map first (all shadow-casting objects)
+        g_app.renderer.beginShadowPass(sceneRadius, sceneCenter);
+        g_app.scene.traverseRenderables([&](luma::Entity* entity) {
+            g_app.renderer.renderModelShadow(entity->model, entity->worldMatrix.m);
+        });
+        g_app.renderer.endShadowPass();
         
+        // === Main Render Pass ===
         // Render grid
         if (g_app.viewport.settings.showGrid) {
             g_app.renderer.renderGrid(camParams, sceneRadius);
@@ -692,8 +809,7 @@ int main() {
         // Render all entities
         g_app.scene.traverseRenderables([&](luma::Entity* entity) {
             if (entity->hasSkeleton()) {
-                // Render skinned model with bone matrices
-                luma::Mat4 boneMatrices[MAX_BONES];
+                luma::Mat4 boneMatrices[luma::MAX_BONES];
                 entity->getSkinningMatrices(boneMatrices);
                 g_app.renderer.renderSkinnedModel(entity->model, entity->worldMatrix.m,
                                                    reinterpret_cast<const float*>(boneMatrices));
@@ -702,16 +818,23 @@ int main() {
             }
         });
         
-        // Render selection outline
+        // Render selection outline and gizmo
         if (auto* selected = g_app.scene.getSelectedEntity()) {
             if (selected->hasModel) {
                 float outlineColor[4] = {1.0f, 0.6f, 0.2f, 1.0f};
                 g_app.renderer.renderModelOutline(selected->model, selected->worldMatrix.m, outlineColor);
             }
             
-            // Render gizmo
-            float screenScale = sceneRadius * 0.15f;
-            g_app.gizmo.setTarget(&selected->localTransform);
+            // Render gizmo (using persistent vertex buffer now)
+            // Calculate screen-space gizmo size (100 pixels on screen, same as hit detection)
+            luma::Vec3 gizmoPos = selected->getWorldPosition();
+            float cameraEye[3], cameraTgt[3];
+            g_app.viewport.camera.getEyeAndTarget(sceneCenter, sceneRadius, cameraEye, cameraTgt);
+            luma::Vec3 cameraPos(cameraEye[0], cameraEye[1], cameraEye[2]);
+            float screenScale = luma::TransformGizmo::calculateScreenScale(
+                gizmoPos, cameraPos, 100.0f, (float)g_app.height, 3.14159f / 4.0f);
+            
+            g_app.gizmo.setTarget(selected);
             auto gizmoData = g_app.gizmo.generateRenderData(screenScale);
             if (!gizmoData.lines.empty()) {
                 g_app.renderer.renderGizmoLines(
@@ -721,11 +844,17 @@ int main() {
             }
         }
         
-        // Render UI
+        // Finish 3D scene rendering (applies post-processing, switches to swapchain)
+        g_app.renderer.finishSceneRendering();
+        
+        // Render UI (now renders directly to swapchain, after post-processing)
         RenderUI();
         auto* cmdList = static_cast<ID3D12GraphicsCommandList*>(g_app.renderer.getNativeCommandEncoder());
+        
+        // Switch to ImGui's dedicated descriptor heap
         ID3D12DescriptorHeap* heaps[] = { g_imguiSrvHeap.Get() };
         cmdList->SetDescriptorHeaps(1, heaps);
+        
         ImGui_ImplDX12_RenderDrawData(ImGui::GetDrawData(), cmdList);
         
         g_app.renderer.endFrame();

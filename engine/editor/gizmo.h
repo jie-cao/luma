@@ -3,7 +3,9 @@
 
 #include "engine/scene/entity.h"
 #include "engine/scene/picking.h"
+#include "engine/renderer/mesh.h"
 #include <functional>
+#include <cmath>
 
 namespace luma {
 
@@ -32,17 +34,18 @@ enum class GizmoAxis {
     XYZ  // All axes (center)
 };
 
-// Gizmo colors
+// Gizmo colors - brighter for better visibility
 struct GizmoColors {
-    float xAxis[4] = {0.9f, 0.2f, 0.2f, 1.0f};     // Red
-    float yAxis[4] = {0.2f, 0.9f, 0.2f, 1.0f};     // Green
-    float zAxis[4] = {0.2f, 0.2f, 0.9f, 1.0f};     // Blue
+    float xAxis[4] = {1.0f, 0.2f, 0.2f, 1.0f};     // Bright Red
+    float yAxis[4] = {0.2f, 1.0f, 0.2f, 1.0f};     // Bright Green
+    float zAxis[4] = {0.2f, 0.4f, 1.0f, 1.0f};     // Bright Blue
     float hover[4] = {1.0f, 1.0f, 0.0f, 1.0f};     // Yellow (highlighted)
-    float active[4] = {1.0f, 0.5f, 0.0f, 1.0f};    // Orange (active/dragging)
+    float active[4] = {1.0f, 0.7f, 0.0f, 1.0f};   // Orange (active/dragging)
     float planeXY[4] = {0.2f, 0.2f, 0.9f, 0.3f};   // Blue translucent
     float planeXZ[4] = {0.2f, 0.9f, 0.2f, 0.3f};   // Green translucent
     float planeYZ[4] = {0.9f, 0.2f, 0.2f, 0.3f};   // Red translucent
-    float center[4] = {1.0f, 1.0f, 1.0f, 0.8f};    // White
+    float center[4] = {1.0f, 1.0f, 1.0f, 1.0f};   // White (fully opaque)
+    float outline[4] = {0.0f, 0.0f, 0.0f, 1.0f};  // Black outline
 };
 
 // Gizmo line segment for rendering
@@ -113,12 +116,41 @@ public:
     
     // === Rendering ===
     
-    // Generate line data for rendering
+    // Generate line data for rendering (legacy, for thin lines)
     // screenScale: gizmo size in screen space (distance-independent sizing)
     GizmoRenderData generateRenderData(float screenScale) const;
     
+    // Generate mesh data for rendering (thick cylinders, like Blender/Maya)
+    // screenScale: gizmo size in screen space
+    // Returns a list of meshes with their transforms and colors
+    struct GizmoMeshData {
+        struct AxisMesh {
+            Mesh mesh;
+            Mat4 transform;  // World transform for this axis
+            float color[4];  // RGBA color
+        };
+        std::vector<AxisMesh> meshes;
+    };
+    GizmoMeshData generateMeshData(float screenScale) const;
+    
     // Callback for transform changes (optional)
     std::function<void(Entity*)> onTransformChanged;
+    
+    // Calculate screen-space scale factor for consistent gizmo size
+    // cameraPos: camera position in world space
+    // screenPixelSize: desired gizmo size in pixels (e.g., 100)
+    // screenHeight: viewport height in pixels
+    // fovY: vertical field of view in radians
+    static float calculateScreenScale(const Vec3& gizmoPos, const Vec3& cameraPos, 
+                                       float screenPixelSize, float screenHeight, float fovY) {
+        float distance = (gizmoPos - cameraPos).length();
+        if (distance < 0.001f) distance = 0.001f;
+        
+        // Convert pixel size to world units at the gizmo's distance
+        // At distance d, 1 world unit = (screenHeight / (2 * tan(fov/2) * d)) pixels
+        float pixelsPerUnit = screenHeight / (2.0f * tanf(fovY * 0.5f) * distance);
+        return screenPixelSize / pixelsPerUnit;
+    }
     
 private:
     // Internal helpers
@@ -146,11 +178,13 @@ private:
     
     // Drag state
     Vec3 dragStartPos_;
+    Vec3 dragStartGizmoPos_;    // Gizmo position at drag start (fixed during drag)
     Vec3 dragStartEntityPos_;
     Quat dragStartEntityRot_;
     Vec3 dragStartEntityScale_;
     Vec3 dragAxis_;
     Vec3 dragPlaneNormal_;
+    float dragScreenScale_;     // Screen scale at drag start (for scale calculations)
 };
 
 // ===== Implementation =====
@@ -171,7 +205,7 @@ inline Mat4 TransformGizmo::getGizmoOrientation() const {
 }
 
 inline float TransformGizmo::getAxisHitRadius(float screenScale) const {
-    return size_ * screenScale * 0.15f;  // 15% of axis length for hit testing
+    return size_ * screenScale * 0.15f;  // Hit cylinder radius (15% of axis length)
 }
 
 inline Vec3 TransformGizmo::projectOntoAxis(const Ray& ray, const Vec3& axisOrigin, const Vec3& axisDir) {
@@ -225,35 +259,39 @@ inline GizmoAxis TransformGizmo::testHover(const Ray& ray, float screenScale) {
         return GizmoAxis::XYZ;
     }
     
-    // Test each axis
+    // Test each axis using ray-cylinder intersection
     auto testAxis = [&](const Vec3& dir, GizmoAxis axis) -> bool {
+        // Test ray against infinite cylinder along axis, then check bounds
+        Vec3 axisStart = pos + dir * (hitRadius * 0.5f);  // Start slightly from center
         Vec3 axisEnd = pos + dir * axisLen;
-        // Create a thin box along the axis
-        Vec3 p1 = pos + dir * hitRadius;
-        Vec3 p2 = axisEnd;
-        Vec3 perp1, perp2;
         
-        // Get perpendicular vectors
-        if (std::abs(dir.y) < 0.9f) {
-            perp1 = Vec3(-dir.z, 0, dir.x).normalized();
-        } else {
-            perp1 = Vec3(1, 0, 0);
-        }
-        perp2 = Vec3(dir.y * perp1.z - dir.z * perp1.y,
-                     dir.z * perp1.x - dir.x * perp1.z,
-                     dir.x * perp1.y - dir.y * perp1.x);
+        // Ray-cylinder intersection (simplified: project ray onto plane perpendicular to axis)
+        Vec3 oc = ray.origin - pos;
         
-        // Create AABB that encompasses the axis cylinder
-        AABB axisBox;
-        axisBox.expand(p1 - perp1 * hitRadius - perp2 * hitRadius);
-        axisBox.expand(p1 + perp1 * hitRadius + perp2 * hitRadius);
-        axisBox.expand(p2 - perp1 * hitRadius - perp2 * hitRadius);
-        axisBox.expand(p2 + perp1 * hitRadius + perp2 * hitRadius);
+        // Project ray direction and oc onto plane perpendicular to axis
+        float rayDotAxis = ray.direction.dot(dir);
+        float ocDotAxis = oc.dot(dir);
         
-        if (rayAABBIntersect(ray, axisBox)) {
-            return true;
-        }
-        return false;
+        Vec3 rayPerp = ray.direction - dir * rayDotAxis;
+        Vec3 ocPerp = oc - dir * ocDotAxis;
+        
+        float a = rayPerp.dot(rayPerp);
+        float b = 2.0f * ocPerp.dot(rayPerp);
+        float c = ocPerp.dot(ocPerp) - hitRadius * hitRadius;
+        
+        float discriminant = b * b - 4.0f * a * c;
+        if (discriminant < 0) return false;
+        
+        // Find intersection point
+        float t = (-b - sqrtf(discriminant)) / (2.0f * a);
+        if (t < 0) t = (-b + sqrtf(discriminant)) / (2.0f * a);
+        if (t < 0) return false;
+        
+        // Check if intersection is within axis length
+        Vec3 hitPoint = ray.origin + ray.direction * t;
+        float projOnAxis = (hitPoint - pos).dot(dir);
+        
+        return projOnAxis > hitRadius * 0.3f && projOnAxis < axisLen;
     };
     
     // Find closest hit
@@ -293,9 +331,11 @@ inline bool TransformGizmo::beginDrag(const Ray& ray, float screenScale) {
     Vec3 pos = getGizmoPosition();
     Mat4 orient = getGizmoOrientation();
     
+    dragStartGizmoPos_ = pos;  // Save fixed gizmo position for entire drag operation
     dragStartEntityPos_ = target_->localTransform.position;
     dragStartEntityRot_ = target_->localTransform.rotation;
     dragStartEntityScale_ = target_->localTransform.scale;
+    dragScreenScale_ = screenScale;  // Store screen scale for scale calculations
     
     // Set up drag axis/plane
     Vec3 axisX(orient.m[0], orient.m[1], orient.m[2]);
@@ -305,15 +345,31 @@ inline bool TransformGizmo::beginDrag(const Ray& ray, float screenScale) {
     switch (axis) {
         case GizmoAxis::X:
             dragAxis_ = axisX;
-            dragStartPos_ = projectOntoAxis(ray, pos, dragAxis_);
+            if (mode_ == GizmoMode::Rotate) {
+                // For rotation, project onto plane perpendicular to axis
+                Vec3 planeNormal = axisX;
+                dragStartPos_ = projectOntoPlane(ray, pos, planeNormal);
+            } else {
+                dragStartPos_ = projectOntoAxis(ray, pos, dragAxis_);
+            }
             break;
         case GizmoAxis::Y:
             dragAxis_ = axisY;
-            dragStartPos_ = projectOntoAxis(ray, pos, dragAxis_);
+            if (mode_ == GizmoMode::Rotate) {
+                Vec3 planeNormal = axisY;
+                dragStartPos_ = projectOntoPlane(ray, pos, planeNormal);
+            } else {
+                dragStartPos_ = projectOntoAxis(ray, pos, dragAxis_);
+            }
             break;
         case GizmoAxis::Z:
             dragAxis_ = axisZ;
-            dragStartPos_ = projectOntoAxis(ray, pos, dragAxis_);
+            if (mode_ == GizmoMode::Rotate) {
+                Vec3 planeNormal = axisZ;
+                dragStartPos_ = projectOntoPlane(ray, pos, planeNormal);
+            } else {
+                dragStartPos_ = projectOntoAxis(ray, pos, dragAxis_);
+            }
             break;
         case GizmoAxis::XYZ:
             // For uniform scale, use camera-facing plane
@@ -330,20 +386,35 @@ inline bool TransformGizmo::beginDrag(const Ray& ray, float screenScale) {
 inline bool TransformGizmo::updateDrag(const Ray& dragRay) {
     if (!isDragging_ || !target_) return false;
     
-    Vec3 pos = getGizmoPosition();
+    // Use the STARTING gizmo position, not the current one!
+    Vec3 pos = dragStartGizmoPos_;
     Vec3 currentPos;
     
     if (activeAxis_ == GizmoAxis::XYZ) {
         currentPos = projectOntoPlane(dragRay, pos, dragPlaneNormal_);
+    } else if (mode_ == GizmoMode::Rotate) {
+        // For rotation, project onto plane perpendicular to rotation axis
+        currentPos = projectOntoPlane(dragRay, pos, dragAxis_);
     } else {
         currentPos = projectOntoAxis(dragRay, pos, dragAxis_);
     }
     
     Vec3 delta = currentPos - dragStartPos_;
     
+    // Project delta onto the drag axis to get movement along the axis
+    // This ensures movement is constrained to the axis direction
+    float axisDeltaScalar = delta.x * dragAxis_.x + delta.y * dragAxis_.y + delta.z * dragAxis_.z;
+    
+    // Reverse direction to fix inverted movement
+    // TODO: This might be due to coordinate system or projection matrix issue
+    axisDeltaScalar = -axisDeltaScalar;
+    
+    Vec3 axisDelta = dragAxis_ * axisDeltaScalar;
+    
     switch (mode_) {
         case GizmoMode::Translate: {
-            target_->localTransform.position = dragStartEntityPos_ + delta;
+            // Apply movement along the axis
+            target_->localTransform.position = dragStartEntityPos_ + axisDelta;
             break;
         }
         case GizmoMode::Scale: {
@@ -357,9 +428,13 @@ inline bool TransformGizmo::updateDrag(const Ray& dragRay) {
                 scaleFactor = (startDist > 0.001f) ? currentDist / startDist : 1.0f;
                 target_->localTransform.scale = dragStartEntityScale_ * scaleFactor;
             } else {
-                // Single axis scale
-                float axisDelta = delta.x * dragAxis_.x + delta.y * dragAxis_.y + delta.z * dragAxis_.z;
-                scaleFactor = 1.0f + axisDelta * 0.01f;
+                // Single axis scale - use projected axisDelta (already computed above)
+                // Reverse direction for scale too
+                float scaleAxisDelta = -axisDeltaScalar;
+                // Scale factor based on movement along axis
+                // Use a reasonable sensitivity
+                float axisLen = size_ * dragScreenScale_;
+                scaleFactor = 1.0f + (scaleAxisDelta / axisLen) * 2.0f;  // 2x sensitivity
                 Vec3 newScale = dragStartEntityScale_;
                 if (activeAxis_ == GizmoAxis::X) newScale.x *= scaleFactor;
                 else if (activeAxis_ == GizmoAxis::Y) newScale.y *= scaleFactor;
@@ -369,20 +444,36 @@ inline bool TransformGizmo::updateDrag(const Ray& dragRay) {
             break;
         }
         case GizmoMode::Rotate: {
-            // Simple rotation around axis
+            // Rotation around axis - project points onto plane perpendicular to axis
             float angle = 0.0f;
             if (activeAxis_ != GizmoAxis::XYZ) {
-                Vec3 toStart = (dragStartPos_ - pos).normalized();
-                Vec3 toCurrent = (currentPos - pos).normalized();
-                // Cross product for rotation direction
-                Vec3 cross(toStart.y * toCurrent.z - toStart.z * toCurrent.y,
-                          toStart.z * toCurrent.x - toStart.x * toCurrent.z,
-                          toStart.x * toCurrent.y - toStart.y * toCurrent.x);
-                float dot = toStart.x * toCurrent.x + toStart.y * toCurrent.y + toStart.z * toCurrent.z;
-                angle = std::atan2(cross.length(), dot);
-                // Check rotation direction
-                if (cross.x * dragAxis_.x + cross.y * dragAxis_.y + cross.z * dragAxis_.z < 0) {
-                    angle = -angle;
+                // Project both start and current points onto rotation plane
+                Vec3 startOffset = dragStartPos_ - pos;
+                Vec3 currentOffset = currentPos - pos;
+                
+                // Remove component along axis to get 2D vectors in rotation plane
+                float startProj = startOffset.x * dragAxis_.x + startOffset.y * dragAxis_.y + startOffset.z * dragAxis_.z;
+                float currentProj = currentOffset.x * dragAxis_.x + currentOffset.y * dragAxis_.y + currentOffset.z * dragAxis_.z;
+                
+                Vec3 startInPlane = startOffset - dragAxis_ * startProj;
+                Vec3 currentInPlane = currentOffset - dragAxis_ * currentProj;
+                
+                float startLen = startInPlane.length();
+                float currentLen = currentInPlane.length();
+                
+                if (startLen > 0.001f && currentLen > 0.001f) {
+                    Vec3 startNorm = startInPlane / startLen;
+                    Vec3 currentNorm = currentInPlane / currentLen;
+                    
+                    // Calculate angle using dot and cross product
+                    float dot = startNorm.x * currentNorm.x + startNorm.y * currentNorm.y + startNorm.z * currentNorm.z;
+                    dot = std::max(-1.0f, std::min(1.0f, dot));  // Clamp to avoid NaN
+                    
+                    Vec3 cross = startNorm.cross(currentNorm);
+                    float crossDotAxis = cross.x * dragAxis_.x + cross.y * dragAxis_.y + cross.z * dragAxis_.z;
+                    
+                    angle = std::acos(dot);
+                    if (crossDotAxis < 0) angle = -angle;
                 }
             }
             
@@ -440,17 +531,48 @@ inline GizmoRenderData TransformGizmo::generateRenderData(float screenScale) con
         case GizmoMode::Translate:
         case GizmoMode::Scale:
         {
-            // X axis
+            // Helper to generate thick line by rendering multiple offset lines
+            auto addThickLine = [&](const Vec3& start, const Vec3& end, const float* color, float thickness) {
+                Vec3 dir = (end - start).normalized();
+                Vec3 perp1, perp2;
+                
+                // Get perpendicular vectors for offset
+                if (std::abs(dir.y) < 0.9f) {
+                    perp1 = Vec3(-dir.z, 0, dir.x).normalized();
+                } else {
+                    perp1 = Vec3(1, 0, 0);
+                }
+                perp2 = dir.cross(perp1).normalized();
+                
+                // Render multiple lines with small offsets to create thickness
+                int numLines = 5;  // Number of lines for thickness
+                for (int i = 0; i < numLines; i++) {
+                    float offset = (float)(i - numLines/2) * thickness / numLines;
+                    Vec3 offsetVec = perp1 * offset;
+                    data.lines.push_back({
+                        start + offsetVec,
+                        end + offsetVec,
+                        {color[0], color[1], color[2], color[3]}
+                    });
+                }
+            };
+            
+            float lineThickness = axisLen * 0.02f;  // 2% of axis length for thickness
+            
+            // X axis - bright red, thick
+            Vec3 xEnd = pos + axisX * axisLen;
             const float* xCol = getAxisColor(GizmoAxis::X, colors_.xAxis);
-            data.lines.push_back({pos, pos + axisX * axisLen, {xCol[0], xCol[1], xCol[2], xCol[3]}});
+            addThickLine(pos, xEnd, xCol, lineThickness);
             
-            // Y axis
+            // Y axis - bright green, thick
+            Vec3 yEnd = pos + axisY * axisLen;
             const float* yCol = getAxisColor(GizmoAxis::Y, colors_.yAxis);
-            data.lines.push_back({pos, pos + axisY * axisLen, {yCol[0], yCol[1], yCol[2], yCol[3]}});
+            addThickLine(pos, yEnd, yCol, lineThickness);
             
-            // Z axis
+            // Z axis - bright blue, thick
+            Vec3 zEnd = pos + axisZ * axisLen;
             const float* zCol = getAxisColor(GizmoAxis::Z, colors_.zAxis);
-            data.lines.push_back({pos, pos + axisZ * axisLen, {zCol[0], zCol[1], zCol[2], zCol[3]}});
+            addThickLine(pos, zEnd, zCol, lineThickness);
             
             // Center box (for uniform scale)
             if (mode_ == GizmoMode::Scale) {
@@ -523,6 +645,83 @@ inline GizmoRenderData TransformGizmo::generateRenderData(float screenScale) con
             }
             break;
         }
+    }
+    
+    return data;
+}
+
+inline TransformGizmo::GizmoMeshData TransformGizmo::generateMeshData(float screenScale) const {
+    GizmoMeshData data;
+    
+    if (!target_) return data;
+    
+    Vec3 pos = getGizmoPosition();
+    Mat4 orient = getGizmoOrientation();
+    float axisLen = size_ * screenScale;
+    float cylinderRadius = axisLen * 0.03f;  // 3% of axis length for thickness
+    
+    // Get axis directions
+    Vec3 axisX(orient.m[0], orient.m[1], orient.m[2]);
+    Vec3 axisY(orient.m[4], orient.m[5], orient.m[6]);
+    Vec3 axisZ(orient.m[8], orient.m[9], orient.m[10]);
+    
+    // Helper to get axis color
+    auto getAxisColor = [&](GizmoAxis axis, const float* baseColor) -> const float* {
+        if (activeAxis_ == axis) return colors_.active;
+        if (hoveredAxis_ == axis) return colors_.hover;
+        return baseColor;
+    };
+    
+    // Helper to create transform matrix for a cylinder along an axis
+    auto createCylinderTransform = [&](const Vec3& axisDir, float length) -> Mat4 {
+        // Create rotation matrix to align cylinder with axis
+        Vec3 up(0, 1, 0);
+        Vec3 right = axisDir.cross(up).normalized();
+        if (right.length() < 0.1f) {
+            // Axis is parallel to up, use different reference
+            right = Vec3(1, 0, 0);
+        }
+        Vec3 finalUp = right.cross(axisDir).normalized();
+        
+        Mat4 rot;
+        rot.m[0] = right.x; rot.m[4] = right.y; rot.m[8] = right.z; rot.m[12] = 0;
+        rot.m[1] = finalUp.x; rot.m[5] = finalUp.y; rot.m[9] = finalUp.z; rot.m[13] = 0;
+        rot.m[2] = axisDir.x; rot.m[6] = axisDir.y; rot.m[10] = axisDir.z; rot.m[14] = 0;
+        rot.m[3] = 0; rot.m[7] = 0; rot.m[11] = 0; rot.m[15] = 1;
+        
+        // Scale and translate
+        Mat4 scaleMat = Mat4::scale(Vec3(cylinderRadius, length, cylinderRadius));
+        Mat4 trans = Mat4::translation(pos + axisDir * (length * 0.5f));
+        
+        return trans * rot * scaleMat;
+    };
+    
+    switch (mode_) {
+        case GizmoMode::Translate:
+        case GizmoMode::Scale:
+        {
+            // X axis cylinder
+            Mesh xCylinder = create_cylinder(1.0f, 1.0f, 16);
+            Mat4 xTransform = createCylinderTransform(axisX, axisLen);
+            const float* xCol = getAxisColor(GizmoAxis::X, colors_.xAxis);
+            data.meshes.push_back({xCylinder, xTransform, {xCol[0], xCol[1], xCol[2], xCol[3]}});
+            
+            // Y axis cylinder
+            Mesh yCylinder = create_cylinder(1.0f, 1.0f, 16);
+            Mat4 yTransform = createCylinderTransform(axisY, axisLen);
+            const float* yCol = getAxisColor(GizmoAxis::Y, colors_.yAxis);
+            data.meshes.push_back({yCylinder, yTransform, {yCol[0], yCol[1], yCol[2], yCol[3]}});
+            
+            // Z axis cylinder
+            Mesh zCylinder = create_cylinder(1.0f, 1.0f, 16);
+            Mat4 zTransform = createCylinderTransform(axisZ, axisLen);
+            const float* zCol = getAxisColor(GizmoAxis::Z, colors_.zAxis);
+            data.meshes.push_back({zCylinder, zTransform, {zCol[0], zCol[1], zCol[2], zCol[3]}});
+            break;
+        }
+        case GizmoMode::Rotate:
+            // For rotation, we still use lines (circles)
+            break;
     }
     
     return data;

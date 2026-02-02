@@ -82,8 +82,8 @@ float3 rotateY(float3 v, float angle) {
 }
 
 // Fresnel-Schlick with roughness (for IBL)
-float3 fresnelSchlickRoughness(float cosTheta, float3 F0, float roughness) {
-    return F0 + (max(float3(1.0 - roughness, 1.0 - roughness, 1.0 - roughness), F0) - F0) * pow(1.0 - cosTheta, 5.0);
+float3 fresnelSchlickRoughness(float cosTheta, float3 F0, float r) {
+    return F0 + (max(float3(1.0 - r, 1.0 - r, 1.0 - r), F0) - F0) * pow(1.0 - cosTheta, 5.0);
 }
 
 struct VSInput {
@@ -123,17 +123,24 @@ PSInput VSMain(VSInput input) {
 }
 
 // PCF Shadow Sampling
-float sampleShadowPCF(float3 shadowCoord, float3 normal, float3 lightDir) {
+float sampleShadowPCF(float3 shadowCoord, float3 normal, float3 lDir) {
     if (shadowEnabled < 0.5) return 1.0;
     
-    // Apply bias
-    float NdotL = max(dot(normal, -lightDir), 0.0);
+    // Check bounds - if outside shadow map, no shadow
+    if (shadowCoord.x < 0.0 || shadowCoord.x > 1.0 || 
+        shadowCoord.y < 0.0 || shadowCoord.y > 1.0 ||
+        shadowCoord.z < 0.0 || shadowCoord.z > 1.0) {
+        return 1.0;
+    }
+    
+    // Standard bias calculation
+    float NdotL = max(dot(normal, -lDir), 0.0);
     float bias = shadowBias + shadowNormalBias * (1.0 - NdotL);
     float depth = shadowCoord.z - bias;
     
     // PCF 3x3
     float shadow = 0.0;
-    float2 texelSize = shadowSoftness / 2048.0;  // Assuming 2048 shadow map
+    float2 texelSize = shadowSoftness / 2048.0;
     
     [unroll]
     for (int x = -1; x <= 1; x++) {
@@ -488,6 +495,7 @@ struct UnifiedRenderer::Impl {
     ComPtr<ID3D12RootSignature> rootSignature;
     ComPtr<ID3D12PipelineState> pipelineState;
     ComPtr<ID3D12PipelineState> linePipelineState;
+    ComPtr<ID3D12PipelineState> gizmoPipelineState;  // Gizmo pipeline with always-visible depth test
     ComPtr<ID3D12Resource> constantBuffer;
     ComPtr<ID3D12Resource> defaultTexture;
     
@@ -499,6 +507,12 @@ struct UnifiedRenderer::Impl {
     UINT gridVertexCount = 0;
     UINT axisVertexCount = 0;
     bool gridReady = false;
+    
+    // Gizmo - persistent vertex buffer to avoid per-frame allocation issues
+    ComPtr<ID3D12Resource> gizmoVertexBuffer;
+    D3D12_VERTEX_BUFFER_VIEW gizmoVbv{};
+    static constexpr UINT kMaxGizmoVertices = 1024;  // Should be enough for transform gizmo
+    void* gizmoVbMapped = nullptr;
     
     // Sync
     HANDLE fenceEvent = nullptr;
@@ -568,7 +582,7 @@ struct UnifiedRenderer::Impl {
     std::string shaderBasePath = "engine/renderer/shaders/";
     
     // Post-Processing
-    bool postProcessEnabled = true;
+    bool postProcessEnabled = true;  // Now safe with finishSceneRendering() architecture
     float frameTime = 0.0f;
     ComPtr<ID3D12Resource> hdrRenderTarget;
     ComPtr<ID3D12Resource> bloomTextures[2];  // Ping-pong buffers for blur
@@ -916,6 +930,13 @@ struct UnifiedRenderer::Impl {
         psoDesc.DSVFormat = DXGI_FORMAT_D32_FLOAT;
         psoDesc.SampleDesc.Count = 1;
         device->CreateGraphicsPipelineState(&psoDesc, IID_PPV_ARGS(&linePipelineState));
+        
+        // Create gizmo pipeline - always visible (ALWAYS depth test, no depth write)
+        psoDesc.DepthStencilState.DepthFunc = D3D12_COMPARISON_FUNC_ALWAYS;  // Always pass depth test
+        psoDesc.RasterizerState.DepthBias = -1000;  // Depth bias to bring gizmo slightly forward
+        psoDesc.RasterizerState.DepthBiasClamp = 0.0f;
+        psoDesc.RasterizerState.SlopeScaledDepthBias = 0.0f;
+        device->CreateGraphicsPipelineState(&psoDesc, IID_PPV_ARGS(&gizmoPipelineState));
         
         createGridData();
         createSkinnedPipeline();
@@ -2645,44 +2666,54 @@ void UnifiedRenderer::renderModelOutline(const RHILoadedModel& model, const floa
 
 void UnifiedRenderer::renderGizmoLines(const float* lines, uint32_t lineCount) {
     if (!impl_->ready || lineCount == 0 || !impl_->cameraSet) return;
+    if (!impl_->linePipelineState) return;  // Line pipeline not ready
     
-    // Use the line pipeline
-    impl_->cmdList->SetPipelineState(impl_->linePipelineState.Get());
-    impl_->cmdList->SetGraphicsRootSignature(impl_->rootSignature.Get());
-    
-    // Create temporary vertex buffer for gizmo lines
     struct LineVertex { float pos[3]; float color[4]; };
-    std::vector<LineVertex> vertices;
-    vertices.reserve(lineCount * 2);
+    UINT vertexCount = lineCount * 2;
     
-    for (uint32_t i = 0; i < lineCount; i++) {
-        const float* line = lines + i * 10;  // startXYZ, endXYZ, RGBA
-        vertices.push_back({{line[0], line[1], line[2]}, {line[6], line[7], line[8], line[9]}});
-        vertices.push_back({{line[3], line[4], line[5]}, {line[6], line[7], line[8], line[9]}});
+    // Ensure we don't exceed buffer capacity
+    if (vertexCount > Impl::kMaxGizmoVertices) {
+        vertexCount = Impl::kMaxGizmoVertices;
+        lineCount = vertexCount / 2;
     }
     
-    // Upload to GPU (using upload heap directly)
-    D3D12_HEAP_PROPERTIES heapProps{}; heapProps.Type = D3D12_HEAP_TYPE_UPLOAD;
-    D3D12_RESOURCE_DESC bufDesc{}; 
-    bufDesc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
-    bufDesc.Width = vertices.size() * sizeof(LineVertex);
-    bufDesc.Height = 1; bufDesc.DepthOrArraySize = 1;
-    bufDesc.MipLevels = 1; bufDesc.SampleDesc.Count = 1;
-    bufDesc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+    // Create persistent gizmo vertex buffer if needed
+    if (!impl_->gizmoVertexBuffer) {
+        D3D12_HEAP_PROPERTIES heapProps{}; heapProps.Type = D3D12_HEAP_TYPE_UPLOAD;
+        D3D12_RESOURCE_DESC bufDesc{}; 
+        bufDesc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+        bufDesc.Width = Impl::kMaxGizmoVertices * sizeof(LineVertex);
+        bufDesc.Height = 1; bufDesc.DepthOrArraySize = 1;
+        bufDesc.MipLevels = 1; bufDesc.SampleDesc.Count = 1;
+        bufDesc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+        
+        HRESULT hr = impl_->device->CreateCommittedResource(&heapProps, D3D12_HEAP_FLAG_NONE, &bufDesc,
+            D3D12_RESOURCE_STATE_GENERIC_READ, nullptr, IID_PPV_ARGS(&impl_->gizmoVertexBuffer));
+        if (FAILED(hr)) return;
+        
+        impl_->gizmoVertexBuffer->Map(0, nullptr, &impl_->gizmoVbMapped);
+        
+        impl_->gizmoVbv.BufferLocation = impl_->gizmoVertexBuffer->GetGPUVirtualAddress();
+        impl_->gizmoVbv.SizeInBytes = Impl::kMaxGizmoVertices * sizeof(LineVertex);
+        impl_->gizmoVbv.StrideInBytes = sizeof(LineVertex);
+    }
     
-    ComPtr<ID3D12Resource> tempVB;
-    impl_->device->CreateCommittedResource(&heapProps, D3D12_HEAP_FLAG_NONE, &bufDesc,
-        D3D12_RESOURCE_STATE_GENERIC_READ, nullptr, IID_PPV_ARGS(&tempVB));
+    // Update vertex data
+    LineVertex* vertices = static_cast<LineVertex*>(impl_->gizmoVbMapped);
+    for (uint32_t i = 0; i < lineCount; i++) {
+        const float* line = lines + i * 10;  // startXYZ, endXYZ, RGBA
+        vertices[i*2] = {{line[0], line[1], line[2]}, {line[6], line[7], line[8], line[9]}};
+        vertices[i*2+1] = {{line[3], line[4], line[5]}, {line[6], line[7], line[8], line[9]}};
+    }
     
-    void* mapped;
-    tempVB->Map(0, nullptr, &mapped);
-    memcpy(mapped, vertices.data(), vertices.size() * sizeof(LineVertex));
-    tempVB->Unmap(0, nullptr);
-    
-    D3D12_VERTEX_BUFFER_VIEW vbv{};
-    vbv.BufferLocation = tempVB->GetGPUVirtualAddress();
-    vbv.SizeInBytes = (UINT)(vertices.size() * sizeof(LineVertex));
-    vbv.StrideInBytes = sizeof(LineVertex);
+    // Use the gizmo pipeline (always visible, no depth test)
+    if (impl_->gizmoPipelineState) {
+        impl_->cmdList->SetPipelineState(impl_->gizmoPipelineState.Get());
+    } else {
+        // Fallback to line pipeline if gizmo pipeline not ready
+        impl_->cmdList->SetPipelineState(impl_->linePipelineState.Get());
+    }
+    impl_->cmdList->SetGraphicsRootSignature(impl_->rootSignature.Get());
     
     // Set up constants (identity world matrix, current view/proj)
     float world[16]; math::identity(world);
@@ -2700,8 +2731,12 @@ void UnifiedRenderer::renderGizmoLines(const float* lines, uint32_t lineCount) {
     impl_->currentDrawIndex++;
     
     impl_->cmdList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_LINELIST);
-    impl_->cmdList->IASetVertexBuffers(0, 1, &vbv);
-    impl_->cmdList->DrawInstanced((UINT)vertices.size(), 1, 0, 0);
+    impl_->cmdList->IASetVertexBuffers(0, 1, &impl_->gizmoVbv);
+    impl_->cmdList->DrawInstanced(vertexCount, 1, 0, 0);
+    
+    // Restore state for ImGui
+    ID3D12DescriptorHeap* heaps[] = {impl_->srvHeap.Get()};
+    impl_->cmdList->SetDescriptorHeaps(1, heaps);
 }
 
 bool UnifiedRenderer::getViewProjectionInverse(float* outMatrix16) const {
@@ -2716,12 +2751,31 @@ bool UnifiedRenderer::getViewProjectionInverse(float* outMatrix16) const {
     return true;
 }
 
-void UnifiedRenderer::endFrame() {
+void UnifiedRenderer::finishSceneRendering() {
     // Apply post-processing if enabled (renders to swapchain)
     if (impl_->postProcessEnabled && impl_->postProcessReady && impl_->hdrRenderTarget) {
         impl_->applyPostProcess();
     }
     
+    // Now set render target to swapchain for UI rendering
+    // (applyPostProcess already did this, but we need to ensure it for non-post-process case too)
+    D3D12_CPU_DESCRIPTOR_HANDLE rtvHandle = impl_->rtvHeap->GetCPUDescriptorHandleForHeapStart();
+    rtvHandle.ptr += impl_->frameIndex * impl_->rtvDescSize;
+    D3D12_CPU_DESCRIPTOR_HANDLE dsvHandle = impl_->dsvHeap->GetCPUDescriptorHandleForHeapStart();
+    impl_->cmdList->OMSetRenderTargets(1, &rtvHandle, FALSE, &dsvHandle);
+    
+    // Reset viewport and scissor for UI
+    D3D12_VIEWPORT vp{}; vp.Width = (float)impl_->width; vp.Height = (float)impl_->height; vp.MaxDepth = 1.0f;
+    D3D12_RECT sr{}; sr.right = impl_->width; sr.bottom = impl_->height;
+    impl_->cmdList->RSSetViewports(1, &vp);
+    impl_->cmdList->RSSetScissorRects(1, &sr);
+    
+    // Restore main SRV heap for UI rendering
+    ID3D12DescriptorHeap* heaps[] = {impl_->srvHeap.Get()};
+    impl_->cmdList->SetDescriptorHeaps(1, heaps);
+}
+
+void UnifiedRenderer::endFrame() {
     // Transition swapchain to present
     D3D12_RESOURCE_BARRIER barrier{};
     barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
@@ -2864,11 +2918,19 @@ void UnifiedRenderer::endShadowPass() {
     barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
     impl_->cmdList->ResourceBarrier(1, &barrier);
     
-    // Restore main render target
-    D3D12_CPU_DESCRIPTOR_HANDLE rtv = impl_->rtvHeap->GetCPUDescriptorHandleForHeapStart();
-    rtv.ptr += impl_->frameIndex * impl_->rtvDescSize;
+    // Restore main render target - respect post-processing mode
     D3D12_CPU_DESCRIPTOR_HANDLE dsv = impl_->dsvHeap->GetCPUDescriptorHandleForHeapStart();
-    impl_->cmdList->OMSetRenderTargets(1, &rtv, FALSE, &dsv);
+    
+    if (impl_->postProcessEnabled && impl_->postProcessReady && impl_->hdrRenderTarget) {
+        // Restore to HDR render target for post-processing
+        D3D12_CPU_DESCRIPTOR_HANDLE hdrRtv = impl_->postProcessRtvHeap->GetCPUDescriptorHandleForHeapStart();
+        impl_->cmdList->OMSetRenderTargets(1, &hdrRtv, FALSE, &dsv);
+    } else {
+        // Restore to swapchain
+        D3D12_CPU_DESCRIPTOR_HANDLE rtv = impl_->rtvHeap->GetCPUDescriptorHandleForHeapStart();
+        rtv.ptr += impl_->frameIndex * impl_->rtvDescSize;
+        impl_->cmdList->OMSetRenderTargets(1, &rtv, FALSE, &dsv);
+    }
     
     // Restore viewport
     D3D12_VIEWPORT viewport{};
@@ -3169,6 +3231,7 @@ float UnifiedRenderer::getFrameTime() const {
 void* UnifiedRenderer::getNativeDevice() const { return impl_ ? impl_->device.Get() : nullptr; }
 void* UnifiedRenderer::getNativeQueue() const { return impl_ ? impl_->queue.Get() : nullptr; }
 void* UnifiedRenderer::getNativeCommandEncoder() const { return impl_ ? impl_->cmdList.Get() : nullptr; }
+void* UnifiedRenderer::getNativeSrvHeap() const { return impl_ ? impl_->srvHeap.Get() : nullptr; }
 
 void UnifiedRenderer::waitForGPU() { if (impl_) impl_->waitForGPU(); }
 

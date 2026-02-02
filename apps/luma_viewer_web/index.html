@@ -1,0 +1,166 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>LUMA Viewer</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        body {
+            background: #1a1a26;
+            color: #fff;
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, sans-serif;
+            overflow: hidden;
+        }
+        
+        #app {
+            width: 100vw;
+            height: 100vh;
+            display: flex;
+            flex-direction: column;
+        }
+        
+        #canvas-container {
+            flex: 1;
+            position: relative;
+        }
+        
+        #render-canvas {
+            width: 100%;
+            height: 100%;
+            display: block;
+        }
+        
+        #info-panel {
+            position: absolute;
+            top: 16px;
+            left: 16px;
+            background: rgba(0, 0, 0, 0.6);
+            padding: 12px 16px;
+            border-radius: 8px;
+            font-size: 12px;
+            line-height: 1.5;
+            pointer-events: none;
+        }
+        
+        #toolbar {
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            gap: 16px;
+            padding: 12px 16px;
+            background: rgba(26, 26, 38, 0.95);
+            border-top: 1px solid rgba(255, 255, 255, 0.1);
+        }
+        
+        .toolbar-btn {
+            background: rgba(99, 102, 241, 0.2);
+            border: 1px solid rgba(99, 102, 241, 0.4);
+            color: #fff;
+            padding: 8px 16px;
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 14px;
+            transition: all 0.2s;
+        }
+        
+        .toolbar-btn:hover {
+            background: rgba(99, 102, 241, 0.4);
+            border-color: rgba(99, 102, 241, 0.6);
+        }
+        
+        .toolbar-btn.active {
+            background: rgba(99, 102, 241, 0.6);
+        }
+        
+        #loading {
+            position: fixed;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            text-align: center;
+        }
+        
+        #loading h1 {
+            font-size: 32px;
+            margin-bottom: 16px;
+        }
+        
+        #loading p {
+            opacity: 0.6;
+        }
+        
+        .spinner {
+            width: 40px;
+            height: 40px;
+            border: 3px solid rgba(99, 102, 241, 0.3);
+            border-top-color: #6366f1;
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+            margin: 20px auto;
+        }
+        
+        @keyframes spin {
+            to { transform: rotate(360deg); }
+        }
+        
+        #error-panel {
+            position: fixed;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            background: rgba(239, 68, 68, 0.2);
+            border: 1px solid rgba(239, 68, 68, 0.4);
+            padding: 24px 32px;
+            border-radius: 12px;
+            text-align: center;
+            max-width: 400px;
+            display: none;
+        }
+        
+        #error-panel h2 {
+            color: #ef4444;
+            margin-bottom: 12px;
+        }
+    </style>
+</head>
+<body>
+    <div id="app">
+        <div id="loading">
+            <h1>LUMA Viewer</h1>
+            <div class="spinner"></div>
+            <p>Initializing renderer...</p>
+        </div>
+        
+        <div id="error-panel">
+            <h2>WebGPU Not Supported</h2>
+            <p>Your browser doesn't support WebGPU. Please try Chrome 113+ or Edge 113+.</p>
+        </div>
+        
+        <div id="canvas-container" style="display: none;">
+            <canvas id="render-canvas"></canvas>
+            <div id="info-panel">
+                <div>LUMA Viewer (WebGPU)</div>
+                <div id="fps-display">FPS: --</div>
+                <div id="model-info">No model loaded</div>
+            </div>
+        </div>
+        
+        <div id="toolbar" style="display: none;">
+            <button class="toolbar-btn" id="btn-load">Load Model</button>
+            <button class="toolbar-btn" id="btn-grid">Grid</button>
+            <button class="toolbar-btn" id="btn-rotate">Auto Rotate</button>
+            <button class="toolbar-btn" id="btn-reset">Reset Camera</button>
+        </div>
+    </div>
+    
+    <input type="file" id="file-input" accept=".glb,.gltf,.obj,.fbx" style="display: none;">
+    
+    <script type="module" src="/src/main.ts"></script>
+</body>
+</html>

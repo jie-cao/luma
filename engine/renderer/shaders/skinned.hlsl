@@ -126,14 +126,22 @@ float3 rotateY(float3 v, float angle) {
     return float3(c * v.x + s * v.z, v.y, -s * v.x + c * v.z);
 }
 
-float3 fresnelSchlickRoughness(float cosTheta, float3 F0, float roughness) {
-    return F0 + (max(float3(1.0 - roughness, 1.0 - roughness, 1.0 - roughness), F0) - F0) * pow(1.0 - cosTheta, 5.0);
+float3 fresnelSchlickRoughness(float cosTheta, float3 F0, float r) {
+    return F0 + (max(float3(1.0 - r, 1.0 - r, 1.0 - r), F0) - F0) * pow(1.0 - cosTheta, 5.0);
 }
 
-float sampleShadowPCF(float3 shadowCoord, float3 normal, float3 lightDir) {
+float sampleShadowPCF(float3 shadowCoord, float3 normal, float3 lDir) {
     if (shadowEnabled < 0.5) return 1.0;
     
-    float NdotL = max(dot(normal, -lightDir), 0.0);
+    // Check bounds - if outside shadow map, no shadow
+    if (shadowCoord.x < 0.0 || shadowCoord.x > 1.0 || 
+        shadowCoord.y < 0.0 || shadowCoord.y > 1.0 ||
+        shadowCoord.z < 0.0 || shadowCoord.z > 1.0) {
+        return 1.0;
+    }
+    
+    // Standard bias calculation
+    float NdotL = max(dot(normal, -lDir), 0.0);
     float bias = shadowBias + shadowNormalBias * (1.0 - NdotL);
     float depth = shadowCoord.z - bias;
     

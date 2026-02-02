@@ -14,7 +14,7 @@ namespace luma {
 
 // Bloom settings
 struct BloomSettings {
-    bool enabled = true;
+    bool enabled = false;  // Disabled by default (optional visual effect)
     float threshold = 1.0f;       // Brightness threshold for bloom
     float intensity = 1.0f;       // Bloom intensity
     float radius = 4.0f;          // Blur radius
@@ -24,7 +24,7 @@ struct BloomSettings {
 
 // Tone Mapping settings
 struct ToneMappingSettings {
-    bool enabled = true;
+    bool enabled = false;  // Disabled by default (optional visual effect)
     
     enum class Mode {
         None,
@@ -42,7 +42,7 @@ struct ToneMappingSettings {
 
 // Color Grading settings
 struct ColorGradingSettings {
-    bool enabled = true;
+    bool enabled = false;
     
     // Color balance (shadows, midtones, highlights)
     float shadowsR = 0.0f, shadowsG = 0.0f, shadowsB = 0.0f;
@@ -84,7 +84,7 @@ struct FilmGrainSettings {
 
 // FXAA settings
 struct FXAASettings {
-    bool enabled = true;
+    bool enabled = true;   // Now safe with finishSceneRendering() architecture
     float contrastThreshold = 0.0312f;    // Minimum contrast to apply AA
     float relativeThreshold = 0.063f;     // Relative threshold
     float subpixelBlending = 0.75f;       // Subpixel blending amount

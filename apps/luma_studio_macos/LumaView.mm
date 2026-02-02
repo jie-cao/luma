@@ -43,6 +43,19 @@
 #include "engine/data/data_system.h"
 #include "engine/build/build_system.h"
 
+// Character creation system
+#include "engine/character/character.h"
+#include "engine/character/base_human_loader.h"
+#include "engine/character/character_renderer.h"
+#include "engine/character/character_exporter.h"
+#include "engine/character/clothing_system.h"
+#include "engine/character/animation_retargeting.h"
+#include "engine/character/stylized_rendering.h"
+#include "engine/character/texture_system.h"
+#include "engine/character/hair_system.h"
+#include "engine/character/ai/face_reconstruction.h"
+#include "engine/character/ai/ai_model_manager.h"
+
 #include <memory>
 #include <chrono>
 #include <cmath>
@@ -116,6 +129,39 @@ enum class CameraMode { None, Orbit, Pan, Zoom };
     luma::ui::SceneManagerState _sceneState;
     luma::ui::DataManagerState _dataState;
     luma::ui::BuildSettingsState _buildState;
+    
+    // Asset Browser & Visual Script
+    luma::ui::AssetBrowserState _assetBrowserState;
+    luma::ui::VisualScriptState _visualScriptState;
+    
+    // Character Creator
+    luma::ui::CharacterCreatorState _characterCreatorState;
+    std::unique_ptr<luma::Character> _character;
+    std::unique_ptr<luma::CharacterRenderer> _characterRenderer;
+    luma::RHIGPUMesh _characterMesh;
+    bool _characterNeedsUpdate;
+    
+    // Clothing System
+    std::unique_ptr<luma::ClothingManager> _clothingManager;
+    std::vector<luma::RHIGPUMesh> _clothingMeshes;
+    bool _clothingNeedsUpdate;
+    
+    // Animation System
+    std::unique_ptr<luma::CharacterAnimationRetargeter> _animRetargeter;
+    std::string _currentAnimation;
+    float _animationTime;
+    bool _isAnimationPlaying;
+    
+    // Texture System
+    luma::CharacterTextureSet _characterTextures;
+    luma::RHIGPUMesh _skinDiffuseTexture;
+    luma::RHIGPUMesh _skinNormalTexture;
+    bool _texturesNeedUpdate;
+    
+    // Hair System
+    std::unique_ptr<luma::HairManager> _hairManager;
+    luma::RHIGPUMesh _hairMesh;
+    bool _hairNeedsUpdate;
     
     // Camera state
     CameraMode _cameraMode;
@@ -268,6 +314,9 @@ static CVReturn displayLinkCallback(CVDisplayLinkRef displayLink,
     // Setup editor callbacks
     [self setupEditorCallbacks];
     
+    // Setup character creator callbacks
+    [self setupCharacterCreatorCallbacks];
+    
     // Log startup
     _editorState.consoleLogs.push_back("[INFO] LUMA Studio started");
     _editorState.consoleLogs.push_back("[INFO] Press F1 for keyboard shortcuts");
@@ -334,6 +383,66 @@ static CVReturn displayLinkCallback(CVDisplayLinkRef displayLink,
         }
     };
     
+    // Asset browser: double-click callback
+    _editorState.onAssetDoubleClick = [self](const std::string& path, luma::BrowserAssetType type) {
+        switch (type) {
+            case luma::BrowserAssetType::Model:
+                // Load model into scene
+                [self loadModelAtPath:[NSString stringWithUTF8String:path.c_str()]];
+                _editorState.consoleLogs.push_back("[INFO] Loaded model: " + path);
+                break;
+                
+            case luma::BrowserAssetType::Scene:
+                // Load scene
+                [self loadSceneFromPath:[NSString stringWithUTF8String:path.c_str()]];
+                break;
+                
+            case luma::BrowserAssetType::Texture:
+                // Preview texture (TODO: texture preview window)
+                _editorState.consoleLogs.push_back("[INFO] Texture: " + path);
+                break;
+                
+            case luma::BrowserAssetType::Script:
+                // Open script in editor (TODO: script editor)
+                _editorState.consoleLogs.push_back("[INFO] Script: " + path);
+                break;
+                
+            default:
+                _editorState.consoleLogs.push_back("[INFO] Selected: " + path);
+                break;
+        }
+    };
+    
+    // Asset browser: drag & drop to scene callback
+    _editorState.onAssetDragDropToScene = [self](const std::string& path, luma::BrowserAssetType type) {
+        switch (type) {
+            case luma::BrowserAssetType::Model:
+                // Load model and create entity at origin
+                [self loadModelAtPath:[NSString stringWithUTF8String:path.c_str()]];
+                _editorState.consoleLogs.push_back("[INFO] Dropped model: " + path);
+                break;
+                
+            case luma::BrowserAssetType::Scene:
+                // Could add scene as prefab (TODO)
+                _editorState.consoleLogs.push_back("[INFO] Scene drop not yet supported");
+                break;
+                
+            case luma::BrowserAssetType::Texture:
+                // Apply texture to selected entity's material (as albedo by default)
+                if (auto* selected = _scene->getSelectedEntity()) {
+                    if (selected->material) {
+                        // Use the albedo slot (index 0)
+                        selected->material->texturePaths[static_cast<size_t>(luma::TextureSlot::Albedo)] = path;
+                        _editorState.consoleLogs.push_back("[INFO] Applied texture to " + selected->name);
+                    }
+                }
+                break;
+                
+            default:
+                break;
+        }
+    };
+    
     // Setup AssetManager with model loader
     auto& assetMgr = luma::getAssetManager();
     assetMgr.setModelLoader([](const std::string& path) -> std::shared_ptr<void> {
@@ -379,6 +488,960 @@ static CVReturn displayLinkCallback(CVDisplayLinkRef displayLink,
         if (auto* selected = _scene->getSelectedEntity()) {
             auto cmd = std::make_unique<luma::DuplicateEntityCommand>(_scene.get(), selected);
             luma::getCommandHistory().execute(std::move(cmd));
+        }
+    };
+}
+
+- (void)checkAIModelsReady {
+    NSFileManager* fm = [NSFileManager defaultManager];
+    NSString* modelsDir = @"models/ai";
+    
+    // Check for required models
+    BOOL faceDetectorExists = [fm fileExistsAtPath:[modelsDir stringByAppendingPathComponent:@"face_detector.onnx"]];
+    BOOL faceMeshExists = [fm fileExistsAtPath:[modelsDir stringByAppendingPathComponent:@"face_mesh.onnx"]];
+    
+    _characterCreatorState.aiModelsReady = faceDetectorExists && faceMeshExists;
+    
+    if (_characterCreatorState.aiModelsReady) {
+        _editorState.consoleLogs.push_back("[INFO] All required AI models ready");
+    }
+}
+
+- (void)initializeCharacter {
+    // Initialize model library
+    auto& library = luma::BaseHumanModelLibrary::getInstance();
+    library.initializeDefaults();
+    
+    // Create character
+    _character = luma::CharacterFactory::createBlank("Character");
+    
+    // Load procedural model
+    const luma::BaseHumanModel* model = library.getModel("procedural_human");
+    if (model) {
+        _character->setBaseMesh(model->vertices, model->indices);
+        
+        // Copy BlendShape data
+        auto& charBlendShapes = _character->getBlendShapeMesh();
+        for (size_t i = 0; i < model->blendShapes.getTargetCount(); i++) {
+            const luma::BlendShapeTarget* target = model->blendShapes.getTarget(static_cast<int>(i));
+            if (target) {
+                charBlendShapes.addTarget(*target);
+            }
+        }
+        for (size_t i = 0; i < model->blendShapes.getChannelCount(); i++) {
+            const luma::BlendShapeChannel* channel = model->blendShapes.getChannel(static_cast<int>(i));
+            if (channel) {
+                charBlendShapes.addChannel(*channel);
+            }
+        }
+        
+        // Initialize character renderer
+        _characterRenderer = std::make_unique<luma::CharacterRenderer>();
+        _characterRenderer->initialize(_renderer.get());
+        _characterRenderer->setupCharacter(_character.get());
+        
+        // Update stats
+        _characterCreatorState.vertexCount = static_cast<uint32_t>(_character->getBaseVertices().size());
+        _characterCreatorState.triangleCount = static_cast<uint32_t>(_character->getIndices().size() / 3);
+        _characterCreatorState.blendShapeCount = static_cast<uint32_t>(charBlendShapes.getChannelCount());
+        _characterCreatorState.boneCount = _character->getSkeleton().getBoneCount();
+        
+        // Update BlendShape list for UI
+        _characterCreatorState.blendShapeWeights.clear();
+        for (size_t i = 0; i < charBlendShapes.getChannelCount(); i++) {
+            const luma::BlendShapeChannel* ch = charBlendShapes.getChannel(static_cast<int>(i));
+            if (ch) {
+                _characterCreatorState.blendShapeWeights.push_back({ch->name, ch->weight});
+            }
+        }
+        
+        _editorState.consoleLogs.push_back("[INFO] Character initialized with " + 
+            std::to_string(_characterCreatorState.vertexCount) + " vertices");
+        
+        // Initialize clothing system
+        luma::ClothingLibrary::getInstance().initializeDefaults();
+        _clothingManager = std::make_unique<luma::ClothingManager>();
+        _clothingNeedsUpdate = true;
+        
+        _editorState.consoleLogs.push_back("[INFO] Clothing library initialized");
+        
+        // Initialize animation system
+        luma::getPoseLibrary().initializeDefaults();
+        luma::getAnimationLibrary().initializeDefaults();
+        _animRetargeter = std::make_unique<luma::CharacterAnimationRetargeter>();
+        _animRetargeter->setup(_character->getSkeleton());
+        _isAnimationPlaying = false;
+        _animationTime = 0.0f;
+        
+        _editorState.consoleLogs.push_back("[INFO] Animation library initialized");
+        
+        // Initialize texture system and generate initial textures
+        luma::SkinTextureParams skinParams = luma::SkinTextureParams::caucasian();
+        luma::EyeTextureParams eyeParams = luma::EyeTextureParams::brown();
+        luma::LipTextureParams lipParams = luma::LipTextureParams::natural();
+        _characterTextures = luma::getTextureManager().generateTextureSet(skinParams, eyeParams, lipParams, 1024);
+        _texturesNeedUpdate = true;
+        _editorState.consoleLogs.push_back("[INFO] Initial textures generated (1024x1024)");
+        
+        // Initialize hair system
+        luma::getHairLibrary().initializeDefaults();
+        _hairManager = std::make_unique<luma::HairManager>();
+        _hairManager->setStyle("bald");  // Start with no hair
+        _hairNeedsUpdate = false;
+        
+        // Populate available hair styles in UI
+        _characterCreatorState.availableHairStyles = luma::getHairLibrary().getAllStyleIds();
+        _editorState.consoleLogs.push_back("[INFO] Hair system initialized with " + 
+            std::to_string(_characterCreatorState.availableHairStyles.size()) + " styles");
+    } else {
+        _editorState.consoleLogs.push_back("[ERROR] Failed to load procedural human model");
+    }
+}
+
+- (void)updateAndRenderCharacter:(float)deltaTime {
+    if (!_character || !_characterRenderer) {
+        // Initialize character on first use
+        [self initializeCharacter];
+        if (!_character) return;
+    }
+    
+    // Auto rotate character
+    if (_characterCreatorState.autoRotate) {
+        _characterCreatorState.rotationY += deltaTime * 0.5f;
+    }
+    
+    // Sync UI parameters to character
+    if (_characterNeedsUpdate) {
+        // Update body parameters
+        auto& body = _character->getBody();
+        body.setGender(static_cast<luma::Gender>(_characterCreatorState.gender));
+        
+        auto& m = body.getParams().measurements;
+        m.height = _characterCreatorState.height;
+        m.weight = _characterCreatorState.weight;
+        m.muscularity = _characterCreatorState.muscularity;
+        m.bodyFat = _characterCreatorState.bodyFat;
+        m.shoulderWidth = _characterCreatorState.shoulderWidth;
+        m.chestSize = _characterCreatorState.chestSize;
+        m.waistSize = _characterCreatorState.waistSize;
+        m.hipWidth = _characterCreatorState.hipWidth;
+        m.armLength = _characterCreatorState.armLength;
+        m.armThickness = _characterCreatorState.armThickness;
+        m.legLength = _characterCreatorState.legLength;
+        m.thighThickness = _characterCreatorState.thighThickness;
+        m.bustSize = _characterCreatorState.bustSize;
+        
+        body.getParams().skinColor = luma::Vec3(
+            _characterCreatorState.skinColor[0],
+            _characterCreatorState.skinColor[1],
+            _characterCreatorState.skinColor[2]
+        );
+        
+        // Update face parameters
+        auto& face = _character->getFace();
+        auto& shape = face.getShapeParams();
+        shape.faceWidth = _characterCreatorState.faceWidth;
+        shape.faceLength = _characterCreatorState.faceLength;
+        shape.faceRoundness = _characterCreatorState.faceRoundness;
+        shape.eyeSize = _characterCreatorState.eyeSize;
+        shape.eyeSpacing = _characterCreatorState.eyeSpacing;
+        shape.eyeHeight = _characterCreatorState.eyeHeight;
+        shape.eyeAngle = _characterCreatorState.eyeAngle;
+        shape.noseLength = _characterCreatorState.noseLength;
+        shape.noseWidth = _characterCreatorState.noseWidth;
+        shape.noseHeight = _characterCreatorState.noseHeight;
+        shape.noseBridge = _characterCreatorState.noseBridge;
+        shape.mouthWidth = _characterCreatorState.mouthWidth;
+        shape.upperLipThickness = _characterCreatorState.upperLipThickness;
+        shape.lowerLipThickness = _characterCreatorState.lowerLipThickness;
+        shape.jawWidth = _characterCreatorState.jawWidth;
+        shape.jawLine = _characterCreatorState.jawLine;
+        shape.chinLength = _characterCreatorState.chinLength;
+        shape.chinWidth = _characterCreatorState.chinWidth;
+        
+        face.getTextureParams().eyeColor = luma::Vec3(
+            _characterCreatorState.eyeColor[0],
+            _characterCreatorState.eyeColor[1],
+            _characterCreatorState.eyeColor[2]
+        );
+        
+        // Apply BlendShape weights
+        body.updateBlendShapeWeights();
+        face.applyParameters();
+        
+        _characterNeedsUpdate = false;
+    }
+    
+    // Update animation if playing
+    if (_isAnimationPlaying && _animRetargeter && !_currentAnimation.empty()) {
+        const luma::RetargetableClip* clip = luma::getAnimationLibrary().getClip(_currentAnimation);
+        if (clip) {
+            _animationTime += deltaTime * _characterCreatorState.animationSpeed;
+            _characterCreatorState.animationTime = _animationTime;
+            
+            // Apply animation
+            _animRetargeter->applyClip(*clip, _animationTime);
+            _characterNeedsUpdate = true;
+            
+            // Check if non-looping animation finished
+            if (!clip->looping && _animationTime >= clip->duration) {
+                _isAnimationPlaying = false;
+                _characterCreatorState.animationPlaying = false;
+            }
+        }
+    }
+    
+    // Update character (animation, etc.)
+    _character->update(deltaTime);
+    
+    // Update BlendShape mesh
+    _characterRenderer->updateBlendShapes();
+    
+    // Update GPU mesh if needed
+    if (_characterRenderer->needsGPUUpdate() || _texturesNeedUpdate) {
+        luma::Mesh mesh = _characterRenderer->getCurrentMesh();
+        
+        // Apply skin color as fallback
+        auto& bodyParams = _character->getBody().getParams();
+        mesh.baseColor[0] = bodyParams.skinColor.x;
+        mesh.baseColor[1] = bodyParams.skinColor.y;
+        mesh.baseColor[2] = bodyParams.skinColor.z;
+        mesh.metallic = 0.0f;
+        mesh.roughness = 0.6f;
+        
+        // Apply generated textures if available
+        if (_characterTextures.isGenerated) {
+            // Skin diffuse texture
+            if (!_characterTextures.skinDiffuse.pixels.empty()) {
+                mesh.diffuseTexture = _characterTextures.skinDiffuse;
+                mesh.hasDiffuseTexture = true;
+            }
+            
+            // Skin normal map
+            if (!_characterTextures.skinNormal.pixels.empty()) {
+                mesh.normalTexture = _characterTextures.skinNormal;
+                mesh.hasNormalTexture = true;
+            }
+            
+            // Use roughness as specular (for now)
+            if (!_characterTextures.skinRoughness.pixels.empty()) {
+                mesh.specularTexture = _characterTextures.skinRoughness;
+                mesh.hasSpecularTexture = true;
+            }
+            
+            // Set material properties from texture params
+            mesh.roughness = _characterTextures.skinParams.roughness;
+        }
+        
+        _characterMesh = _renderer->uploadMesh(mesh);
+        _characterRenderer->markGPUUpdated();
+        _texturesNeedUpdate = false;
+    }
+    
+    // Create world matrix with rotation (shared for character and clothing)
+    float angle = _characterCreatorState.rotationY;
+    float c = cosf(angle);
+    float s = sinf(angle);
+    
+    float worldMatrix[16] = {
+        c,    0.0f, -s,   0.0f,
+        0.0f, 1.0f, 0.0f, 0.0f,
+        s,    0.0f, c,    0.0f,
+        3.0f, 0.0f, 0.0f, 1.0f  // Offset to the right of scene center
+    };
+    
+    // Render character body
+    if (_characterMesh.indexCount > 0) {
+        luma::RHILoadedModel charModel;
+        charModel.meshes.push_back(_characterMesh);
+        charModel.radius = 1.0f;
+        charModel.center[0] = 0.0f;
+        charModel.center[1] = 0.9f;
+        charModel.center[2] = 0.0f;
+        
+        _renderer->renderModel(charModel, worldMatrix);
+    }
+    
+    // Update and render hair
+    if (_hairManager && _hairManager->hasHair()) {
+        if (_hairNeedsUpdate) {
+            const luma::Mesh& hairMesh = _hairManager->getHairMesh();
+            _hairMesh = _renderer->uploadMesh(hairMesh);
+            _hairNeedsUpdate = false;
+        }
+        
+        if (_hairMesh.indexCount > 0) {
+            // Apply hair offset
+            luma::Vec3 offset = _hairManager->getOffset();
+            float hairWorldMatrix[16] = {
+                c,    0.0f, -s,   0.0f,
+                0.0f, 1.0f, 0.0f, 0.0f,
+                s,    0.0f, c,    0.0f,
+                3.0f + offset.x, offset.y, offset.z, 1.0f
+            };
+            
+            luma::RHILoadedModel hairModel;
+            hairModel.meshes.push_back(_hairMesh);
+            hairModel.radius = 0.2f;
+            hairModel.center[0] = 0.0f;
+            hairModel.center[1] = 1.55f;
+            hairModel.center[2] = 0.0f;
+            
+            _renderer->renderModel(hairModel, hairWorldMatrix);
+        }
+    }
+    
+    // Update and render clothing
+    if (_clothingManager) {
+        // Adapt clothing to current body shape if needed
+        if (_clothingNeedsUpdate) {
+            _clothingManager->adaptToBody(_character->getBody().getParams().measurements);
+            
+            // Upload clothing meshes to GPU
+            _clothingMeshes.clear();
+            auto meshes = _clothingManager->getClothingMeshes();
+            for (const auto& mesh : meshes) {
+                _clothingMeshes.push_back(_renderer->uploadMesh(mesh));
+            }
+            
+            _clothingNeedsUpdate = false;
+        }
+        
+        // Render each clothing item
+        for (const auto& clothingMesh : _clothingMeshes) {
+            if (clothingMesh.indexCount > 0) {
+                luma::RHILoadedModel clothingModel;
+                clothingModel.meshes.push_back(clothingMesh);
+                clothingModel.radius = 1.0f;
+                clothingModel.center[0] = 0.0f;
+                clothingModel.center[1] = 0.9f;
+                clothingModel.center[2] = 0.0f;
+                
+                _renderer->renderModel(clothingModel, worldMatrix);
+            }
+        }
+    }
+}
+
+- (void)setupCharacterCreatorCallbacks {
+    // Initialize character creator state
+    _characterCreatorState.initialized = false;
+    _characterNeedsUpdate = false;
+    
+    // Initialize callback
+    _characterCreatorState.onInitialize = [self]() {
+        [self initializeCharacter];
+    };
+    
+    // Randomize callback
+    _characterCreatorState.onRandomize = [self]() {
+        // Randomize body parameters
+        _characterCreatorState.height = (float)rand() / RAND_MAX;
+        _characterCreatorState.weight = (float)rand() / RAND_MAX;
+        _characterCreatorState.muscularity = (float)rand() / RAND_MAX;
+        _characterCreatorState.bodyFat = (float)rand() / RAND_MAX;
+        _characterCreatorState.shoulderWidth = (float)rand() / RAND_MAX;
+        _characterCreatorState.chestSize = (float)rand() / RAND_MAX;
+        _characterCreatorState.waistSize = (float)rand() / RAND_MAX;
+        _characterCreatorState.hipWidth = (float)rand() / RAND_MAX;
+        
+        // Randomize face parameters
+        _characterCreatorState.faceWidth = (float)rand() / RAND_MAX;
+        _characterCreatorState.faceLength = (float)rand() / RAND_MAX;
+        _characterCreatorState.eyeSize = (float)rand() / RAND_MAX;
+        _characterCreatorState.noseLength = (float)rand() / RAND_MAX;
+        _characterCreatorState.mouthWidth = (float)rand() / RAND_MAX;
+        _characterCreatorState.jawWidth = (float)rand() / RAND_MAX;
+        
+        _characterNeedsUpdate = true;
+        _editorState.consoleLogs.push_back("[INFO] Character randomized");
+    };
+    
+    // Preset selection callback
+    _characterCreatorState.onPresetSelect = [self](int presetIdx) {
+        // Apply preset values based on index
+        switch (presetIdx) {
+            case 0: // Male Slim
+                _characterCreatorState.height = 0.5f;
+                _characterCreatorState.weight = 0.3f;
+                _characterCreatorState.muscularity = 0.2f;
+                _characterCreatorState.bodyFat = 0.15f;
+                break;
+            case 1: // Male Average
+                _characterCreatorState.height = 0.5f;
+                _characterCreatorState.weight = 0.5f;
+                _characterCreatorState.muscularity = 0.4f;
+                _characterCreatorState.bodyFat = 0.3f;
+                break;
+            case 2: // Male Muscular
+                _characterCreatorState.height = 0.55f;
+                _characterCreatorState.weight = 0.65f;
+                _characterCreatorState.muscularity = 0.85f;
+                _characterCreatorState.bodyFat = 0.15f;
+                break;
+            case 3: // Male Heavy
+                _characterCreatorState.height = 0.5f;
+                _characterCreatorState.weight = 0.8f;
+                _characterCreatorState.muscularity = 0.3f;
+                _characterCreatorState.bodyFat = 0.7f;
+                break;
+            case 4: // Male Elderly
+                _characterCreatorState.height = 0.45f;
+                _characterCreatorState.weight = 0.45f;
+                _characterCreatorState.muscularity = 0.2f;
+                _characterCreatorState.bodyFat = 0.35f;
+                break;
+            case 5: // Female Slim
+                _characterCreatorState.height = 0.45f;
+                _characterCreatorState.weight = 0.25f;
+                _characterCreatorState.muscularity = 0.15f;
+                _characterCreatorState.bodyFat = 0.2f;
+                break;
+            case 6: // Female Average
+                _characterCreatorState.height = 0.45f;
+                _characterCreatorState.weight = 0.45f;
+                _characterCreatorState.muscularity = 0.2f;
+                _characterCreatorState.bodyFat = 0.35f;
+                break;
+            case 7: // Female Curvy
+                _characterCreatorState.height = 0.45f;
+                _characterCreatorState.weight = 0.55f;
+                _characterCreatorState.muscularity = 0.15f;
+                _characterCreatorState.bodyFat = 0.45f;
+                _characterCreatorState.bustSize = 0.7f;
+                _characterCreatorState.hipWidth = 0.65f;
+                break;
+            case 8: // Female Athletic
+                _characterCreatorState.height = 0.48f;
+                _characterCreatorState.weight = 0.4f;
+                _characterCreatorState.muscularity = 0.5f;
+                _characterCreatorState.bodyFat = 0.2f;
+                break;
+            default:
+                break;
+        }
+        _characterNeedsUpdate = true;
+        _editorState.consoleLogs.push_back("[INFO] Applied body preset");
+    };
+    
+    // Parameter changed callback
+    _characterCreatorState.onParameterChanged = [self]() {
+        _characterNeedsUpdate = true;
+    };
+    
+    // BlendShape changed callback
+    _characterCreatorState.onBlendShapeChanged = [self](const std::string& name, float weight) {
+        _characterNeedsUpdate = true;
+    };
+    
+    // Photo import callback
+    _characterCreatorState.onPhotoImport = [self]() {
+        // Check AI models first
+        [self checkAIModelsReady];
+        
+        if (!_characterCreatorState.aiModelsReady) {
+            _characterCreatorState.aiModelStatus = "Please import required AI models first";
+            _characterCreatorState.showAIModelSetup = true;
+            return;
+        }
+        
+        // Open file dialog for image
+        NSOpenPanel* panel = [NSOpenPanel openPanel];
+        panel.allowedContentTypes = @[
+            [UTType typeWithMIMEType:@"image/jpeg"],
+            [UTType typeWithMIMEType:@"image/png"]
+        ];
+        panel.allowsMultipleSelection = NO;
+        panel.canChooseDirectories = NO;
+        panel.message = @"Select Photo for Face Import";
+        
+        [panel beginSheetModalForWindow:self.window completionHandler:^(NSModalResponse result) {
+            if (result == NSModalResponseOK && panel.URLs.count > 0) {
+                NSString* selectedPath = panel.URLs[0].path;
+                std::string path = [selectedPath UTF8String];
+                
+                _editorState.consoleLogs.push_back("[INFO] Processing photo: " + path);
+                _characterCreatorState.aiModelStatus = "Processing...";
+                
+                // Load image
+                NSImage* image = [[NSImage alloc] initWithContentsOfFile:selectedPath];
+                if (!image) {
+                    _editorState.consoleLogs.push_back("[ERROR] Failed to load image");
+                    _characterCreatorState.aiModelStatus = "Failed to load image";
+                    return;
+                }
+                
+                // Get image data
+                NSBitmapImageRep* bitmap = [[NSBitmapImageRep alloc] initWithData:[image TIFFRepresentation]];
+                int width = (int)[bitmap pixelsWide];
+                int height = (int)[bitmap pixelsHigh];
+                int channels = (int)[bitmap samplesPerPixel];
+                
+                _editorState.consoleLogs.push_back("[INFO] Image size: " + std::to_string(width) + "x" + 
+                    std::to_string(height) + " (" + std::to_string(channels) + " channels)");
+                
+                // Process with AI pipeline
+                if (_character) {
+                    luma::PhotoToFacePipeline::Config config;
+                    config.faceDetectorModelPath = "models/ai/face_detector.onnx";
+                    config.faceMeshModelPath = "models/ai/face_mesh.onnx";
+                    config.face3DMMModelPath = "models/ai/3dmm.onnx";
+                    config.extractTexture = true;
+                    config.use3DMM = [[NSFileManager defaultManager] 
+                        fileExistsAtPath:@"models/ai/3dmm.onnx"];
+                    
+                    luma::PhotoToFacePipeline pipeline;
+                    pipeline.initialize(config);
+                    
+                    luma::PhotoFaceResult faceResult;
+                    const uint8_t* imageData = [bitmap bitmapData];
+                    
+                    if (pipeline.process(imageData, width, height, channels, faceResult)) {
+                        // Apply result to character face
+                        pipeline.applyToCharacterFace(faceResult, _character->getFace());
+                        
+                        // Sync UI parameters from character
+                        auto& shape = _character->getFace().getShapeParams();
+                        _characterCreatorState.faceWidth = shape.faceWidth;
+                        _characterCreatorState.faceLength = shape.faceLength;
+                        _characterCreatorState.eyeSize = shape.eyeSize;
+                        _characterCreatorState.noseLength = shape.noseLength;
+                        _characterCreatorState.mouthWidth = shape.mouthWidth;
+                        _characterCreatorState.jawWidth = shape.jawWidth;
+                        
+                        _characterNeedsUpdate = true;
+                        _characterCreatorState.aiModelStatus = "Face imported successfully!";
+                        _editorState.consoleLogs.push_back("[INFO] Face imported from photo");
+                    } else {
+                        _characterCreatorState.aiModelStatus = "Failed: " + faceResult.errorMessage;
+                        _editorState.consoleLogs.push_back("[ERROR] " + faceResult.errorMessage);
+                    }
+                }
+            }
+        }];
+    };
+    
+    // AI Model Import callback
+    _characterCreatorState.onImportAIModel = [self](const std::string& modelId, const std::string& modelName) {
+        NSOpenPanel* panel = [NSOpenPanel openPanel];
+        panel.allowedContentTypes = @[[UTType typeWithFilenameExtension:@"onnx"]];
+        panel.allowsMultipleSelection = NO;
+        panel.canChooseDirectories = NO;
+        panel.message = [NSString stringWithFormat:@"Select %s Model (ONNX format)", modelName.c_str()];
+        
+        [panel beginSheetModalForWindow:self.window completionHandler:^(NSModalResponse result) {
+            if (result == NSModalResponseOK && panel.URLs.count > 0) {
+                NSString* selectedPath = panel.URLs[0].path;
+                
+                // Copy to models directory
+                NSFileManager* fm = [NSFileManager defaultManager];
+                NSString* modelsDir = @"models/ai";
+                NSString* destPath = [modelsDir stringByAppendingPathComponent:
+                    [NSString stringWithFormat:@"%s.onnx", modelId.c_str()]];
+                
+                // Create directory if needed
+                [fm createDirectoryAtPath:modelsDir withIntermediateDirectories:YES attributes:nil error:nil];
+                
+                // Copy file
+                NSError* error = nil;
+                if ([fm fileExistsAtPath:destPath]) {
+                    [fm removeItemAtPath:destPath error:nil];
+                }
+                
+                if ([fm copyItemAtPath:selectedPath toPath:destPath error:&error]) {
+                    _editorState.consoleLogs.push_back("[INFO] Imported AI model: " + modelId);
+                    _characterCreatorState.aiModelStatus = "Model imported: " + modelId;
+                    
+                    // Check if all required models are now present
+                    [self checkAIModelsReady];
+                } else {
+                    _editorState.consoleLogs.push_back("[ERROR] Failed to import model: " + 
+                        std::string([[error localizedDescription] UTF8String]));
+                }
+            }
+        }];
+    };
+    
+    // Export callback
+    _characterCreatorState.onExport = [self](const std::string& name, int format, bool skeleton, bool blendShapes, bool textures) {
+        if (!_character) {
+            _editorState.consoleLogs.push_back("[ERROR] No character to export");
+            return;
+        }
+        
+        NSSavePanel* panel = [NSSavePanel savePanel];
+        
+        luma::CharacterExportFormat exportFormat;
+        NSString* ext;
+        
+        switch (format) {
+            case 0:  // GLB
+                exportFormat = luma::CharacterExportFormat::GLTF;
+                ext = @"glb";
+                break;
+            case 1:  // glTF
+                exportFormat = luma::CharacterExportFormat::GLTF;
+                ext = @"gltf";
+                break;
+            case 2:  // FBX
+                exportFormat = luma::CharacterExportFormat::FBX;
+                ext = @"fbx";
+                break;
+            case 3:  // OBJ
+                exportFormat = luma::CharacterExportFormat::OBJ;
+                ext = @"obj";
+                break;
+            case 4:  // VRM
+                exportFormat = luma::CharacterExportFormat::VRM;
+                ext = @"vrm";
+                break;
+            default:
+                exportFormat = luma::CharacterExportFormat::GLTF;
+                ext = @"glb";
+                break;
+        }
+        
+        panel.allowedContentTypes = @[[UTType typeWithFilenameExtension:ext]];
+        panel.nameFieldStringValue = [NSString stringWithFormat:@"%s.%@", name.c_str(), ext];
+        panel.message = @"Export Character";
+        
+        [panel beginSheetModalForWindow:self.window completionHandler:^(NSModalResponse result) {
+            if (result == NSModalResponseOK) {
+                NSString* path = panel.URL.path;
+                std::string outputPath = [path UTF8String];
+                
+                // Set character name
+                _character->setName(name);
+                
+                // Export options
+                luma::CharacterExportOptions options;
+                options.includeSkeleton = _characterCreatorState.exportSkeleton;
+                options.includeBlendShapes = _characterCreatorState.exportBlendShapes;
+                options.scale = 1.0f;
+                
+                // Perform export
+                _editorState.consoleLogs.push_back("[INFO] Exporting to: " + outputPath);
+                
+                if (luma::CharacterExporter::exportCharacter(*_character, outputPath, exportFormat, options)) {
+                    _editorState.consoleLogs.push_back("[INFO] Export successful!");
+                    
+                    // Show success notification
+                    NSAlert* alert = [[NSAlert alloc] init];
+                    alert.messageText = @"Export Successful";
+                    alert.informativeText = [NSString stringWithFormat:@"Character exported to:\n%@", path];
+                    alert.alertStyle = NSAlertStyleInformational;
+                    [alert addButtonWithTitle:@"OK"];
+                    [alert addButtonWithTitle:@"Show in Finder"];
+                    
+                    NSModalResponse response = [alert runModal];
+                    if (response == NSAlertSecondButtonReturn) {
+                        [[NSWorkspace sharedWorkspace] selectFile:path 
+                            inFileViewerRootedAtPath:@""];
+                    }
+                } else {
+                    _editorState.consoleLogs.push_back("[ERROR] Export failed");
+                    
+                    if (exportFormat == luma::CharacterExportFormat::FBX) {
+                        _editorState.consoleLogs.push_back("[INFO] FBX export requires Autodesk FBX SDK. Use glTF or OBJ instead.");
+                    }
+                }
+            }
+        }];
+    };
+    
+    // Clothing callbacks
+    _characterCreatorState.onEquipClothing = [self](const std::string& assetId) {
+        if (_clothingManager) {
+            _clothingManager->equip(assetId);
+            _clothingNeedsUpdate = true;
+            [self updateEquippedClothingUI];
+            _editorState.consoleLogs.push_back("[INFO] Equipped: " + assetId);
+        }
+    };
+    
+    _characterCreatorState.onUnequipClothing = [self](const std::string& assetId) {
+        if (_clothingManager) {
+            _clothingManager->unequip(assetId);
+            _clothingNeedsUpdate = true;
+            [self updateEquippedClothingUI];
+            _editorState.consoleLogs.push_back("[INFO] Unequipped: " + assetId);
+        }
+    };
+    
+    _characterCreatorState.onClothingColorChange = [self](const std::string& assetId, float r, float g, float b) {
+        if (_clothingManager) {
+            // Find which slot this item is in
+            auto equipped = _clothingManager->getAllEquipped();
+            for (const auto& [slot, item] : equipped) {
+                if (item->assetId == assetId) {
+                    _clothingManager->setColor(slot, luma::Vec3(r, g, b));
+                    _clothingNeedsUpdate = true;
+                    break;
+                }
+            }
+        }
+    };
+    
+    // Setup animation callbacks
+    [self setupAnimationCallbacks];
+    
+    // Setup style callbacks
+    [self setupStyleCallbacks];
+    
+    // Setup texture callbacks
+    [self setupTextureCallbacks];
+    
+    // Setup hair callbacks
+    [self setupHairCallbacks];
+}
+
+- (void)updateEquippedClothingUI {
+    _characterCreatorState.equippedClothing.clear();
+    if (_clothingManager) {
+        auto equipped = _clothingManager->getAllEquipped();
+        for (const auto& [slot, item] : equipped) {
+            std::string slotName;
+            switch (slot) {
+                case luma::ClothingSlot::Shirt: slotName = "Shirt"; break;
+                case luma::ClothingSlot::Pants: slotName = "Pants"; break;
+                case luma::ClothingSlot::Skirt: slotName = "Skirt"; break;
+                case luma::ClothingSlot::Shoes: slotName = "Shoes"; break;
+                default: slotName = "Other"; break;
+            }
+            _characterCreatorState.equippedClothing.push_back({slotName, item->assetId});
+        }
+    }
+}
+
+- (void)setupAnimationCallbacks {
+    // Apply pose callback
+    _characterCreatorState.onApplyPose = [self](const std::string& poseId) {
+        if (_animRetargeter && _character) {
+            const luma::AnimationPose* pose = luma::getPoseLibrary().getPose(poseId);
+            if (pose) {
+                _animRetargeter->applyPose(*pose);
+                _characterNeedsUpdate = true;
+                _editorState.consoleLogs.push_back("[INFO] Applied pose: " + poseId);
+            }
+        }
+    };
+    
+    // Play animation callback
+    _characterCreatorState.onPlayAnimation = [self](const std::string& animId) {
+        _currentAnimation = animId;
+        _animationTime = 0.0f;
+        _isAnimationPlaying = true;
+        _characterCreatorState.animationPlaying = true;
+        _editorState.consoleLogs.push_back("[INFO] Playing animation: " + animId);
+    };
+    
+    // Stop animation callback
+    _characterCreatorState.onStopAnimation = [self]() {
+        _isAnimationPlaying = false;
+        _characterCreatorState.animationPlaying = false;
+        _currentAnimation = "";
+        
+        // Reset to idle pose
+        if (_animRetargeter) {
+            const luma::AnimationPose* idlePose = luma::getPoseLibrary().getPose("idle");
+            if (idlePose) {
+                _animRetargeter->applyPose(*idlePose);
+                _characterNeedsUpdate = true;
+            }
+        }
+        _editorState.consoleLogs.push_back("[INFO] Animation stopped");
+    };
+}
+
+- (void)setupStyleCallbacks {
+    // Style change callback
+    _characterCreatorState.onStyleChange = [self](int styleIndex) {
+        luma::RenderingStyle style = static_cast<luma::RenderingStyle>(styleIndex);
+        luma::getStylizedRenderer().setStyle(style);
+        
+        const char* styleName = luma::getStyleName(style);
+        _editorState.consoleLogs.push_back(std::string("[INFO] Rendering style: ") + styleName);
+        
+        // Note: Actual shader changes would require renderer integration
+        // For now, we update the manager state which could be used for CPU-based preview
+    };
+    
+    // Style settings change callback
+    _characterCreatorState.onStyleSettingsChange = [self]() {
+        auto& settings = luma::getStylizedRenderer().getSettings();
+        
+        // Update settings from UI state
+        settings.outline.enabled = _characterCreatorState.outlineEnabled;
+        settings.outline.thickness = _characterCreatorState.outlineThickness;
+        settings.outline.color = luma::Vec3(
+            _characterCreatorState.outlineColor[0],
+            _characterCreatorState.outlineColor[1],
+            _characterCreatorState.outlineColor[2]
+        );
+        settings.celShading.shadingBands = _characterCreatorState.celShadingBands;
+        settings.celShading.enableRimLight = _characterCreatorState.rimLightEnabled;
+        settings.celShading.rimIntensity = _characterCreatorState.rimLightIntensity;
+        settings.colorVibrancy = _characterCreatorState.colorVibrancy;
+    };
+}
+
+- (void)setupTextureCallbacks {
+    // Texture update callback
+    _characterCreatorState.onTextureUpdate = [self]() {
+        // Build texture parameters from UI state
+        luma::SkinTextureParams skinParams;
+        skinParams.baseColor = luma::Vec3(
+            _characterCreatorState.skinColor[0],
+            _characterCreatorState.skinColor[1],
+            _characterCreatorState.skinColor[2]
+        );
+        skinParams.saturation = _characterCreatorState.skinSaturation;
+        skinParams.brightness = _characterCreatorState.skinBrightness;
+        skinParams.roughness = _characterCreatorState.skinRoughness;
+        skinParams.poreIntensity = _characterCreatorState.poreIntensity;
+        skinParams.wrinkleIntensity = _characterCreatorState.wrinkleIntensity;
+        skinParams.freckleIntensity = _characterCreatorState.freckleIntensity;
+        skinParams.freckleColor = luma::Vec3(
+            _characterCreatorState.freckleColor[0],
+            _characterCreatorState.freckleColor[1],
+            _characterCreatorState.freckleColor[2]
+        );
+        skinParams.sssIntensity = _characterCreatorState.sssIntensity;
+        
+        luma::EyeTextureParams eyeParams;
+        eyeParams.irisColor = luma::Vec3(
+            _characterCreatorState.eyeColor[0],
+            _characterCreatorState.eyeColor[1],
+            _characterCreatorState.eyeColor[2]
+        );
+        eyeParams.irisSize = _characterCreatorState.irisSize;
+        eyeParams.pupilSize = _characterCreatorState.pupilSize;
+        eyeParams.irisDetail = _characterCreatorState.irisDetail;
+        eyeParams.scleraVeins = _characterCreatorState.scleraVeins;
+        eyeParams.wetness = _characterCreatorState.eyeWetness;
+        
+        luma::LipTextureParams lipParams;
+        lipParams.color = luma::Vec3(
+            _characterCreatorState.lipColor[0],
+            _characterCreatorState.lipColor[1],
+            _characterCreatorState.lipColor[2]
+        );
+        lipParams.glossiness = _characterCreatorState.lipGlossiness;
+        lipParams.chappedAmount = _characterCreatorState.lipChapped;
+        
+        // Determine resolution
+        int resolution = 1024;
+        switch (_characterCreatorState.textureResolution) {
+            case 0: resolution = 512; break;
+            case 1: resolution = 1024; break;
+            case 2: resolution = 2048; break;
+        }
+        
+        // Generate textures
+        _characterTextures = luma::getTextureManager().generateTextureSet(skinParams, eyeParams, lipParams, resolution);
+        _texturesNeedUpdate = true;
+        
+        _editorState.consoleLogs.push_back("[INFO] Generated textures at " + std::to_string(resolution) + "x" + std::to_string(resolution));
+    };
+    
+    // Skin preset change
+    _characterCreatorState.onSkinPresetChange = [self](int preset) {
+        // Update skin color from preset
+        switch (preset) {
+            case 0:  // Caucasian
+                _characterCreatorState.skinColor[0] = 0.9f;
+                _characterCreatorState.skinColor[1] = 0.75f;
+                _characterCreatorState.skinColor[2] = 0.65f;
+                break;
+            case 1:  // Asian
+                _characterCreatorState.skinColor[0] = 0.95f;
+                _characterCreatorState.skinColor[1] = 0.82f;
+                _characterCreatorState.skinColor[2] = 0.7f;
+                break;
+            case 2:  // African
+                _characterCreatorState.skinColor[0] = 0.45f;
+                _characterCreatorState.skinColor[1] = 0.3f;
+                _characterCreatorState.skinColor[2] = 0.2f;
+                _characterCreatorState.sssIntensity = 0.2f;  // Less visible on darker skin
+                break;
+            case 3:  // Latino
+                _characterCreatorState.skinColor[0] = 0.75f;
+                _characterCreatorState.skinColor[1] = 0.55f;
+                _characterCreatorState.skinColor[2] = 0.4f;
+                break;
+            case 4:  // Middle Eastern
+                _characterCreatorState.skinColor[0] = 0.8f;
+                _characterCreatorState.skinColor[1] = 0.6f;
+                _characterCreatorState.skinColor[2] = 0.45f;
+                break;
+        }
+        _editorState.consoleLogs.push_back("[INFO] Applied skin preset");
+    };
+    
+    // Eye color preset change
+    _characterCreatorState.onEyeColorPresetChange = [self](int preset) {
+        switch (preset) {
+            case 0:  // Brown
+                _characterCreatorState.eyeColor[0] = 0.4f;
+                _characterCreatorState.eyeColor[1] = 0.25f;
+                _characterCreatorState.eyeColor[2] = 0.15f;
+                break;
+            case 1:  // Blue
+                _characterCreatorState.eyeColor[0] = 0.3f;
+                _characterCreatorState.eyeColor[1] = 0.5f;
+                _characterCreatorState.eyeColor[2] = 0.8f;
+                break;
+            case 2:  // Green
+                _characterCreatorState.eyeColor[0] = 0.35f;
+                _characterCreatorState.eyeColor[1] = 0.55f;
+                _characterCreatorState.eyeColor[2] = 0.35f;
+                break;
+            case 3:  // Hazel
+                _characterCreatorState.eyeColor[0] = 0.5f;
+                _characterCreatorState.eyeColor[1] = 0.4f;
+                _characterCreatorState.eyeColor[2] = 0.25f;
+                break;
+            case 4:  // Gray
+                _characterCreatorState.eyeColor[0] = 0.5f;
+                _characterCreatorState.eyeColor[1] = 0.55f;
+                _characterCreatorState.eyeColor[2] = 0.6f;
+                break;
+        }
+        _editorState.consoleLogs.push_back("[INFO] Applied eye color preset");
+    };
+}
+
+- (void)setupHairCallbacks {
+    // Hair style change
+    _characterCreatorState.onHairStyleChange = [self](const std::string& styleId) {
+        if (_hairManager) {
+            _hairManager->setStyle(styleId);
+            _hairNeedsUpdate = true;
+            _editorState.consoleLogs.push_back("[INFO] Hair style: " + styleId);
+        }
+    };
+    
+    // Hair color preset change
+    _characterCreatorState.onHairColorPresetChange = [self](int preset) {
+        if (_hairManager) {
+            const char* presets[] = {
+                "black", "dark_brown", "brown", "auburn", "red",
+                "blonde", "platinum", "gray", "white",
+                "blue", "pink", "purple", "green"
+            };
+            if (preset >= 0 && preset < 13) {
+                _hairManager->setMaterialPreset(presets[preset]);
+                _hairNeedsUpdate = true;
+                _editorState.consoleLogs.push_back("[INFO] Hair color: " + std::string(presets[preset]));
+            }
+        }
+    };
+    
+    // Custom hair color change
+    _characterCreatorState.onHairColorChange = [self](float r, float g, float b) {
+        if (_hairManager) {
+            _hairManager->setColor(luma::Vec3(r, g, b));
+            _hairNeedsUpdate = true;
         }
     };
 }
@@ -757,6 +1820,11 @@ static CVReturn displayLinkCallback(CVDisplayLinkRef displayLink,
     _editorState.cullStats.visibleObjects = visibleEntities;
     _editorState.cullStats.culledObjects = culledEntities;
     
+    // === Render Character (if Character Creator is active) ===
+    if (_editorState.showCharacterCreator && _characterCreatorState.initialized) {
+        [self updateAndRenderCharacter:dt];
+    }
+    
     // Render selection outline and gizmo
     if (auto* selected = _scene->getSelectedEntity()) {
         if (selected->hasModel) {
@@ -939,6 +2007,15 @@ static CVReturn displayLinkCallback(CVDisplayLinkRef displayLink,
     
     // Build Settings
     luma::ui::drawBuildSettingsPanel(_buildState, _editorState);
+    
+    // Asset Browser
+    luma::ui::drawAssetBrowserPanel(_assetBrowserState, _editorState);
+    
+    // Visual Script Editor
+    luma::ui::drawVisualScriptPanel(_visualScriptState, _editorState);
+    
+    // Character Creator
+    luma::ui::drawCharacterCreatorPanel(_characterCreatorState, _editorState);
     
     // Extended Asset Browser with cache statistics
     auto& assetMgr = luma::getAssetManager();

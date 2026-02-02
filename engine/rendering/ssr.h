@@ -2,9 +2,20 @@
 // Ray-marched reflections using the depth buffer
 #pragma once
 
+// Prevent Windows macros from interfering
+#ifdef _WIN32
+#ifdef near
+#undef near
+#endif
+#ifdef far
+#undef far
+#endif
+#endif
+
 #include "../foundation/math_types.h"
 #include <cmath>
 #include <algorithm>
+#include <functional>
 
 namespace luma {
 

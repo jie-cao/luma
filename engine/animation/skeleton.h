@@ -60,6 +60,13 @@ public:
         return (it != boneNameToIndex_.end()) ? it->second : -1;
     }
     
+    std::string getBoneName(int index) const {
+        if (index >= 0 && index < (int)bones_.size()) {
+            return bones_[index].name;
+        }
+        return "";
+    }
+    
     const std::vector<Bone>& getBones() const { return bones_; }
     
     // === Pose Computation ===

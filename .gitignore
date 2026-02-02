@@ -7,3 +7,5 @@ build/
 .clang-tidy
 .clang-tools-extra
 .clang-tools-extra
+# Added by Snap Cursor Rules extension
+.cursor/rules/remote
