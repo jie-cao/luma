@@ -26,6 +26,7 @@
 #include <algorithm>
 #include <vector>
 #include <unordered_map>
+#include <queue>
 
 #pragma comment(lib, "d3d12.lib")
 #pragma comment(lib, "dxgi.lib")
@@ -511,7 +512,7 @@ struct UnifiedRenderer::Impl {
     // Gizmo - persistent vertex buffer to avoid per-frame allocation issues
     ComPtr<ID3D12Resource> gizmoVertexBuffer;
     D3D12_VERTEX_BUFFER_VIEW gizmoVbv{};
-    static constexpr UINT kMaxGizmoVertices = 1024;  // Should be enough for transform gizmo
+    static constexpr UINT kMaxGizmoVertices = 16384;  // Large buffer for thick rotation circles
     void* gizmoVbMapped = nullptr;
     
     // Sync
@@ -538,6 +539,15 @@ struct UnifiedRenderer::Impl {
     // Maps async request ID to (meshIndex, textureSlot: 0=diffuse, 1=normal, 2=specular)
     std::unordered_map<uint32_t, std::pair<uint32_t, int>> pendingTextures;
     size_t asyncTexturesLoaded = 0;
+    
+    // Progressive texture upload queue (for smooth loading)
+    struct TextureUploadJob {
+        uint32_t meshIndex;
+        int slot;  // 0=diffuse, 1=normal, 2=specular
+        TextureData data;
+    };
+    std::queue<TextureUploadJob> textureUploadQueue;
+    size_t totalTexturesQueued = 0;
     
     // Scene Graph Camera State
     float viewMatrix[16] = {1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1};
@@ -2089,7 +2099,7 @@ bool UnifiedRenderer::loadModel(const std::string& path, RHILoadedModel& outMode
 }
 
 bool UnifiedRenderer::loadModelAsync(const std::string& path, RHILoadedModel& outModel) {
-    std::cout << "[unified/dx12] Loading model (async): " << path << std::endl;
+    std::cout << "[unified/dx12] Loading model (progressive): " << path << std::endl;
     
     auto result = load_model(path);
     if (!result) return false;
@@ -2098,7 +2108,14 @@ bool UnifiedRenderer::loadModelAsync(const std::string& path, RHILoadedModel& ou
     outModel.textureCount = 0;
     outModel.meshStorageStartIndex = impl_->meshStorage.size();
     
-    auto& asyncLoader = getAsyncTextureLoader();
+    // Count total textures for progress tracking
+    size_t totalTextures = 0;
+    for (const auto& mesh : result->meshes) {
+        if (!mesh.diffuseTexture.pixels.empty()) totalTextures++;
+        if (!mesh.normalTexture.pixels.empty()) totalTextures++;
+        if (!mesh.specularTexture.pixels.empty()) totalTextures++;
+    }
+    impl_->asyncTexturesLoaded = 0;
     
     for (const auto& mesh : result->meshes) {
         RHIGPUMesh gpu;
@@ -2142,7 +2159,7 @@ bool UnifiedRenderer::loadModelAsync(const std::string& path, RHILoadedModel& ou
         dx12Mesh.ibv.SizeInBytes = ibSize;
         dx12Mesh.ibv.Format = DXGI_FORMAT_R32_UINT;
         
-        // Use default textures initially
+        // Progressive loading: use default textures initially, queue for background upload
         dx12Mesh.diffuseTexture = impl_->defaultTexture;
         dx12Mesh.diffuseSrvIndex = impl_->defaultTextureSrvIndex;
         dx12Mesh.normalTexture = impl_->defaultTexture;
@@ -2152,24 +2169,18 @@ bool UnifiedRenderer::loadModelAsync(const std::string& path, RHILoadedModel& ou
         
         uint32_t meshIdx = static_cast<uint32_t>(impl_->meshStorage.size());
         
-        // Queue textures for async loading
+        // Queue textures for progressive upload (will be uploaded in processAsyncTextures)
         if (!mesh.diffuseTexture.pixels.empty()) {
-            uint32_t reqId = asyncLoader.loadTextureFromMemory(mesh.diffuseTexture.pixels, 
-                mesh.diffuseTexture.path.empty() ? "diffuse" : mesh.diffuseTexture.path);
-            impl_->pendingTextures[reqId] = {meshIdx, 0};  // slot 0 = diffuse
+            impl_->textureUploadQueue.push({meshIdx, 0, mesh.diffuseTexture});
             gpu.hasDiffuseTexture = true;
             outModel.textureCount++;
         }
         if (!mesh.normalTexture.pixels.empty()) {
-            uint32_t reqId = asyncLoader.loadTextureFromMemory(mesh.normalTexture.pixels,
-                mesh.normalTexture.path.empty() ? "normal" : mesh.normalTexture.path);
-            impl_->pendingTextures[reqId] = {meshIdx, 1};  // slot 1 = normal
+            impl_->textureUploadQueue.push({meshIdx, 1, mesh.normalTexture});
             gpu.hasNormalTexture = true;
         }
         if (!mesh.specularTexture.pixels.empty()) {
-            uint32_t reqId = asyncLoader.loadTextureFromMemory(mesh.specularTexture.pixels,
-                mesh.specularTexture.path.empty() ? "specular" : mesh.specularTexture.path);
-            impl_->pendingTextures[reqId] = {meshIdx, 2};  // slot 2 = specular
+            impl_->textureUploadQueue.push({meshIdx, 2, mesh.specularTexture});
             gpu.hasSpecularTexture = true;
         }
         
@@ -2190,55 +2201,55 @@ bool UnifiedRenderer::loadModelAsync(const std::string& path, RHILoadedModel& ou
     outModel.totalVerts = result->totalVertices;
     outModel.totalTris = result->totalTriangles;
     
-    std::cout << "[unified/dx12] Model queued (async): " << outModel.meshes.size() << " meshes, "
-              << impl_->pendingTextures.size() << " textures pending" << std::endl;
+    std::cout << "[unified/dx12] Model loaded: " << outModel.meshes.size() << " meshes, "
+              << outModel.textureCount << " textures" << std::endl;
     return true;
 }
 
 void UnifiedRenderer::processAsyncTextures() {
-    auto& asyncLoader = getAsyncTextureLoader();
+    // Process progressive texture upload queue (limit uploads per frame for smooth rendering)
+    const int maxUploadsPerFrame = 2;  // Upload up to 2 textures per frame
+    int uploadsThisFrame = 0;
     
-    auto completed = asyncLoader.getCompletedTextures();
-    for (auto& result : completed) {
-        auto it = impl_->pendingTextures.find(result.id);
-        if (it == impl_->pendingTextures.end()) continue;
+    while (!impl_->textureUploadQueue.empty() && uploadsThisFrame < maxUploadsPerFrame) {
+        auto job = std::move(impl_->textureUploadQueue.front());
+        impl_->textureUploadQueue.pop();
         
-        uint32_t meshIdx = it->second.first;
-        int slot = it->second.second;
+        if (job.meshIndex >= impl_->meshStorage.size()) continue;
+        if (job.data.pixels.empty()) continue;
         
-        if (meshIdx >= impl_->meshStorage.size()) {
-            impl_->pendingTextures.erase(it);
-            continue;
+        UINT srvIndex;
+        ComPtr<ID3D12Resource> texture = impl_->uploadTexture(job.data, srvIndex);
+        
+        DX12MeshData& mesh = impl_->meshStorage[job.meshIndex];
+        const char* slotName = job.slot == 0 ? "diffuse" : (job.slot == 1 ? "normal" : "specular");
+        
+        switch (job.slot) {
+            case 0:  // diffuse
+                mesh.diffuseTexture = texture;
+                mesh.diffuseSrvIndex = srvIndex;
+                break;
+            case 1:  // normal
+                mesh.normalTexture = texture;
+                mesh.normalSrvIndex = srvIndex;
+                break;
+            case 2:  // specular
+                mesh.specularTexture = texture;
+                mesh.specularSrvIndex = srvIndex;
+                break;
         }
         
-        if (result.success && !result.data.pixels.empty()) {
-            UINT srvIndex;
-            ComPtr<ID3D12Resource> texture = impl_->uploadTexture(result.data, srvIndex);
-            
-            DX12MeshData& mesh = impl_->meshStorage[meshIdx];
-            switch (slot) {
-                case 0:  // diffuse
-                    mesh.diffuseTexture = texture;
-                    mesh.diffuseSrvIndex = srvIndex;
-                    break;
-                case 1:  // normal
-                    mesh.normalTexture = texture;
-                    mesh.normalSrvIndex = srvIndex;
-                    break;
-                case 2:  // specular
-                    mesh.specularTexture = texture;
-                    mesh.specularSrvIndex = srvIndex;
-                    break;
-            }
-            impl_->asyncTexturesLoaded++;
-        }
+        impl_->asyncTexturesLoaded++;
+        uploadsThisFrame++;
         
-        impl_->pendingTextures.erase(it);
+        std::cout << "[progressive] Uploaded " << slotName << " (" 
+                  << job.data.width << "x" << job.data.height << ") - "
+                  << impl_->textureUploadQueue.size() << " remaining" << std::endl;
     }
 }
 
 float UnifiedRenderer::getAsyncLoadProgress() const {
-    size_t pending = impl_->pendingTextures.size();
+    size_t pending = impl_->textureUploadQueue.size();
     size_t total = pending + impl_->asyncTexturesLoaded;
     if (total == 0) return 1.0f;
     return static_cast<float>(impl_->asyncTexturesLoaded) / static_cast<float>(total);

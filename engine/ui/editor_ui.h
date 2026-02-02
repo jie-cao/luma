@@ -981,52 +981,65 @@ inline void drawInspectorPanel(SceneGraph& scene, EditorState& state) {
             }
         }
         
-        // Material component
-        if (selected->hasModel) {
+        // Material component - edit model's mesh materials directly
+        if (selected->hasModel && !selected->model.meshes.empty()) {
             if (ImGui::CollapsingHeader("Material", ImGuiTreeNodeFlags_DefaultOpen)) {
                 ImGui::Indent(10);
                 
-                // Ensure entity has a material
+                // Edit first mesh's material (applies to all meshes)
+                auto& firstMesh = selected->model.meshes[0];
+                
+                // Material name (from entity material if exists)
                 if (!selected->material) {
                     selected->material = std::make_shared<Material>();
                 }
-                Material& mat = *selected->material;
-                
-                // Material name
                 char matNameBuf[128];
-                strncpy(matNameBuf, mat.name.c_str(), sizeof(matNameBuf) - 1);
+                strncpy(matNameBuf, selected->material->name.c_str(), sizeof(matNameBuf) - 1);
                 matNameBuf[sizeof(matNameBuf) - 1] = '\0';
                 ImGui::Text("Name");
                 ImGui::SetNextItemWidth(-1);
                 if (ImGui::InputText("##MatName", matNameBuf, sizeof(matNameBuf))) {
-                    mat.name = matNameBuf;
+                    selected->material->name = matNameBuf;
                 }
                 
                 ImGui::Spacing();
                 
-                // Base Color with color picker
+                // Base Color - edit mesh data directly
                 ImGui::Text("Base Color");
-                float baseColor[4] = {mat.baseColor.x, mat.baseColor.y, mat.baseColor.z, mat.alpha};
+                float baseColor[4] = {firstMesh.baseColor[0], firstMesh.baseColor[1], firstMesh.baseColor[2], 1.0f};
                 ImGui::SetNextItemWidth(-1);
                 if (ImGui::ColorEdit4("##BaseColor", baseColor, 
                     ImGuiColorEditFlags_NoInputs | ImGuiColorEditFlags_AlphaBar)) {
-                    mat.baseColor = {baseColor[0], baseColor[1], baseColor[2]};
-                    mat.alpha = baseColor[3];
+                    // Apply to all meshes
+                    for (auto& mesh : selected->model.meshes) {
+                        mesh.baseColor[0] = baseColor[0];
+                        mesh.baseColor[1] = baseColor[1];
+                        mesh.baseColor[2] = baseColor[2];
+                    }
                 }
                 
                 ImGui::Spacing();
                 
-                // Metallic
+                // Metallic - edit mesh data directly
                 ImGui::Text("Metallic");
                 ImGui::SetNextItemWidth(-1);
-                ImGui::SliderFloat("##Metallic", &mat.metallic, 0.0f, 1.0f, "%.2f");
+                if (ImGui::SliderFloat("##Metallic", &firstMesh.metallic, 0.0f, 1.0f, "%.2f")) {
+                    for (auto& mesh : selected->model.meshes) {
+                        mesh.metallic = firstMesh.metallic;
+                    }
+                }
                 
-                // Roughness
+                // Roughness - edit mesh data directly
                 ImGui::Text("Roughness");
                 ImGui::SetNextItemWidth(-1);
-                ImGui::SliderFloat("##Roughness", &mat.roughness, 0.0f, 1.0f, "%.2f");
+                if (ImGui::SliderFloat("##Roughness", &firstMesh.roughness, 0.0f, 1.0f, "%.2f")) {
+                    for (auto& mesh : selected->model.meshes) {
+                        mesh.roughness = firstMesh.roughness;
+                    }
+                }
                 
-                // Ambient Occlusion
+                // AO Strength (keep in entity material for now)
+                Material& mat = *selected->material;  // Reference for advanced properties
                 ImGui::Text("AO Strength");
                 ImGui::SetNextItemWidth(-1);
                 ImGui::SliderFloat("##AO", &mat.ao, 0.0f, 1.0f, "%.2f");
@@ -1072,42 +1085,48 @@ inline void drawInspectorPanel(SceneGraph& scene, EditorState& state) {
                     ImGui::TreePop();
                 }
                 
-                // Texture slots
+                // Texture slots - show actual GPU texture status from ALL model meshes
                 if (ImGui::TreeNode("Textures")) {
-                    for (int i = 0; i < (int)TEXTURE_SLOT_COUNT; i++) {
-                        TextureSlot slot = static_cast<TextureSlot>(i);
-                        const char* slotName = Material::getSlotName(slot);
-                        
-                        ImGui::PushID(i);
-                        
-                        // Show texture status
-                        bool hasTexture = mat.hasTexture(slot);
-                        ImGui::Text("%s:", slotName);
-                        ImGui::SameLine(120);
-                        
-                        if (hasTexture) {
-                            ImGui::TextColored(ImVec4(0.4f, 0.8f, 0.4f, 1.0f), "[Loaded]");
-                        } else {
-                            ImGui::TextColored(ImVec4(0.5f, 0.5f, 0.5f, 1.0f), "[None]");
-                        }
-                        
-                        // Texture path display
-                        if (!mat.texturePaths[i].empty()) {
-                            ImGui::TextWrapped("  %s", mat.texturePaths[i].c_str());
-                        }
-                        
-                        // Drop target for texture drag & drop
-                        if (ImGui::BeginDragDropTarget()) {
-                            if (const ImGuiPayload* payload = ImGui::AcceptDragDropPayload("ASSET_PATH")) {
-                                const char* path = static_cast<const char*>(payload->Data);
-                                mat.texturePaths[i] = path;
-                                // TODO: Actually load texture
-                            }
-                            ImGui::EndDragDropTarget();
-                        }
-                        
-                        ImGui::PopID();
+                    // Count textures across all meshes
+                    int diffuseCount = 0, normalCount = 0, specularCount = 0;
+                    for (const auto& mesh : selected->model.meshes) {
+                        if (mesh.hasDiffuseTexture) diffuseCount++;
+                        if (mesh.hasNormalTexture) normalCount++;
+                        if (mesh.hasSpecularTexture) specularCount++;
                     }
+                    
+                    // Diffuse/Albedo
+                    ImGui::Text("Diffuse:");
+                    ImGui::SameLine(120);
+                    if (diffuseCount > 0) {
+                        ImGui::TextColored(ImVec4(0.4f, 0.8f, 0.4f, 1.0f), "[%d loaded]", diffuseCount);
+                    } else {
+                        ImGui::TextColored(ImVec4(0.5f, 0.5f, 0.5f, 1.0f), "[None]");
+                    }
+                    
+                    // Normal
+                    ImGui::Text("Normal:");
+                    ImGui::SameLine(120);
+                    if (normalCount > 0) {
+                        ImGui::TextColored(ImVec4(0.4f, 0.8f, 0.4f, 1.0f), "[%d loaded]", normalCount);
+                    } else {
+                        ImGui::TextColored(ImVec4(0.5f, 0.5f, 0.5f, 1.0f), "[None]");
+                    }
+                    
+                    // Specular/Metallic-Roughness
+                    ImGui::Text("Specular:");
+                    ImGui::SameLine(120);
+                    if (specularCount > 0) {
+                        ImGui::TextColored(ImVec4(0.4f, 0.8f, 0.4f, 1.0f), "[%d loaded]", specularCount);
+                    } else {
+                        ImGui::TextColored(ImVec4(0.5f, 0.5f, 0.5f, 1.0f), "[None]");
+                    }
+                    
+                    ImGui::Spacing();
+                    ImGui::TextColored(ImVec4(0.6f, 0.6f, 0.6f, 1.0f), 
+                        "Total: %d textures across %zu meshes", 
+                        selected->model.textureCount, selected->model.meshes.size());
+                    
                     ImGui::TreePop();
                 }
                 

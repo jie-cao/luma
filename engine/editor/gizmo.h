@@ -38,7 +38,7 @@ enum class GizmoAxis {
 struct GizmoColors {
     float xAxis[4] = {1.0f, 0.2f, 0.2f, 1.0f};     // Bright Red
     float yAxis[4] = {0.2f, 1.0f, 0.2f, 1.0f};     // Bright Green
-    float zAxis[4] = {0.2f, 0.4f, 1.0f, 1.0f};     // Bright Blue
+    float zAxis[4] = {0.3f, 0.6f, 1.0f, 1.0f};     // Brighter Blue (more visible)
     float hover[4] = {1.0f, 1.0f, 0.0f, 1.0f};     // Yellow (highlighted)
     float active[4] = {1.0f, 0.7f, 0.0f, 1.0f};   // Orange (active/dragging)
     float planeXY[4] = {0.2f, 0.2f, 0.9f, 0.3f};   // Blue translucent
@@ -250,7 +250,60 @@ inline GizmoAxis TransformGizmo::testHover(const Ray& ray, float screenScale) {
     Vec3 axisY(orient.m[4], orient.m[5], orient.m[6]);
     Vec3 axisZ(orient.m[8], orient.m[9], orient.m[10]);
     
-    // Test center first (for uniform scale)
+    // === ROTATE MODE: Test rotation circles (torus hit test) ===
+    if (mode_ == GizmoMode::Rotate) {
+        float torusRadius = axisLen * 0.8f;      // Major radius (circle radius)
+        float torusTube = axisLen * 0.08f;       // Minor radius (tube thickness) - generous for easier clicking
+        
+        // Test ray against torus for each axis
+        auto testRotationCircle = [&](const Vec3& normal, const Vec3& u, const Vec3& v) -> float {
+            // Intersect ray with plane
+            float denom = normal.dot(ray.direction);
+            if (std::abs(denom) < 0.0001f) return -1.0f;  // Ray parallel to plane
+            
+            Vec3 toOrigin = pos - ray.origin;
+            float t = toOrigin.dot(normal) / denom;
+            if (t < 0) return -1.0f;  // Behind camera
+            
+            // Point on plane
+            Vec3 hitPoint = ray.origin + ray.direction * t;
+            Vec3 toHit = hitPoint - pos;
+            
+            // Distance from center in the plane
+            float distFromCenter = toHit.length();
+            
+            // Check if within torus bounds (ring shape)
+            float innerRadius = torusRadius - torusTube;
+            float outerRadius = torusRadius + torusTube;
+            
+            if (distFromCenter >= innerRadius && distFromCenter <= outerRadius) {
+                return t;  // Hit!
+            }
+            return -1.0f;
+        };
+        
+        float minDist = std::numeric_limits<float>::max();
+        GizmoAxis result = GizmoAxis::None;
+        
+        // X rotation (plane normal = X axis)
+        float tX = testRotationCircle(axisX, axisY, axisZ);
+        if (tX > 0 && tX < minDist) { minDist = tX; result = GizmoAxis::X; }
+        
+        // Y rotation (plane normal = Y axis)
+        float tY = testRotationCircle(axisY, axisX, axisZ);
+        if (tY > 0 && tY < minDist) { minDist = tY; result = GizmoAxis::Y; }
+        
+        // Z rotation (plane normal = Z axis)
+        float tZ = testRotationCircle(axisZ, axisX, axisY);
+        if (tZ > 0 && tZ < minDist) { minDist = tZ; result = GizmoAxis::Z; }
+        
+        hoveredAxis_ = result;
+        return result;
+    }
+    
+    // === TRANSLATE/SCALE MODE: Test axes and center ===
+    
+    // Test center first (for uniform scale/free move)
     float centerRadius = hitRadius * 1.5f;
     AABB centerBox(pos - Vec3(centerRadius, centerRadius, centerRadius), 
                    pos + Vec3(centerRadius, centerRadius, centerRadius));
@@ -526,123 +579,275 @@ inline GizmoRenderData TransformGizmo::generateRenderData(float screenScale) con
         return baseColor;
     };
     
+    // =============================================================
+    // Professional Gizmo Design (Blender/Unreal style)
+    // =============================================================
+    
+    // Helper to generate thick line by rendering multiple offset lines
+    auto addThickLine = [&](const Vec3& start, const Vec3& end, const float* color, float thickness) {
+        Vec3 dir = (end - start);
+        float len = dir.length();
+        if (len < 0.0001f) return;
+        dir = dir / len;
+        
+        Vec3 perp1, perp2;
+        // Get perpendicular vectors for offset
+        if (std::abs(dir.y) < 0.9f) {
+            perp1 = Vec3(-dir.z, 0, dir.x).normalized();
+        } else {
+            perp1 = Vec3(1, 0, 0);
+        }
+        perp2 = dir.cross(perp1).normalized();
+        
+        // Render multiple lines with small offsets to create thickness
+        int numLines = 7;  // More lines for better thickness
+        for (int i = 0; i < numLines; i++) {
+            float offset = (float)(i - numLines/2) * thickness / numLines;
+            Vec3 offsetVec = perp1 * offset;
+            data.lines.push_back({
+                start + offsetVec,
+                end + offsetVec,
+                {color[0], color[1], color[2], color[3]}
+            });
+            // Also add perpendicular offsets for fuller appearance
+            data.lines.push_back({
+                start + perp2 * offset,
+                end + perp2 * offset,
+                {color[0], color[1], color[2], color[3]}
+            });
+        }
+    };
+    
+    // Helper to draw cone/arrowhead at the end of an axis
+    auto addArrowhead = [&](const Vec3& tip, const Vec3& dir, const Vec3& perp1, const Vec3& perp2, 
+                            const float* color, float coneLen, float coneRadius) {
+        Vec3 base = tip - dir * coneLen;
+        int segments = 8;  // Octagonal cone
+        
+        for (int i = 0; i < segments; i++) {
+            float a1 = (float)i / segments * 6.28318f;
+            float a2 = (float)(i + 1) / segments * 6.28318f;
+            
+            Vec3 p1 = base + perp1 * (std::cos(a1) * coneRadius) + perp2 * (std::sin(a1) * coneRadius);
+            Vec3 p2 = base + perp1 * (std::cos(a2) * coneRadius) + perp2 * (std::sin(a2) * coneRadius);
+            
+            // Lines from tip to base circle
+            data.lines.push_back({tip, p1, {color[0], color[1], color[2], color[3]}});
+            // Base circle
+            data.lines.push_back({p1, p2, {color[0], color[1], color[2], color[3]}});
+        }
+    };
+    
+    // Helper to draw a filled square (for plane handles)
+    auto addPlaneHandle = [&](const Vec3& corner, const Vec3& dir1, const Vec3& dir2, 
+                              const float* color, float size) {
+        Vec3 c1 = corner;
+        Vec3 c2 = corner + dir1 * size;
+        Vec3 c3 = corner + dir1 * size + dir2 * size;
+        Vec3 c4 = corner + dir2 * size;
+        
+        // Draw square outline
+        data.lines.push_back({c1, c2, {color[0], color[1], color[2], color[3]}});
+        data.lines.push_back({c2, c3, {color[0], color[1], color[2], color[3]}});
+        data.lines.push_back({c3, c4, {color[0], color[1], color[2], color[3]}});
+        data.lines.push_back({c4, c1, {color[0], color[1], color[2], color[3]}});
+        
+        // Fill with diagonal lines for visibility
+        data.lines.push_back({c1, c3, {color[0], color[1], color[2], color[3]}});
+        data.lines.push_back({c2, c4, {color[0], color[1], color[2], color[3]}});
+    };
+    
     // Generate lines based on mode
     switch (mode_) {
         case GizmoMode::Translate:
+        {
+            float lineThickness = axisLen * 0.025f;  // 2.5% of axis length
+            float arrowLen = axisLen * 0.2f;         // Arrow is 20% of axis
+            float arrowRadius = axisLen * 0.06f;     // Arrow cone radius
+            float planeOffset = axisLen * 0.25f;     // Plane handle offset from center
+            float planeSize = axisLen * 0.15f;       // Plane handle size
+            
+            // === X Axis (Red) with Arrowhead ===
+            const float* xCol = getAxisColor(GizmoAxis::X, colors_.xAxis);
+            Vec3 xShaftEnd = pos + axisX * (axisLen - arrowLen);
+            Vec3 xTip = pos + axisX * axisLen;
+            addThickLine(pos, xShaftEnd, xCol, lineThickness);
+            addArrowhead(xTip, axisX, axisY, axisZ, xCol, arrowLen, arrowRadius);
+            
+            // === Y Axis (Green) with Arrowhead ===
+            const float* yCol = getAxisColor(GizmoAxis::Y, colors_.yAxis);
+            Vec3 yShaftEnd = pos + axisY * (axisLen - arrowLen);
+            Vec3 yTip = pos + axisY * axisLen;
+            addThickLine(pos, yShaftEnd, yCol, lineThickness);
+            addArrowhead(yTip, axisY, axisX, axisZ, yCol, arrowLen, arrowRadius);
+            
+            // === Z Axis (Blue) with Arrowhead ===
+            const float* zCol = getAxisColor(GizmoAxis::Z, colors_.zAxis);
+            Vec3 zShaftEnd = pos + axisZ * (axisLen - arrowLen);
+            Vec3 zTip = pos + axisZ * axisLen;
+            addThickLine(pos, zShaftEnd, zCol, lineThickness);
+            addArrowhead(zTip, axisZ, axisX, axisY, zCol, arrowLen, arrowRadius);
+            
+            // === Plane Handles (for dual-axis movement) ===
+            // XY plane handle (at Z=0, offset along X and Y)
+            Vec3 xyCorner = pos + axisX * planeOffset + axisY * planeOffset;
+            addPlaneHandle(xyCorner, axisX * (-1.0f), axisY * (-1.0f), colors_.planeXY, planeSize);
+            
+            // XZ plane handle
+            Vec3 xzCorner = pos + axisX * planeOffset + axisZ * planeOffset;
+            addPlaneHandle(xzCorner, axisX * (-1.0f), axisZ * (-1.0f), colors_.planeXZ, planeSize);
+            
+            // YZ plane handle
+            Vec3 yzCorner = pos + axisY * planeOffset + axisZ * planeOffset;
+            addPlaneHandle(yzCorner, axisY * (-1.0f), axisZ * (-1.0f), colors_.planeYZ, planeSize);
+            
+            // === Center Box (for free move) ===
+            const float* cCol = getAxisColor(GizmoAxis::XYZ, colors_.center);
+            float s = axisLen * 0.08f;  // Small center cube
+            Vec3 corners[8] = {
+                pos + (axisX * (-s) + axisY * (-s) + axisZ * (-s)),
+                pos + (axisX * s + axisY * (-s) + axisZ * (-s)),
+                pos + (axisX * s + axisY * s + axisZ * (-s)),
+                pos + (axisX * (-s) + axisY * s + axisZ * (-s)),
+                pos + (axisX * (-s) + axisY * (-s) + axisZ * s),
+                pos + (axisX * s + axisY * (-s) + axisZ * s),
+                pos + (axisX * s + axisY * s + axisZ * s),
+                pos + (axisX * (-s) + axisY * s + axisZ * s),
+            };
+            // All 12 edges
+            data.lines.push_back({corners[0], corners[1], {cCol[0], cCol[1], cCol[2], cCol[3]}});
+            data.lines.push_back({corners[1], corners[2], {cCol[0], cCol[1], cCol[2], cCol[3]}});
+            data.lines.push_back({corners[2], corners[3], {cCol[0], cCol[1], cCol[2], cCol[3]}});
+            data.lines.push_back({corners[3], corners[0], {cCol[0], cCol[1], cCol[2], cCol[3]}});
+            data.lines.push_back({corners[4], corners[5], {cCol[0], cCol[1], cCol[2], cCol[3]}});
+            data.lines.push_back({corners[5], corners[6], {cCol[0], cCol[1], cCol[2], cCol[3]}});
+            data.lines.push_back({corners[6], corners[7], {cCol[0], cCol[1], cCol[2], cCol[3]}});
+            data.lines.push_back({corners[7], corners[4], {cCol[0], cCol[1], cCol[2], cCol[3]}});
+            data.lines.push_back({corners[0], corners[4], {cCol[0], cCol[1], cCol[2], cCol[3]}});
+            data.lines.push_back({corners[1], corners[5], {cCol[0], cCol[1], cCol[2], cCol[3]}});
+            data.lines.push_back({corners[2], corners[6], {cCol[0], cCol[1], cCol[2], cCol[3]}});
+            data.lines.push_back({corners[3], corners[7], {cCol[0], cCol[1], cCol[2], cCol[3]}});
+            break;
+        }
+        
         case GizmoMode::Scale:
         {
-            // Helper to generate thick line by rendering multiple offset lines
-            auto addThickLine = [&](const Vec3& start, const Vec3& end, const float* color, float thickness) {
-                Vec3 dir = (end - start).normalized();
-                Vec3 perp1, perp2;
-                
-                // Get perpendicular vectors for offset
-                if (std::abs(dir.y) < 0.9f) {
-                    perp1 = Vec3(-dir.z, 0, dir.x).normalized();
-                } else {
-                    perp1 = Vec3(1, 0, 0);
-                }
-                perp2 = dir.cross(perp1).normalized();
-                
-                // Render multiple lines with small offsets to create thickness
-                int numLines = 5;  // Number of lines for thickness
-                for (int i = 0; i < numLines; i++) {
-                    float offset = (float)(i - numLines/2) * thickness / numLines;
-                    Vec3 offsetVec = perp1 * offset;
-                    data.lines.push_back({
-                        start + offsetVec,
-                        end + offsetVec,
-                        {color[0], color[1], color[2], color[3]}
-                    });
-                }
+            float lineThickness = axisLen * 0.025f;
+            float cubeSize = axisLen * 0.08f;  // Small cube at axis end
+            
+            // Helper to draw cube at axis end
+            auto addEndCube = [&](const Vec3& center, const float* color, float size) {
+                Vec3 c[8] = {
+                    center + Vec3(-size, -size, -size),
+                    center + Vec3(size, -size, -size),
+                    center + Vec3(size, size, -size),
+                    center + Vec3(-size, size, -size),
+                    center + Vec3(-size, -size, size),
+                    center + Vec3(size, -size, size),
+                    center + Vec3(size, size, size),
+                    center + Vec3(-size, size, size),
+                };
+                // All edges
+                data.lines.push_back({c[0], c[1], {color[0], color[1], color[2], color[3]}});
+                data.lines.push_back({c[1], c[2], {color[0], color[1], color[2], color[3]}});
+                data.lines.push_back({c[2], c[3], {color[0], color[1], color[2], color[3]}});
+                data.lines.push_back({c[3], c[0], {color[0], color[1], color[2], color[3]}});
+                data.lines.push_back({c[4], c[5], {color[0], color[1], color[2], color[3]}});
+                data.lines.push_back({c[5], c[6], {color[0], color[1], color[2], color[3]}});
+                data.lines.push_back({c[6], c[7], {color[0], color[1], color[2], color[3]}});
+                data.lines.push_back({c[7], c[4], {color[0], color[1], color[2], color[3]}});
+                data.lines.push_back({c[0], c[4], {color[0], color[1], color[2], color[3]}});
+                data.lines.push_back({c[1], c[5], {color[0], color[1], color[2], color[3]}});
+                data.lines.push_back({c[2], c[6], {color[0], color[1], color[2], color[3]}});
+                data.lines.push_back({c[3], c[7], {color[0], color[1], color[2], color[3]}});
             };
             
-            float lineThickness = axisLen * 0.02f;  // 2% of axis length for thickness
-            
-            // X axis - bright red, thick
-            Vec3 xEnd = pos + axisX * axisLen;
+            // X axis with end cube
             const float* xCol = getAxisColor(GizmoAxis::X, colors_.xAxis);
+            Vec3 xEnd = pos + axisX * axisLen;
             addThickLine(pos, xEnd, xCol, lineThickness);
+            addEndCube(xEnd, xCol, cubeSize);
             
-            // Y axis - bright green, thick
-            Vec3 yEnd = pos + axisY * axisLen;
+            // Y axis with end cube
             const float* yCol = getAxisColor(GizmoAxis::Y, colors_.yAxis);
+            Vec3 yEnd = pos + axisY * axisLen;
             addThickLine(pos, yEnd, yCol, lineThickness);
+            addEndCube(yEnd, yCol, cubeSize);
             
-            // Z axis - bright blue, thick
-            Vec3 zEnd = pos + axisZ * axisLen;
+            // Z axis with end cube
             const float* zCol = getAxisColor(GizmoAxis::Z, colors_.zAxis);
+            Vec3 zEnd = pos + axisZ * axisLen;
             addThickLine(pos, zEnd, zCol, lineThickness);
+            addEndCube(zEnd, zCol, cubeSize);
             
-            // Center box (for uniform scale)
-            if (mode_ == GizmoMode::Scale) {
-                const float* cCol = getAxisColor(GizmoAxis::XYZ, colors_.center);
-                float s = axisLen * 0.15f;
-                // Draw small box at center
-                Vec3 corners[8] = {
-                    pos + (axisX * (-s) + axisY * (-s) + axisZ * (-s)),
-                    pos + (axisX * s + axisY * (-s) + axisZ * (-s)),
-                    pos + (axisX * s + axisY * s + axisZ * (-s)),
-                    pos + (axisX * (-s) + axisY * s + axisZ * (-s)),
-                    pos + (axisX * (-s) + axisY * (-s) + axisZ * s),
-                    pos + (axisX * s + axisY * (-s) + axisZ * s),
-                    pos + (axisX * s + axisY * s + axisZ * s),
-                    pos + (axisX * (-s) + axisY * s + axisZ * s),
-                };
-                // Bottom face
-                data.lines.push_back({corners[0], corners[1], {cCol[0], cCol[1], cCol[2], cCol[3]}});
-                data.lines.push_back({corners[1], corners[2], {cCol[0], cCol[1], cCol[2], cCol[3]}});
-                data.lines.push_back({corners[2], corners[3], {cCol[0], cCol[1], cCol[2], cCol[3]}});
-                data.lines.push_back({corners[3], corners[0], {cCol[0], cCol[1], cCol[2], cCol[3]}});
-                // Top face
-                data.lines.push_back({corners[4], corners[5], {cCol[0], cCol[1], cCol[2], cCol[3]}});
-                data.lines.push_back({corners[5], corners[6], {cCol[0], cCol[1], cCol[2], cCol[3]}});
-                data.lines.push_back({corners[6], corners[7], {cCol[0], cCol[1], cCol[2], cCol[3]}});
-                data.lines.push_back({corners[7], corners[4], {cCol[0], cCol[1], cCol[2], cCol[3]}});
-                // Vertical edges
-                data.lines.push_back({corners[0], corners[4], {cCol[0], cCol[1], cCol[2], cCol[3]}});
-                data.lines.push_back({corners[1], corners[5], {cCol[0], cCol[1], cCol[2], cCol[3]}});
-                data.lines.push_back({corners[2], corners[6], {cCol[0], cCol[1], cCol[2], cCol[3]}});
-                data.lines.push_back({corners[3], corners[7], {cCol[0], cCol[1], cCol[2], cCol[3]}});
-            }
+            // Center box for uniform scale
+            const float* cCol = getAxisColor(GizmoAxis::XYZ, colors_.center);
+            addEndCube(pos, cCol, axisLen * 0.1f);
             break;
         }
         
         case GizmoMode::Rotate:
         {
-            // Draw rotation circles
-            int segments = 32;
+            // Draw rotation circles - medium band style
+            int segments = 48;  // Smooth circles
             float radius = axisLen * 0.8f;
+            float bandWidth = axisLen * 0.035f;  // 3.5% width - balanced thickness
             
-            // X rotation (YZ plane)
+            // Draw a band using concentric rings + radial fills
+            auto addThickCircle = [&](const Vec3& center, const Vec3& u, const Vec3& v,
+                                      const float* color, float r) {
+                // Draw 3 concentric circles for band appearance
+                int numRings = 3;
+                for (int ring = 0; ring < numRings; ring++) {
+                    float rOffset = r - bandWidth + (ring * bandWidth * 2.0f / (numRings - 1));
+                    for (int i = 0; i < segments; i++) {
+                        float a1 = (float)i / segments * 6.28318f;
+                        float a2 = (float)(i + 1) / segments * 6.28318f;
+                        Vec3 p1 = center + u * (std::cos(a1) * rOffset) + v * (std::sin(a1) * rOffset);
+                        Vec3 p2 = center + u * (std::cos(a2) * rOffset) + v * (std::sin(a2) * rOffset);
+                        data.lines.push_back({p1, p2, {color[0], color[1], color[2], color[3]}});
+                    }
+                }
+                
+                // Add radial lines to fill the band (every 9 degrees = 40 spokes)
+                int numSpokes = 40;
+                for (int i = 0; i < numSpokes; i++) {
+                    float angle = (float)i / numSpokes * 6.28318f;
+                    Vec3 dir = u * std::cos(angle) + v * std::sin(angle);
+                    Vec3 inner = center + dir * (r - bandWidth);
+                    Vec3 outer = center + dir * (r + bandWidth);
+                    data.lines.push_back({inner, outer, {color[0], color[1], color[2], color[3]}});
+                }
+            };
+            
+            // X rotation (around X axis, in YZ plane) - Red
             const float* xCol = getAxisColor(GizmoAxis::X, colors_.xAxis);
-            for (int i = 0; i < segments; i++) {
-                float a1 = (float)i / segments * 6.28318f;
-                float a2 = (float)(i + 1) / segments * 6.28318f;
-                Vec3 p1 = pos + axisY * (std::cos(a1) * radius) + axisZ * (std::sin(a1) * radius);
-                Vec3 p2 = pos + axisY * (std::cos(a2) * radius) + axisZ * (std::sin(a2) * radius);
-                data.lines.push_back({p1, p2, {xCol[0], xCol[1], xCol[2], xCol[3]}});
-            }
+            addThickCircle(pos, axisY, axisZ, xCol, radius);
             
-            // Y rotation (XZ plane)
+            // Y rotation (around Y axis, in XZ plane) - Green  
             const float* yCol = getAxisColor(GizmoAxis::Y, colors_.yAxis);
-            for (int i = 0; i < segments; i++) {
-                float a1 = (float)i / segments * 6.28318f;
-                float a2 = (float)(i + 1) / segments * 6.28318f;
-                Vec3 p1 = pos + axisX * (std::cos(a1) * radius) + axisZ * (std::sin(a1) * radius);
-                Vec3 p2 = pos + axisX * (std::cos(a2) * radius) + axisZ * (std::sin(a2) * radius);
-                data.lines.push_back({p1, p2, {yCol[0], yCol[1], yCol[2], yCol[3]}});
-            }
+            addThickCircle(pos, axisX, axisZ, yCol, radius);
             
-            // Z rotation (XY plane)
+            // Z rotation (around Z axis, in XY plane) - Blue
+            // NOTE: This circle is horizontal (like ground plane)
             const float* zCol = getAxisColor(GizmoAxis::Z, colors_.zAxis);
-            for (int i = 0; i < segments; i++) {
-                float a1 = (float)i / segments * 6.28318f;
-                float a2 = (float)(i + 1) / segments * 6.28318f;
-                Vec3 p1 = pos + axisX * (std::cos(a1) * radius) + axisY * (std::sin(a1) * radius);
-                Vec3 p2 = pos + axisX * (std::cos(a2) * radius) + axisY * (std::sin(a2) * radius);
-                data.lines.push_back({p1, p2, {zCol[0], zCol[1], zCol[2], zCol[3]}});
-            }
+            addThickCircle(pos, axisX, axisY, zCol, radius);
+            
+            // Add axis indicators at the circles (small lines showing rotation direction)
+            float indicatorLen = axisLen * 0.15f;
+            // X axis indicator (at top of YZ circle)
+            Vec3 xIndicatorPos = pos + axisY * radius;
+            data.lines.push_back({xIndicatorPos, xIndicatorPos + axisX * indicatorLen, 
+                {xCol[0], xCol[1], xCol[2], xCol[3]}});
+            // Y axis indicator (at front of XZ circle)  
+            Vec3 yIndicatorPos = pos + axisX * radius;
+            data.lines.push_back({yIndicatorPos, yIndicatorPos + axisY * indicatorLen,
+                {yCol[0], yCol[1], yCol[2], yCol[3]}});
+            // Z axis indicator (at right of XY circle)
+            Vec3 zIndicatorPos = pos + axisX * radius;
+            data.lines.push_back({zIndicatorPos, zIndicatorPos + axisZ * indicatorLen,
+                {zCol[0], zCol[1], zCol[2], zCol[3]}});
+            
             break;
         }
     }

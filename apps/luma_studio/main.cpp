@@ -67,6 +67,11 @@ struct Application {
     std::string currentScenePath;
     float totalTime = 0.0f;
     
+    // Mouse click tracking for selection
+    float mouseDownX = 0.0f;
+    float mouseDownY = 0.0f;
+    bool mouseWasDown = false;
+    
     // Get scene radius for camera
     float getSceneRadius() const {
         float maxRadius = 1.0f;
@@ -227,6 +232,11 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             float mouseX = (float)GET_X_LPARAM(lParam);
             float mouseY = (float)GET_Y_LPARAM(lParam);
             
+            // Record mouse down position for click detection
+            g_app.mouseDownX = mouseX;
+            g_app.mouseDownY = mouseY;
+            g_app.mouseWasDown = true;
+            
             // Try gizmo interaction first (if not holding Alt for camera control)
             if (!altPressed && g_app.scene.getSelectedEntity()) {
                 luma::Ray ray = getMouseRay(mouseX, mouseY);
@@ -238,6 +248,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                     gizmoPos, cameraPos, 100.0f, (float)g_app.height, 3.14159f / 4.0f);
                 
                 if (g_app.gizmo.beginDrag(ray, screenScale)) {
+                    g_app.mouseWasDown = false;  // Gizmo took it
                     SetCapture(hwnd);
                     return 0;  // Gizmo captured the click
                 }
@@ -245,7 +256,10 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             
             // Otherwise, handle camera or selection
             g_app.viewport.onMouseDown(0, mouseX, mouseY, altPressed);
-            if (altPressed) SetCapture(hwnd);
+            if (altPressed) {
+                g_app.mouseWasDown = false;  // Camera control took it
+                SetCapture(hwnd);
+            }
         }
         return 0;
         
@@ -263,16 +277,43 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         }
         return 0;
         
-    case WM_LBUTTONUP:
+    case WM_LBUTTONUP: {
         // End gizmo drag
         if (g_app.gizmo.isDragging()) {
             g_app.gizmo.endDrag();
             ReleaseCapture();
+            g_app.mouseWasDown = false;
             return 0;
         }
+        
+        // Check if this was a click (not a drag) for selection
+        if (g_app.mouseWasDown && !imguiWantsMouse) {
+            float mouseX = (float)GET_X_LPARAM(lParam);
+            float mouseY = (float)GET_Y_LPARAM(lParam);
+            
+            // Consider it a click if mouse moved less than 5 pixels
+            float dx = mouseX - g_app.mouseDownX;
+            float dy = mouseY - g_app.mouseDownY;
+            float distSq = dx * dx + dy * dy;
+            
+            if (distSq < 25.0f) {
+                // Perform ray picking for selection
+                luma::Ray ray = getMouseRay(mouseX, mouseY);
+                luma::PickResult pick = luma::pickEntity(g_app.scene, ray);
+                
+                if (pick.hit()) {
+                    g_app.scene.setSelectedEntity(pick.entity);
+                } else {
+                    g_app.scene.clearSelection();
+                }
+            }
+        }
+        g_app.mouseWasDown = false;
+        
         g_app.viewport.onMouseUp(0);
         if (g_app.viewport.cameraMode == luma::CameraMode::None) ReleaseCapture();
         return 0;
+    }
         
     case WM_RBUTTONUP:
         g_app.viewport.onMouseUp(1);
@@ -401,7 +442,21 @@ static bool InitImGui() {
 static void SetupEditorCallbacks() {
     // Model load callback
     g_app.editorState.onModelLoad = [](const std::string& path) {
-        g_app.pendingModelPath = path;
+        std::string modelPath = path;
+        if (modelPath.empty()) {
+            // Open file dialog if no path provided
+            modelPath = OpenFileDialog(
+                "3D Models\0*.obj;*.fbx;*.gltf;*.glb;*.dae\0"
+                "OBJ Files (*.obj)\0*.obj\0"
+                "FBX Files (*.fbx)\0*.fbx\0"
+                "glTF Files (*.gltf;*.glb)\0*.gltf;*.glb\0"
+                "All Files (*.*)\0*.*\0"
+            );
+        }
+        if (!modelPath.empty()) {
+            g_app.pendingModelPath = modelPath;
+            g_app.editorState.consoleLogs.push_back("[INFO] Loading model: " + modelPath);
+        }
     };
     
     // Scene save callback (saves camera and post-process settings)
@@ -641,6 +696,13 @@ int main() {
         cubeModel.debugName = "primitives/cube";
         
         luma::Entity* cubeEntity = g_app.scene.createEntityWithModel("Cube", cubeModel);
+        
+        // Set default material for cube
+        cubeEntity->material = std::make_shared<luma::Material>();
+        cubeEntity->material->baseColor = {0.8f, 0.8f, 0.8f};
+        cubeEntity->material->metallic = 0.0f;
+        cubeEntity->material->roughness = 0.5f;
+        
         g_app.scene.setSelectedEntity(cubeEntity);
     }
     
@@ -683,6 +745,17 @@ int main() {
             if (animModel && g_app.renderer.loadModelAsync(g_app.pendingModelPath, newEntity->model)) {
                 newEntity->hasModel = true;
                 newEntity->model.debugName = g_app.pendingModelPath;
+                
+                // Sync material from model's first mesh to entity material
+                if (!newEntity->model.meshes.empty()) {
+                    const auto& firstMesh = newEntity->model.meshes[0];
+                    if (!newEntity->material) {
+                        newEntity->material = std::make_shared<luma::Material>();
+                    }
+                    newEntity->material->baseColor = {firstMesh.baseColor[0], firstMesh.baseColor[1], firstMesh.baseColor[2]};
+                    newEntity->material->metallic = firstMesh.metallic;
+                    newEntity->material->roughness = firstMesh.roughness;
+                }
                 
                 // Transfer skeleton and animations if present
                 if (animModel->skeleton) {

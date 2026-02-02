@@ -128,24 +128,49 @@ const aiTexture* find_embedded_texture(const aiScene* scene, const std::string& 
     // Extract just the filename from the path
     std::filesystem::path p(path);
     std::string filename = p.filename().string();
+    std::string filenameLower = filename;
+    std::transform(filenameLower.begin(), filenameLower.end(), filenameLower.begin(), ::tolower);
     
     for (unsigned int i = 0; i < scene->mNumTextures; i++) {
         const aiTexture* tex = scene->mTextures[i];
         if (!tex) continue;
         
-        // Check if embedded texture filename matches
+        // Check if embedded texture filename matches (case-insensitive)
         std::string embeddedName = tex->mFilename.C_Str();
         std::filesystem::path embeddedPath(embeddedName);
         std::string embeddedFilename = embeddedPath.filename().string();
+        std::string embeddedFilenameLower = embeddedFilename;
+        std::transform(embeddedFilenameLower.begin(), embeddedFilenameLower.end(), embeddedFilenameLower.begin(), ::tolower);
         
-        if (embeddedFilename == filename) {
+        if (embeddedFilenameLower == filenameLower || embeddedFilename == filename) {
             std::cout << "[texture] Found embedded match: " << filename << " at index " << i << std::endl;
             return tex;
         }
+        
+        // Also try partial match (filename contains or is contained)
+        if (!filename.empty() && !embeddedFilename.empty()) {
+            if (filenameLower.find(embeddedFilenameLower) != std::string::npos ||
+                embeddedFilenameLower.find(filenameLower) != std::string::npos) {
+                std::cout << "[texture] Found embedded partial match: " << filename << " ~ " << embeddedFilename << std::endl;
+                return tex;
+            }
+        }
     }
     
-    // Also try matching by index if filename is empty but we have embedded textures
-    // Return first available embedded texture as fallback
+    return nullptr;
+}
+
+// Get embedded texture by material index (fallback for FBX)
+const aiTexture* get_embedded_texture_for_material(const aiScene* scene, unsigned int materialIndex) {
+    if (!scene || scene->mNumTextures == 0) return nullptr;
+    
+    // Some FBX files store textures in order matching materials
+    // Try to find a texture that might belong to this material
+    if (materialIndex < scene->mNumTextures) {
+        std::cout << "[texture] Using embedded texture " << materialIndex << " for material " << materialIndex << std::endl;
+        return scene->mTextures[materialIndex];
+    }
+    
     return nullptr;
 }
 
@@ -282,6 +307,45 @@ Mesh process_mesh(const aiMesh* aiMesh, const aiScene* scene, Model& model) {
         for (auto type : tryTypes) {
             if (diffuseTex.pixels.empty()) {
                 diffuseTex = get_material_texture(mat, type, scene);
+            }
+        }
+        
+        // Fallback: try to use embedded texture by material index (for FBX files)
+        if (diffuseTex.pixels.empty() && scene->mNumTextures > 0) {
+            // Try to find any embedded texture that might work for this material
+            const aiTexture* embeddedTex = get_embedded_texture_for_material(scene, aiMesh->mMaterialIndex);
+            if (embeddedTex) {
+                diffuseTex = load_embedded_texture(embeddedTex);
+                std::cout << "  [fallback] Using embedded texture " << aiMesh->mMaterialIndex << " for material" << std::endl;
+            }
+            
+            // If still empty and there are embedded textures, try first available
+            if (diffuseTex.pixels.empty() && scene->mNumTextures > 0) {
+                // Scan all embedded textures and use the first one that looks like a diffuse/albedo
+                for (unsigned int ti = 0; ti < scene->mNumTextures; ti++) {
+                    const aiTexture* tex = scene->mTextures[ti];
+                    if (tex) {
+                        std::string texName = tex->mFilename.C_Str();
+                        std::string texNameLower = texName;
+                        std::transform(texNameLower.begin(), texNameLower.end(), texNameLower.begin(), ::tolower);
+                        
+                        // Check if this looks like a diffuse/albedo texture
+                        bool isDiffuse = texNameLower.find("diffuse") != std::string::npos ||
+                                        texNameLower.find("albedo") != std::string::npos ||
+                                        texNameLower.find("base") != std::string::npos ||
+                                        texNameLower.find("color") != std::string::npos ||
+                                        texNameLower.find("_d.") != std::string::npos ||
+                                        texNameLower.find("_c.") != std::string::npos;
+                        
+                        if (isDiffuse || (ti == 0 && diffuseTex.pixels.empty())) {
+                            diffuseTex = load_embedded_texture(tex);
+                            if (!diffuseTex.pixels.empty()) {
+                                std::cout << "  [scan] Found embedded diffuse: " << texName << std::endl;
+                                break;
+                            }
+                        }
+                    }
+                }
             }
         }
         
@@ -430,7 +494,9 @@ std::optional<Model> load_model(const std::string& path) {
     );
 
     if (!scene || scene->mFlags & AI_SCENE_FLAGS_INCOMPLETE || !scene->mRootNode) {
-        std::cerr << "[model] Assimp error: " << importer.GetErrorString() << std::endl;
+        const char* errStr = importer.GetErrorString();
+        std::cerr << "[model] Assimp import failed for: " << path << std::endl;
+        std::cerr << "[model] Error: " << (errStr && errStr[0] ? errStr : "(no error message)") << std::endl;
         return std::nullopt;
     }
 
@@ -762,7 +828,9 @@ std::optional<Model> load_model_with_animations(const std::string& path) {
     );
 
     if (!scene || scene->mFlags & AI_SCENE_FLAGS_INCOMPLETE || !scene->mRootNode) {
-        std::cerr << "[model] Assimp error: " << importer.GetErrorString() << std::endl;
+        const char* errStr = importer.GetErrorString();
+        std::cerr << "[model] Assimp import failed for: " << path << std::endl;
+        std::cerr << "[model] Error: " << (errStr && errStr[0] ? errStr : "(no error message)") << std::endl;
         return std::nullopt;
     }
 
