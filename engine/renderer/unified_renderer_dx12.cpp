@@ -4,6 +4,7 @@
 #if defined(_WIN32)
 
 #include "unified_renderer.h"
+#include "engine/mesh/edit_mesh.h"
 #include "engine/asset/model_loader.h"
 #include "engine/asset/async_texture_loader.h"
 #include "engine/asset/hdr_loader.h"
@@ -27,6 +28,7 @@
 #include <vector>
 #include <unordered_map>
 #include <queue>
+#include <set>
 
 #pragma comment(lib, "d3d12.lib")
 #pragma comment(lib, "dxgi.lib")
@@ -157,6 +159,11 @@ float sampleShadowPCF(float3 shadowCoord, float3 normal, float3 lDir) {
 }
 
 float4 PSMain(PSInput input) : SV_TARGET {
+    // Check for UNLIT mode: if roughness is exactly -1.0, output baseColor directly
+    if (roughness < -0.5) {
+        return float4(baseColor, 1.0);  // Direct color output - no lighting!
+    }
+    
     float4 diffuseSample = diffuseTexture.Sample(texSampler, input.uv);
     float4 normalSample = normalTexture.Sample(texSampler, input.uv);
     float4 specularSample = specularTexture.Sample(texSampler, input.uv);
@@ -338,6 +345,55 @@ float4 PSMain(PSInput input) : SV_TARGET {
 }
 )";
 
+// ===== Unlit Wireframe Shader - Direct color output, no lighting =====
+// NOTE: Must declare all textures from root signature even if unused, otherwise pipeline creation fails!
+static const char* kUnlitWireframeShaderSource = R"(
+cbuffer ConstantBuffer : register(b0) {
+    float4x4 worldViewProj;
+    float4x4 world;
+    float4x4 lightViewProj;
+    float4 lightDirAndFlags;
+    float4 cameraPosAndMetal;
+    float4 baseColorAndRough;  // xyz = wireframe color
+    float4 shadowParams;
+    float4 iblParams;
+};
+
+// Declare all textures from root signature (required for compatibility)
+Texture2D diffuseTexture : register(t0);
+Texture2D normalTexture : register(t1);
+Texture2D specularTexture : register(t2);
+Texture2D shadowMap : register(t3);
+TextureCube irradianceMap : register(t4);
+TextureCube prefilteredMap : register(t5);
+Texture2D brdfLUT : register(t6);
+SamplerState texSampler : register(s0);
+SamplerComparisonState shadowSampler : register(s1);
+
+struct VSInput {
+    float3 position : POSITION;
+    float3 normal : NORMAL;
+    float4 tangent : TANGENT;
+    float2 uv : TEXCOORD;
+    float3 color : COLOR;
+};
+
+struct PSInput {
+    float4 position : SV_POSITION;
+};
+
+PSInput VSMain(VSInput input) {
+    PSInput output;
+    output.position = mul(worldViewProj, float4(input.position, 1.0));
+    return output;
+}
+
+float4 PSMain(PSInput input) : SV_TARGET {
+    // Direct output of baseColor - no lighting calculation!
+    return float4(baseColorAndRough.xyz, 1.0);
+}
+)";
+
 // ===== Shader Loading Helper =====
 static std::string loadShaderFile(const std::string& path) {
     std::ifstream file(path);
@@ -497,6 +553,10 @@ struct UnifiedRenderer::Impl {
     ComPtr<ID3D12PipelineState> pipelineState;
     ComPtr<ID3D12PipelineState> linePipelineState;
     ComPtr<ID3D12PipelineState> gizmoPipelineState;  // Gizmo pipeline with always-visible depth test
+    ComPtr<ID3D12PipelineState> wireframePipelineState;  // Wireframe rendering pipeline
+    ComPtr<ID3D12PipelineState> highlightPipelineState;  // Mesh highlight pipeline (always visible, no depth test)
+    ComPtr<ID3D12PipelineState> unlitWireframePipelineState;  // Unlit wireframe - solid color, no lighting
+    ComPtr<ID3D12PipelineState> overlayWireframePipelineState;  // Overlay wireframe - normal depth test, depth bias
     ComPtr<ID3D12Resource> constantBuffer;
     ComPtr<ID3D12Resource> defaultTexture;
     
@@ -512,8 +572,13 @@ struct UnifiedRenderer::Impl {
     // Gizmo - persistent vertex buffer to avoid per-frame allocation issues
     ComPtr<ID3D12Resource> gizmoVertexBuffer;
     D3D12_VERTEX_BUFFER_VIEW gizmoVbv{};
-    static constexpr UINT kMaxGizmoVertices = 16384;  // Large buffer for thick rotation circles
+    static constexpr UINT kMaxGizmoVertices = 65536;  // Large buffer for thick rotation circles and mesh wireframes
     void* gizmoVbMapped = nullptr;
+    
+    // Edit mode wireframe - separate buffer from gizmo to avoid conflicts
+    ComPtr<ID3D12Resource> editWireframeBuffer;
+    D3D12_VERTEX_BUFFER_VIEW editWireframeVbv{};
+    void* editWireframeMapped = nullptr;
     
     // Sync
     HANDLE fenceEvent = nullptr;
@@ -748,6 +813,8 @@ struct UnifiedRenderer::Impl {
     }
     
     void createPipeline() {
+        printf("[INIT] createPipeline() called\n");
+        fflush(stdout);
         // Root signature: CBV + 7 SRV tables (diffuse, normal, specular, shadow, irradiance, prefiltered, brdfLUT) + 2 samplers
         D3D12_DESCRIPTOR_RANGE srvRanges[7]{};
         for (int i = 0; i < 7; i++) {
@@ -941,12 +1008,107 @@ struct UnifiedRenderer::Impl {
         psoDesc.SampleDesc.Count = 1;
         device->CreateGraphicsPipelineState(&psoDesc, IID_PPV_ARGS(&linePipelineState));
         
-        // Create gizmo pipeline - always visible (ALWAYS depth test, no depth write)
-        psoDesc.DepthStencilState.DepthFunc = D3D12_COMPARISON_FUNC_ALWAYS;  // Always pass depth test
-        psoDesc.RasterizerState.DepthBias = -1000;  // Depth bias to bring gizmo slightly forward
+        // Create gizmo pipeline - always visible (depth test DISABLED)
+        psoDesc.DepthStencilState.DepthEnable = FALSE;  // Completely disable depth test
+        psoDesc.DepthStencilState.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ZERO;
+        psoDesc.RasterizerState.DepthBias = 0;
         psoDesc.RasterizerState.DepthBiasClamp = 0.0f;
         psoDesc.RasterizerState.SlopeScaledDepthBias = 0.0f;
         device->CreateGraphicsPipelineState(&psoDesc, IID_PPV_ARGS(&gizmoPipelineState));
+        
+        // Create wireframe pipeline (same as main pipeline but with D3D12_FILL_MODE_WIREFRAME)
+        D3D12_GRAPHICS_PIPELINE_STATE_DESC wirePsoDesc = psoDesc;  // Copy from main pipeline
+        wirePsoDesc.RasterizerState.FillMode = D3D12_FILL_MODE_WIREFRAME;  // WIREFRAME!
+        wirePsoDesc.RasterizerState.AntialiasedLineEnable = TRUE;
+        wirePsoDesc.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;  // Show all edges
+        wirePsoDesc.RasterizerState.DepthBias = -1000;  // Bring wireframe forward
+        wirePsoDesc.RasterizerState.DepthBiasClamp = 0.0f;
+        wirePsoDesc.RasterizerState.SlopeScaledDepthBias = -1.0f;
+        wirePsoDesc.BlendState.RenderTarget[0].BlendEnable = FALSE;
+        device->CreateGraphicsPipelineState(&wirePsoDesc, IID_PPV_ARGS(&wireframePipelineState));
+        
+        // Create highlight pipeline for selected mesh (always visible, like Maya/Blender)
+        D3D12_GRAPHICS_PIPELINE_STATE_DESC highlightPsoDesc = wirePsoDesc;  // Start from wireframe
+        highlightPsoDesc.DepthStencilState.DepthEnable = TRUE;
+        highlightPsoDesc.DepthStencilState.DepthFunc = D3D12_COMPARISON_FUNC_ALWAYS;  // Always pass - draw on top!
+        highlightPsoDesc.DepthStencilState.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ZERO;  // Don't write depth
+        highlightPsoDesc.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;  // No culling - show ALL wireframe lines!
+        highlightPsoDesc.RasterizerState.DepthBias = 0;
+        highlightPsoDesc.RasterizerState.DepthBiasClamp = 0.0f;
+        highlightPsoDesc.RasterizerState.SlopeScaledDepthBias = 0.0f;
+        device->CreateGraphicsPipelineState(&highlightPsoDesc, IID_PPV_ARGS(&highlightPipelineState));
+        
+        // Create unlit wireframe pipeline - solid color output, no lighting (for mesh highlight)
+        {
+            ComPtr<ID3DBlob> unlitVs, unlitPs, unlitErr;
+            HRESULT vsHr = D3DCompile(kUnlitWireframeShaderSource, strlen(kUnlitWireframeShaderSource), "unlit.hlsl", nullptr, nullptr,
+                       "VSMain", "vs_5_0", flags, 0, &unlitVs, &unlitErr);
+            printf("[INIT] Unlit VS compile: hr=%08X\n", (unsigned)vsHr);
+            if (unlitErr) { std::cerr << "[unlit] VS error: " << (char*)unlitErr->GetBufferPointer() << std::endl; unlitErr.Reset(); }
+            
+            HRESULT psHr = D3DCompile(kUnlitWireframeShaderSource, strlen(kUnlitWireframeShaderSource), "unlit.hlsl", nullptr, nullptr,
+                       "PSMain", "ps_5_0", flags, 0, &unlitPs, &unlitErr);
+            printf("[INIT] Unlit PS compile: hr=%08X\n", (unsigned)psHr);
+            if (unlitErr) { std::cerr << "[unlit] PS error: " << (char*)unlitErr->GetBufferPointer() << std::endl; unlitErr.Reset(); }
+            
+            printf("[INIT] Checking unlit shaders: unlitVs=%p, unlitPs=%p\n", (void*)unlitVs.Get(), (void*)unlitPs.Get());
+            fflush(stdout);
+            if (unlitVs && unlitPs) {
+                printf("[INIT] Creating unlit pipeline states...\n");
+                fflush(stdout);
+                
+                // Define input layout for unlit shader (must be local to this scope)
+                D3D12_INPUT_ELEMENT_DESC unlitInputLayout[] = {
+                    {"POSITION", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 0, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0},
+                    {"NORMAL", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 12, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0},
+                    {"TANGENT", 0, DXGI_FORMAT_R32G32B32A32_FLOAT, 0, 24, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0},
+                    {"TEXCOORD", 0, DXGI_FORMAT_R32G32_FLOAT, 0, 40, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0},
+                    {"COLOR", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 48, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0},
+                };
+                
+                // Create fresh pipeline state description from scratch
+                D3D12_GRAPHICS_PIPELINE_STATE_DESC unlitPsoDesc{};
+                unlitPsoDesc.pRootSignature = rootSignature.Get();
+                unlitPsoDesc.VS = { unlitVs->GetBufferPointer(), unlitVs->GetBufferSize() };
+                unlitPsoDesc.PS = { unlitPs->GetBufferPointer(), unlitPs->GetBufferSize() };
+                unlitPsoDesc.InputLayout = { unlitInputLayout, _countof(unlitInputLayout) };
+                unlitPsoDesc.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+                unlitPsoDesc.NumRenderTargets = 1;
+                unlitPsoDesc.RTVFormats[0] = DXGI_FORMAT_R8G8B8A8_UNORM;
+                unlitPsoDesc.DSVFormat = DXGI_FORMAT_D32_FLOAT;
+                unlitPsoDesc.SampleDesc.Count = 1;
+                unlitPsoDesc.SampleMask = UINT_MAX;
+                
+                // Rasterizer for wireframe
+                unlitPsoDesc.RasterizerState.FillMode = D3D12_FILL_MODE_WIREFRAME;
+                unlitPsoDesc.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
+                unlitPsoDesc.RasterizerState.DepthClipEnable = TRUE;
+                unlitPsoDesc.RasterizerState.AntialiasedLineEnable = TRUE;
+                unlitPsoDesc.RasterizerState.DepthBias = 0;
+                unlitPsoDesc.RasterizerState.DepthBiasClamp = 0.0f;
+                unlitPsoDesc.RasterizerState.SlopeScaledDepthBias = 0.0f;
+                
+                // Depth state - always pass (draw on top of everything)
+                unlitPsoDesc.DepthStencilState.DepthEnable = TRUE;
+                unlitPsoDesc.DepthStencilState.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ZERO;
+                unlitPsoDesc.DepthStencilState.DepthFunc = D3D12_COMPARISON_FUNC_ALWAYS;
+                
+                // No blending
+                unlitPsoDesc.BlendState.RenderTarget[0].RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
+                
+                HRESULT hr1 = device->CreateGraphicsPipelineState(&unlitPsoDesc, IID_PPV_ARGS(&unlitWireframePipelineState));
+                printf("[INIT] unlitWireframePipelineState: hr=%08X, ptr=%p\n", (unsigned)hr1, (void*)unlitWireframePipelineState.Get());
+                
+                // Create overlay wireframe pipeline - normal depth test with bias
+                D3D12_GRAPHICS_PIPELINE_STATE_DESC overlayPsoDesc = unlitPsoDesc;
+                overlayPsoDesc.DepthStencilState.DepthFunc = D3D12_COMPARISON_FUNC_LESS_EQUAL;
+                overlayPsoDesc.RasterizerState.DepthBias = -1000;  // Bring wireframe forward
+                HRESULT hr2 = device->CreateGraphicsPipelineState(&overlayPsoDesc, IID_PPV_ARGS(&overlayWireframePipelineState));
+                printf("[INIT] overlayWireframePipelineState: hr=%08X, ptr=%p\n", (unsigned)hr2, (void*)overlayWireframePipelineState.Get());
+            } else {
+                printf("[ERROR] Unlit shader compilation failed - unlitVs=%p, unlitPs=%p\n", (void*)unlitVs.Get(), (void*)unlitPs.Get());
+            }
+        }
         
         createGridData();
         createSkinnedPipeline();
@@ -2015,11 +2177,39 @@ void UnifiedRenderer::resize(uint32_t width, uint32_t height) {
 
 RHIGPUMesh UnifiedRenderer::uploadMesh(const Mesh& mesh) {
     RHIGPUMesh gpu;
+    gpu.name = mesh.name;  // Copy mesh name
     gpu.indexCount = static_cast<uint32_t>(mesh.indices.size());
     gpu.meshIndex = static_cast<uint32_t>(impl_->meshStorage.size());
     memcpy(gpu.baseColor, mesh.baseColor, sizeof(mesh.baseColor));
     gpu.metallic = mesh.metallic;
     gpu.roughness = mesh.roughness;
+    
+    // Build original edges from originalFaces (for quad/ngon wireframe display)
+    if (mesh.hasOriginalFaces && !mesh.originalFaces.empty()) {
+        std::set<std::pair<uint32_t, uint32_t>> uniqueEdges;
+        
+        for (const auto& face : mesh.originalFaces) {
+            for (size_t i = 0; i < face.vertexIndices.size(); i++) {
+                uint32_t v0 = face.vertexIndices[i];
+                uint32_t v1 = face.vertexIndices[(i + 1) % face.vertexIndices.size()];
+                
+                // Normalize edge direction for deduplication
+                if (v0 > v1) std::swap(v0, v1);
+                uniqueEdges.insert({v0, v1});
+            }
+        }
+        
+        for (const auto& edge : uniqueEdges) {
+            gpu.originalEdges.push_back({edge.first, edge.second});
+        }
+        gpu.hasOriginalEdges = !gpu.originalEdges.empty();
+        
+        if (gpu.hasOriginalEdges) {
+            std::cout << "[mesh] Built " << gpu.originalEdges.size() 
+                      << " original edges from " << mesh.originalFaces.size() 
+                      << " original faces" << std::endl;
+        }
+    }
     
     DX12MeshData dx12Mesh;
     dx12Mesh.indexCount = gpu.indexCount;
@@ -2101,7 +2291,8 @@ bool UnifiedRenderer::loadModel(const std::string& path, RHILoadedModel& outMode
 bool UnifiedRenderer::loadModelAsync(const std::string& path, RHILoadedModel& outModel) {
     std::cout << "[unified/dx12] Loading model (progressive): " << path << std::endl;
     
-    auto result = load_model(path);
+    // Use load_model_with_animations to get skinning data for edit mode wireframe
+    auto result = load_model_with_animations(path);
     if (!result) return false;
     
     outModel.meshes.clear();
@@ -2117,13 +2308,59 @@ bool UnifiedRenderer::loadModelAsync(const std::string& path, RHILoadedModel& ou
     }
     impl_->asyncTexturesLoaded = 0;
     
-    for (const auto& mesh : result->meshes) {
+    for (size_t mi = 0; mi < result->meshes.size(); mi++) {
+        const auto& mesh = result->meshes[mi];
         RHIGPUMesh gpu;
+        gpu.name = mesh.name;  // Copy mesh name
+        std::cout << "[async] Mesh " << mi << " name: '" << mesh.name 
+                  << "' verts: " << mesh.vertices.size() 
+                  << " hasSkinning: " << (mesh.hasSkeleton ? "yes" : "no") << std::endl;
         gpu.indexCount = static_cast<uint32_t>(mesh.indices.size());
         gpu.meshIndex = static_cast<uint32_t>(impl_->meshStorage.size());
         memcpy(gpu.baseColor, mesh.baseColor, sizeof(mesh.baseColor));
         gpu.metallic = mesh.metallic;
         gpu.roughness = mesh.roughness;
+        
+        // Build original edges from originalFaces (for quad/ngon wireframe display)
+        if (mesh.hasOriginalFaces && !mesh.originalFaces.empty()) {
+            std::set<std::pair<uint32_t, uint32_t>> uniqueEdges;
+            
+            for (const auto& face : mesh.originalFaces) {
+                for (size_t i = 0; i < face.vertexIndices.size(); i++) {
+                    uint32_t v0 = face.vertexIndices[i];
+                    uint32_t v1 = face.vertexIndices[(i + 1) % face.vertexIndices.size()];
+                    
+                    // Normalize edge direction for deduplication
+                    if (v0 > v1) std::swap(v0, v1);
+                    uniqueEdges.insert({v0, v1});
+                }
+            }
+            
+            for (const auto& edge : uniqueEdges) {
+                gpu.originalEdges.push_back({edge.first, edge.second});
+            }
+            gpu.hasOriginalEdges = !gpu.originalEdges.empty();
+            
+            // Also store original faces for edit mode
+            for (const auto& srcFace : mesh.originalFaces) {
+                RHIGPUMesh::GPUOriginalFace gpuFace;
+                gpuFace.vertexIndices = srcFace.vertexIndices;
+                gpu.originalFaces.push_back(gpuFace);
+            }
+            gpu.hasOriginalFaces = !gpu.originalFaces.empty();
+            
+            if (gpu.hasOriginalEdges) {
+                std::cout << "[async] Built " << gpu.originalEdges.size() 
+                          << " original edges, " << gpu.originalFaces.size()
+                          << " original faces for mesh " << gpu.meshIndex << std::endl;
+            }
+        }
+        
+        // Copy skinned vertices for CPU skinning in edit mode
+        if (mesh.hasSkeleton && !mesh.skinnedVertices.empty()) {
+            gpu.skinnedVertices = mesh.skinnedVertices;
+            gpu.hasSkinning = true;
+        }
         
         DX12MeshData dx12Mesh;
         dx12Mesh.indexCount = gpu.indexCount;
@@ -2206,6 +2443,149 @@ bool UnifiedRenderer::loadModelAsync(const std::string& path, RHILoadedModel& ou
     return true;
 }
 
+bool UnifiedRenderer::loadModelAsync(const std::string& path, RHILoadedModel& outModel, Model& outSourceModel) {
+    std::cout << "[unified/dx12] Loading model with source data: " << path << std::endl;
+    
+    // Use load_model_with_animations to get full data including skeleton/animations
+    auto result = load_model_with_animations(path);
+    if (!result) return false;
+    
+    outModel.meshes.clear();
+    outModel.textureCount = 0;
+    outModel.meshStorageStartIndex = impl_->meshStorage.size();
+    
+    // Count total textures for progress tracking
+    size_t totalTextures = 0;
+    for (const auto& mesh : result->meshes) {
+        if (!mesh.diffuseTexture.pixels.empty()) totalTextures++;
+        if (!mesh.normalTexture.pixels.empty()) totalTextures++;
+        if (!mesh.specularTexture.pixels.empty()) totalTextures++;
+    }
+    impl_->asyncTexturesLoaded = 0;
+    
+    for (size_t mi = 0; mi < result->meshes.size(); mi++) {
+        const auto& mesh = result->meshes[mi];
+        RHIGPUMesh gpu;
+        gpu.name = mesh.name;
+        gpu.indexCount = static_cast<uint32_t>(mesh.indices.size());
+        gpu.meshIndex = static_cast<uint32_t>(impl_->meshStorage.size());
+        memcpy(gpu.baseColor, mesh.baseColor, sizeof(mesh.baseColor));
+        gpu.metallic = mesh.metallic;
+        gpu.roughness = mesh.roughness;
+        
+        // Build original edges from originalFaces
+        if (mesh.hasOriginalFaces && !mesh.originalFaces.empty()) {
+            std::set<std::pair<uint32_t, uint32_t>> uniqueEdges;
+            for (const auto& face : mesh.originalFaces) {
+                for (size_t i = 0; i < face.vertexIndices.size(); i++) {
+                    uint32_t v0 = face.vertexIndices[i];
+                    uint32_t v1 = face.vertexIndices[(i + 1) % face.vertexIndices.size()];
+                    if (v0 > v1) std::swap(v0, v1);
+                    uniqueEdges.insert({v0, v1});
+                }
+            }
+            for (const auto& edge : uniqueEdges) {
+                gpu.originalEdges.push_back({edge.first, edge.second});
+            }
+            gpu.hasOriginalEdges = !gpu.originalEdges.empty();
+            
+            for (const auto& srcFace : mesh.originalFaces) {
+                RHIGPUMesh::GPUOriginalFace gpuFace;
+                gpuFace.vertexIndices = srcFace.vertexIndices;
+                gpu.originalFaces.push_back(gpuFace);
+            }
+            gpu.hasOriginalFaces = !gpu.originalFaces.empty();
+        }
+        
+        // Copy skinned vertices for CPU skinning in edit mode
+        if (mesh.hasSkeleton && !mesh.skinnedVertices.empty()) {
+            gpu.skinnedVertices = mesh.skinnedVertices;
+            gpu.hasSkinning = true;
+        }
+        
+        DX12MeshData dx12Mesh;
+        dx12Mesh.indexCount = gpu.indexCount;
+        memcpy(dx12Mesh.baseColor, mesh.baseColor, sizeof(mesh.baseColor));
+        dx12Mesh.metallic = mesh.metallic;
+        dx12Mesh.roughness = mesh.roughness;
+        
+        // Upload vertex/index buffers
+        const UINT vbSize = static_cast<UINT>(mesh.vertices.size() * sizeof(Vertex));
+        const UINT ibSize = static_cast<UINT>(mesh.indices.size() * sizeof(uint32_t));
+        
+        D3D12_HEAP_PROPERTIES heapProps{}; heapProps.Type = D3D12_HEAP_TYPE_UPLOAD;
+        D3D12_RESOURCE_DESC bufDesc{}; bufDesc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+        bufDesc.Width = vbSize; bufDesc.Height = 1; bufDesc.DepthOrArraySize = 1; bufDesc.MipLevels = 1;
+        bufDesc.SampleDesc.Count = 1; bufDesc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+        impl_->device->CreateCommittedResource(&heapProps, D3D12_HEAP_FLAG_NONE, &bufDesc, 
+            D3D12_RESOURCE_STATE_GENERIC_READ, nullptr, IID_PPV_ARGS(&dx12Mesh.vertexBuffer));
+        void* mapped;
+        dx12Mesh.vertexBuffer->Map(0, nullptr, &mapped);
+        memcpy(mapped, mesh.vertices.data(), vbSize);
+        dx12Mesh.vertexBuffer->Unmap(0, nullptr);
+        dx12Mesh.vbv.BufferLocation = dx12Mesh.vertexBuffer->GetGPUVirtualAddress();
+        dx12Mesh.vbv.SizeInBytes = vbSize;
+        dx12Mesh.vbv.StrideInBytes = sizeof(Vertex);
+        
+        bufDesc.Width = ibSize;
+        impl_->device->CreateCommittedResource(&heapProps, D3D12_HEAP_FLAG_NONE, &bufDesc, 
+            D3D12_RESOURCE_STATE_GENERIC_READ, nullptr, IID_PPV_ARGS(&dx12Mesh.indexBuffer));
+        dx12Mesh.indexBuffer->Map(0, nullptr, &mapped);
+        memcpy(mapped, mesh.indices.data(), ibSize);
+        dx12Mesh.indexBuffer->Unmap(0, nullptr);
+        dx12Mesh.ibv.BufferLocation = dx12Mesh.indexBuffer->GetGPUVirtualAddress();
+        dx12Mesh.ibv.SizeInBytes = ibSize;
+        dx12Mesh.ibv.Format = DXGI_FORMAT_R32_UINT;
+        
+        // Use default textures initially, queue for background upload
+        dx12Mesh.diffuseTexture = impl_->defaultTexture;
+        dx12Mesh.diffuseSrvIndex = impl_->defaultTextureSrvIndex;
+        dx12Mesh.normalTexture = impl_->defaultTexture;
+        dx12Mesh.normalSrvIndex = impl_->defaultTextureSrvIndex;
+        dx12Mesh.specularTexture = impl_->defaultTexture;
+        dx12Mesh.specularSrvIndex = impl_->defaultTextureSrvIndex;
+        
+        uint32_t meshIdx = static_cast<uint32_t>(impl_->meshStorage.size());
+        
+        // Queue textures for progressive upload
+        if (!mesh.diffuseTexture.pixels.empty()) {
+            impl_->textureUploadQueue.push({meshIdx, 0, mesh.diffuseTexture});
+            gpu.hasDiffuseTexture = true;
+            outModel.textureCount++;
+        }
+        if (!mesh.normalTexture.pixels.empty()) {
+            impl_->textureUploadQueue.push({meshIdx, 1, mesh.normalTexture});
+            gpu.hasNormalTexture = true;
+        }
+        if (!mesh.specularTexture.pixels.empty()) {
+            impl_->textureUploadQueue.push({meshIdx, 2, mesh.specularTexture});
+            gpu.hasSpecularTexture = true;
+        }
+        
+        impl_->meshStorage.push_back(std::move(dx12Mesh));
+        outModel.meshes.push_back(gpu);
+    }
+    
+    outModel.center[0] = (result->minBounds[0] + result->maxBounds[0]) / 2.0f;
+    outModel.center[1] = (result->minBounds[1] + result->maxBounds[1]) / 2.0f;
+    outModel.center[2] = (result->minBounds[2] + result->maxBounds[2]) / 2.0f;
+    
+    float dx = result->maxBounds[0] - result->minBounds[0];
+    float dy = result->maxBounds[1] - result->minBounds[1];
+    float dz = result->maxBounds[2] - result->minBounds[2];
+    outModel.radius = sqrtf(dx*dx + dy*dy + dz*dz) / 2.0f;
+    
+    outModel.name = path.substr(path.find_last_of("/\\") + 1);
+    outModel.totalVerts = result->totalVertices;
+    outModel.totalTris = result->totalTriangles;
+    
+    // Move source model data to output (skeleton, animations, etc.)
+    outSourceModel = std::move(*result);
+    
+    std::cout << "[unified/dx12] Model loaded with source: " << outModel.meshes.size() << " meshes" << std::endl;
+    return true;
+}
+
 void UnifiedRenderer::processAsyncTextures() {
     // Process progressive texture upload queue (limit uploads per frame for smooth rendering)
     const int maxUploadsPerFrame = 2;  // Upload up to 2 textures per frame
@@ -2218,28 +2598,28 @@ void UnifiedRenderer::processAsyncTextures() {
         if (job.meshIndex >= impl_->meshStorage.size()) continue;
         if (job.data.pixels.empty()) continue;
         
-        UINT srvIndex;
+            UINT srvIndex;
         ComPtr<ID3D12Resource> texture = impl_->uploadTexture(job.data, srvIndex);
         
         DX12MeshData& mesh = impl_->meshStorage[job.meshIndex];
         const char* slotName = job.slot == 0 ? "diffuse" : (job.slot == 1 ? "normal" : "specular");
         
         switch (job.slot) {
-            case 0:  // diffuse
-                mesh.diffuseTexture = texture;
-                mesh.diffuseSrvIndex = srvIndex;
-                break;
-            case 1:  // normal
-                mesh.normalTexture = texture;
-                mesh.normalSrvIndex = srvIndex;
-                break;
-            case 2:  // specular
-                mesh.specularTexture = texture;
-                mesh.specularSrvIndex = srvIndex;
-                break;
-        }
+                case 0:  // diffuse
+                    mesh.diffuseTexture = texture;
+                    mesh.diffuseSrvIndex = srvIndex;
+                    break;
+                case 1:  // normal
+                    mesh.normalTexture = texture;
+                    mesh.normalSrvIndex = srvIndex;
+                    break;
+                case 2:  // specular
+                    mesh.specularTexture = texture;
+                    mesh.specularSrvIndex = srvIndex;
+                    break;
+            }
         
-        impl_->asyncTexturesLoaded++;
+            impl_->asyncTexturesLoaded++;
         uploadsThisFrame++;
         
         std::cout << "[progressive] Uploaded " << slotName << " (" 
@@ -2489,6 +2869,18 @@ void UnifiedRenderer::setCamera(const RHICameraParams& camera, float sceneRadius
     impl_->cameraSet = true;
 }
 
+void UnifiedRenderer::getViewMatrix(float* outMatrix16) const {
+    if (impl_ && impl_->cameraSet) {
+        memcpy(outMatrix16, impl_->viewMatrix, sizeof(float) * 16);
+    }
+}
+
+void UnifiedRenderer::getProjectionMatrix(float* outMatrix16) const {
+    if (impl_ && impl_->cameraSet) {
+        memcpy(outMatrix16, impl_->projMatrix, sizeof(float) * 16);
+    }
+}
+
 void UnifiedRenderer::renderModel(const RHILoadedModel& model, const float* worldMatrix) {
     if (!impl_->ready || model.meshes.empty() || !impl_->cameraSet) return;
     
@@ -2675,6 +3067,621 @@ void UnifiedRenderer::renderModelOutline(const RHILoadedModel& model, const floa
     renderModel(model, worldMatrix);
 }
 
+void UnifiedRenderer::renderModelWithHighlight(const RHILoadedModel& model, const float* worldMatrix, 
+                                                int highlightMeshIndex, const float* highlightColor) {
+    if (!impl_->ready || model.meshes.empty() || !impl_->cameraSet) return;
+    if (!impl_->unlitWireframePipelineState) return;  // Need unlit pipeline
+    
+    // Use UNLIT WIREFRAME pipeline - guarantees pure color output (no lighting!)
+    impl_->cmdList->SetGraphicsRootSignature(impl_->rootSignature.Get());
+    impl_->cmdList->SetPipelineState(impl_->unlitWireframePipelineState.Get());  // UNLIT!
+    
+    ID3D12DescriptorHeap* heaps[] = { impl_->srvHeap.Get() };
+    impl_->cmdList->SetDescriptorHeaps(1, heaps);
+    
+    float wvp[16];
+    math::multiply(wvp, worldMatrix, impl_->viewMatrix);
+    math::multiply(wvp, wvp, impl_->projMatrix);
+    
+    memcpy(impl_->constants.worldViewProj, wvp, sizeof(wvp));
+    memcpy(impl_->constants.world, worldMatrix, 64);
+    memcpy(impl_->constants.lightViewProj, impl_->lightViewProj, 64);
+    
+    impl_->constants.lightDirAndFlags[0] = 0.5f;
+    impl_->constants.lightDirAndFlags[1] = -0.7f;
+    impl_->constants.lightDirAndFlags[2] = -0.5f;
+    impl_->constants.cameraPosAndMetal[0] = impl_->cameraPos[0];
+    impl_->constants.cameraPosAndMetal[1] = impl_->cameraPos[1];
+    impl_->constants.cameraPosAndMetal[2] = impl_->cameraPos[2];
+    
+    impl_->constants.shadowParams[0] = impl_->shadowSettings.bias;
+    impl_->constants.shadowParams[1] = impl_->shadowSettings.normalBias;
+    impl_->constants.shadowParams[2] = impl_->shadowSettings.softness;
+    impl_->constants.shadowParams[3] = impl_->shadowSettings.enabled && impl_->shadowMapReady ? 1.0f : 0.0f;
+    
+    impl_->constants.iblParams[0] = impl_->iblSettings.intensity;
+    impl_->constants.iblParams[1] = impl_->iblSettings.rotation;
+    impl_->constants.iblParams[2] = static_cast<float>(impl_->iblSettings.prefilteredMips - 1);
+    impl_->constants.iblParams[3] = impl_->iblSettings.enabled && impl_->iblReady ? 1.0f : 0.0f;
+    
+    impl_->cmdList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    
+    D3D12_GPU_DESCRIPTOR_HANDLE srvGpuStart = impl_->srvHeap->GetGPUDescriptorHandleForHeapStart();
+    
+    for (size_t i = 0; i < model.meshes.size(); ++i) {
+        const auto& gpu = model.meshes[i];
+        if (gpu.meshIndex >= impl_->meshStorage.size()) continue;
+        const auto& dx12Mesh = impl_->meshStorage[gpu.meshIndex];
+        
+        // Check if this mesh is highlighted - use UNLIT mode for all!
+        bool isHighlighted = (static_cast<int>(i) == highlightMeshIndex);
+        
+        if (isHighlighted && highlightColor) {
+            // Highlighted mesh = ORANGE
+            impl_->constants.baseColorAndRough[0] = 1.0f;   // R
+            impl_->constants.baseColorAndRough[1] = 0.5f;   // G  
+            impl_->constants.baseColorAndRough[2] = 0.0f;   // B
+        } else {
+            // Other meshes = GRAY
+            impl_->constants.baseColorAndRough[0] = 0.4f;
+            impl_->constants.baseColorAndRough[1] = 0.4f;
+            impl_->constants.baseColorAndRough[2] = 0.4f;
+        }
+        // UNLIT mode: roughness = -1.0 triggers direct color output in shader
+        impl_->constants.baseColorAndRough[3] = -1.0f;
+        impl_->constants.cameraPosAndMetal[3] = 0.0f;
+        impl_->constants.lightDirAndFlags[3] = 0;  // No textures
+        
+        // Write to ring buffer
+        UINT drawOffset = impl_->currentDrawIndex * Impl::kAlignedConstantSize;
+        memcpy(impl_->constantBufferMapped + drawOffset, &impl_->constants, sizeof(impl_->constants));
+        
+        D3D12_GPU_VIRTUAL_ADDRESS cbAddr = impl_->constantBuffer->GetGPUVirtualAddress() + drawOffset;
+        impl_->cmdList->SetGraphicsRootConstantBufferView(0, cbAddr);
+        impl_->currentDrawIndex++;
+        
+        D3D12_GPU_DESCRIPTOR_HANDLE srv;
+        srv = srvGpuStart; srv.ptr += dx12Mesh.diffuseSrvIndex * impl_->srvDescSize;
+        impl_->cmdList->SetGraphicsRootDescriptorTable(1, srv);
+        srv = srvGpuStart; srv.ptr += dx12Mesh.normalSrvIndex * impl_->srvDescSize;
+        impl_->cmdList->SetGraphicsRootDescriptorTable(2, srv);
+        srv = srvGpuStart; srv.ptr += dx12Mesh.specularSrvIndex * impl_->srvDescSize;
+        impl_->cmdList->SetGraphicsRootDescriptorTable(3, srv);
+        srv = srvGpuStart; srv.ptr += impl_->shadowMapSrvIndex * impl_->srvDescSize;
+        impl_->cmdList->SetGraphicsRootDescriptorTable(4, srv);
+        srv = srvGpuStart; srv.ptr += impl_->irradianceSrvIndex * impl_->srvDescSize;
+        impl_->cmdList->SetGraphicsRootDescriptorTable(5, srv);
+        srv = srvGpuStart; srv.ptr += impl_->prefilteredSrvIndex * impl_->srvDescSize;
+        impl_->cmdList->SetGraphicsRootDescriptorTable(6, srv);
+        srv = srvGpuStart; srv.ptr += impl_->brdfLutSrvIndex * impl_->srvDescSize;
+        impl_->cmdList->SetGraphicsRootDescriptorTable(7, srv);
+        
+        impl_->cmdList->IASetVertexBuffers(0, 1, &dx12Mesh.vbv);
+        impl_->cmdList->IASetIndexBuffer(&dx12Mesh.ibv);
+        impl_->cmdList->DrawIndexedInstanced(dx12Mesh.indexCount, 1, 0, 0, 0);
+        
+        if (isHighlighted) {
+            printf("[HIGHLIGHT] Drew %u indices for mesh %d (orange)\n", dx12Mesh.indexCount, highlightMeshIndex);
+        }
+    }
+}
+
+void UnifiedRenderer::renderMeshHighlight(const RHILoadedModel& model, const float* worldMatrix, 
+                                           int meshIndex, const float* highlightColor) {
+    if (!impl_->ready || model.meshes.empty() || !impl_->cameraSet) return;
+    if (meshIndex < 0 || meshIndex >= static_cast<int>(model.meshes.size())) return;
+    if (!impl_->highlightPipelineState) return;
+    
+    const auto& gpu = model.meshes[meshIndex];
+    if (gpu.meshIndex >= impl_->meshStorage.size()) return;
+    const auto& dx12Mesh = impl_->meshStorage[gpu.meshIndex];
+    
+    // Use highlight pipeline (wireframe, always visible)
+    impl_->cmdList->SetGraphicsRootSignature(impl_->rootSignature.Get());
+    impl_->cmdList->SetPipelineState(impl_->highlightPipelineState.Get());
+    
+    ID3D12DescriptorHeap* heaps[] = { impl_->srvHeap.Get() };
+    impl_->cmdList->SetDescriptorHeaps(1, heaps);
+    
+    float wvp[16];
+    math::multiply(wvp, worldMatrix, impl_->viewMatrix);
+    math::multiply(wvp, wvp, impl_->projMatrix);
+    
+    memcpy(impl_->constants.worldViewProj, wvp, sizeof(wvp));
+    memcpy(impl_->constants.world, worldMatrix, 64);
+    
+    // FORCE solid orange color - disable ALL lighting/textures
+    // Use a very high "emissive" style by setting base color bright and disabling everything else
+    impl_->constants.baseColorAndRough[0] = highlightColor[0] * 2.0f;  // Boost brightness
+    impl_->constants.baseColorAndRough[1] = highlightColor[1] * 2.0f;
+    impl_->constants.baseColorAndRough[2] = highlightColor[2] * 2.0f;
+    impl_->constants.baseColorAndRough[3] = 1.0f;  // Max roughness = diffuse
+    impl_->constants.cameraPosAndMetal[0] = impl_->cameraPos[0];
+    impl_->constants.cameraPosAndMetal[1] = impl_->cameraPos[1];
+    impl_->constants.cameraPosAndMetal[2] = impl_->cameraPos[2];
+    impl_->constants.cameraPosAndMetal[3] = 0.0f;  // Non-metallic
+    // Point light directly at camera for uniform brightness
+    impl_->constants.lightDirAndFlags[0] = 0.0f;
+    impl_->constants.lightDirAndFlags[1] = 0.0f;
+    impl_->constants.lightDirAndFlags[2] = 1.0f;
+    impl_->constants.lightDirAndFlags[3] = 0;  // NO textures!
+    impl_->constants.shadowParams[3] = 0;  // No shadows
+    impl_->constants.iblParams[3] = 0;  // No IBL
+    
+    UINT drawOffset = impl_->currentDrawIndex * Impl::kAlignedConstantSize;
+    memcpy(impl_->constantBufferMapped + drawOffset, &impl_->constants, sizeof(impl_->constants));
+    
+    D3D12_GPU_VIRTUAL_ADDRESS cbAddr = impl_->constantBuffer->GetGPUVirtualAddress() + drawOffset;
+    impl_->cmdList->SetGraphicsRootConstantBufferView(0, cbAddr);
+    impl_->currentDrawIndex++;
+    
+    // Set dummy white textures
+    D3D12_GPU_DESCRIPTOR_HANDLE srvGpuStart = impl_->srvHeap->GetGPUDescriptorHandleForHeapStart();
+    D3D12_GPU_DESCRIPTOR_HANDLE srv = srvGpuStart;
+    srv.ptr += impl_->defaultTextureSrvIndex * impl_->srvDescSize;
+    impl_->cmdList->SetGraphicsRootDescriptorTable(1, srv);
+    impl_->cmdList->SetGraphicsRootDescriptorTable(2, srv);
+    impl_->cmdList->SetGraphicsRootDescriptorTable(3, srv);
+    srv = srvGpuStart; srv.ptr += impl_->shadowMapSrvIndex * impl_->srvDescSize;
+    impl_->cmdList->SetGraphicsRootDescriptorTable(4, srv);
+    srv = srvGpuStart; srv.ptr += impl_->irradianceSrvIndex * impl_->srvDescSize;
+    impl_->cmdList->SetGraphicsRootDescriptorTable(5, srv);
+    srv = srvGpuStart; srv.ptr += impl_->prefilteredSrvIndex * impl_->srvDescSize;
+    impl_->cmdList->SetGraphicsRootDescriptorTable(6, srv);
+    srv = srvGpuStart; srv.ptr += impl_->brdfLutSrvIndex * impl_->srvDescSize;
+    impl_->cmdList->SetGraphicsRootDescriptorTable(7, srv);
+    
+    // Draw the selected mesh as wireframe
+    impl_->cmdList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    impl_->cmdList->IASetVertexBuffers(0, 1, &dx12Mesh.vbv);
+    impl_->cmdList->IASetIndexBuffer(&dx12Mesh.ibv);
+    impl_->cmdList->DrawIndexedInstanced(dx12Mesh.indexCount, 1, 0, 0, 0);
+}
+
+void UnifiedRenderer::renderEditModeWireframe(const RHILoadedModel& model, const float* worldMatrix,
+                                                int selectedMeshIndex, const float* highlightColor, const float* grayColor) {
+    if (!impl_->ready || model.meshes.empty() || !impl_->cameraSet) return;
+    if (!impl_->highlightPipelineState) return;
+    
+    // Use highlight pipeline (wireframe, always visible, no depth fighting)
+    impl_->cmdList->SetGraphicsRootSignature(impl_->rootSignature.Get());
+    impl_->cmdList->SetPipelineState(impl_->highlightPipelineState.Get());
+    
+    ID3D12DescriptorHeap* heaps[] = { impl_->srvHeap.Get() };
+    impl_->cmdList->SetDescriptorHeaps(1, heaps);
+    
+    float wvp[16];
+    math::multiply(wvp, worldMatrix, impl_->viewMatrix);
+    math::multiply(wvp, wvp, impl_->projMatrix);
+    
+    memcpy(impl_->constants.worldViewProj, wvp, sizeof(wvp));
+    memcpy(impl_->constants.world, worldMatrix, 64);
+    
+    impl_->cmdList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    
+    D3D12_GPU_DESCRIPTOR_HANDLE srvGpuStart = impl_->srvHeap->GetGPUDescriptorHandleForHeapStart();
+    
+    // Render ALL meshes as wireframe - selected=highlight color, others=gray
+    for (size_t i = 0; i < model.meshes.size(); ++i) {
+        const auto& gpu = model.meshes[i];
+        if (gpu.meshIndex >= impl_->meshStorage.size()) continue;
+        const auto& dx12Mesh = impl_->meshStorage[gpu.meshIndex];
+        
+        // Set color based on selection
+        bool isSelected = (static_cast<int>(i) == selectedMeshIndex);
+        const float* color = isSelected ? highlightColor : grayColor;
+        
+        impl_->constants.baseColorAndRough[0] = color[0];
+        impl_->constants.baseColorAndRough[1] = color[1];
+        impl_->constants.baseColorAndRough[2] = color[2];
+        impl_->constants.baseColorAndRough[3] = -1.0f;  // Special value: UNLIT mode!
+        impl_->constants.cameraPosAndMetal[3] = 0.0f;
+        impl_->constants.lightDirAndFlags[3] = 0;  // No textures
+        impl_->constants.shadowParams[3] = 0;
+        impl_->constants.iblParams[3] = 0;
+        
+        UINT drawOffset = impl_->currentDrawIndex * Impl::kAlignedConstantSize;
+        memcpy(impl_->constantBufferMapped + drawOffset, &impl_->constants, sizeof(impl_->constants));
+        
+        D3D12_GPU_VIRTUAL_ADDRESS cbAddr = impl_->constantBuffer->GetGPUVirtualAddress() + drawOffset;
+        impl_->cmdList->SetGraphicsRootConstantBufferView(0, cbAddr);
+        impl_->currentDrawIndex++;
+        
+        // Set dummy textures
+        D3D12_GPU_DESCRIPTOR_HANDLE srv = srvGpuStart;
+        srv.ptr += impl_->defaultTextureSrvIndex * impl_->srvDescSize;
+        impl_->cmdList->SetGraphicsRootDescriptorTable(1, srv);
+        impl_->cmdList->SetGraphicsRootDescriptorTable(2, srv);
+        impl_->cmdList->SetGraphicsRootDescriptorTable(3, srv);
+        srv = srvGpuStart; srv.ptr += impl_->shadowMapSrvIndex * impl_->srvDescSize;
+        impl_->cmdList->SetGraphicsRootDescriptorTable(4, srv);
+        srv = srvGpuStart; srv.ptr += impl_->irradianceSrvIndex * impl_->srvDescSize;
+        impl_->cmdList->SetGraphicsRootDescriptorTable(5, srv);
+        srv = srvGpuStart; srv.ptr += impl_->prefilteredSrvIndex * impl_->srvDescSize;
+        impl_->cmdList->SetGraphicsRootDescriptorTable(6, srv);
+        srv = srvGpuStart; srv.ptr += impl_->brdfLutSrvIndex * impl_->srvDescSize;
+        impl_->cmdList->SetGraphicsRootDescriptorTable(7, srv);
+        
+        impl_->cmdList->IASetVertexBuffers(0, 1, &dx12Mesh.vbv);
+        impl_->cmdList->IASetIndexBuffer(&dx12Mesh.ibv);
+        impl_->cmdList->DrawIndexedInstanced(dx12Mesh.indexCount, 1, 0, 0, 0);
+    }
+}
+
+void UnifiedRenderer::renderModelWireframeUnlit(const RHILoadedModel& model, const float* worldMatrix,
+                                                 int highlightMeshIndex, const float* highlightColor) {
+    if (!impl_->ready || model.meshes.empty() || !impl_->cameraSet) return;
+    if (!impl_->unlitWireframePipelineState) {
+        // Fallback: use regular wireframe if unlit not available
+        renderModelWireframe(model, worldMatrix, highlightColor);
+        return;
+    }
+    
+    impl_->cmdList->SetGraphicsRootSignature(impl_->rootSignature.Get());
+    impl_->cmdList->SetPipelineState(impl_->unlitWireframePipelineState.Get());
+    
+    ID3D12DescriptorHeap* heaps[] = { impl_->srvHeap.Get() };
+    impl_->cmdList->SetDescriptorHeaps(1, heaps);
+    
+    float wvp[16];
+    math::multiply(wvp, worldMatrix, impl_->viewMatrix);
+    math::multiply(wvp, wvp, impl_->projMatrix);
+    
+    memcpy(impl_->constants.worldViewProj, wvp, sizeof(wvp));
+    memcpy(impl_->constants.world, worldMatrix, 64);
+    
+    impl_->cmdList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    
+    // Render ALL meshes - highlight one with orange, others with gray
+    for (size_t i = 0; i < model.meshes.size(); ++i) {
+        const auto& gpu = model.meshes[i];
+        if (gpu.meshIndex >= impl_->meshStorage.size()) continue;
+        const auto& dx12Mesh = impl_->meshStorage[gpu.meshIndex];
+        
+        // Set color: orange for highlighted mesh, gray for others
+        if (static_cast<int>(i) == highlightMeshIndex) {
+            impl_->constants.baseColorAndRough[0] = highlightColor[0];  // Orange
+            impl_->constants.baseColorAndRough[1] = highlightColor[1];
+            impl_->constants.baseColorAndRough[2] = highlightColor[2];
+        } else {
+            impl_->constants.baseColorAndRough[0] = 0.4f;  // Gray
+            impl_->constants.baseColorAndRough[1] = 0.4f;
+            impl_->constants.baseColorAndRough[2] = 0.4f;
+        }
+        impl_->constants.baseColorAndRough[3] = 1.0f;
+        
+        UINT drawOffset = impl_->currentDrawIndex * Impl::kAlignedConstantSize;
+        memcpy(impl_->constantBufferMapped + drawOffset, &impl_->constants, sizeof(impl_->constants));
+        
+        D3D12_GPU_VIRTUAL_ADDRESS cbAddr = impl_->constantBuffer->GetGPUVirtualAddress() + drawOffset;
+        impl_->cmdList->SetGraphicsRootConstantBufferView(0, cbAddr);
+        impl_->currentDrawIndex++;
+        
+        impl_->cmdList->IASetVertexBuffers(0, 1, &dx12Mesh.vbv);
+        impl_->cmdList->IASetIndexBuffer(&dx12Mesh.ibv);
+        impl_->cmdList->DrawIndexedInstanced(dx12Mesh.indexCount, 1, 0, 0, 0);
+    }
+}
+
+void UnifiedRenderer::renderSingleMeshWireframe(const RHILoadedModel& model, const float* worldMatrix,
+                                                 int meshIndex, const float* wireColor) {
+    if (!impl_->ready || model.meshes.empty() || !impl_->cameraSet) return;
+    if (meshIndex < 0 || meshIndex >= static_cast<int>(model.meshes.size())) return;
+    if (!impl_->unlitWireframePipelineState) return;  // Use unlit pipeline!
+    
+    const auto& gpu = model.meshes[meshIndex];
+    if (gpu.meshIndex >= impl_->meshStorage.size()) return;
+    const auto& dx12Mesh = impl_->meshStorage[gpu.meshIndex];
+    
+    // Use UNLIT wireframe pipeline - solid color, no lighting!
+    impl_->cmdList->SetGraphicsRootSignature(impl_->rootSignature.Get());
+    impl_->cmdList->SetPipelineState(impl_->unlitWireframePipelineState.Get());
+    
+    ID3D12DescriptorHeap* heaps[] = { impl_->srvHeap.Get() };
+    impl_->cmdList->SetDescriptorHeaps(1, heaps);
+    
+    // Calculate WVP with slight depth offset to ensure wireframe is visible
+    float wvp[16];
+    math::multiply(wvp, worldMatrix, impl_->viewMatrix);
+    math::multiply(wvp, wvp, impl_->projMatrix);
+    
+    memcpy(impl_->constants.worldViewProj, wvp, sizeof(wvp));
+    memcpy(impl_->constants.world, worldMatrix, 64);
+    
+    // Set solid wireframe color - override all material/lighting
+    impl_->constants.baseColorAndRough[0] = wireColor[0];
+    impl_->constants.baseColorAndRough[1] = wireColor[1];
+    impl_->constants.baseColorAndRough[2] = wireColor[2];
+    impl_->constants.baseColorAndRough[3] = 1.0f;  // Full roughness
+    impl_->constants.cameraPosAndMetal[0] = impl_->cameraPos[0];
+    impl_->constants.cameraPosAndMetal[1] = impl_->cameraPos[1];
+    impl_->constants.cameraPosAndMetal[2] = impl_->cameraPos[2];
+    impl_->constants.cameraPosAndMetal[3] = 0.0f;
+    impl_->constants.lightDirAndFlags[0] = 0.0f;
+    impl_->constants.lightDirAndFlags[1] = -1.0f;  // Light from above
+    impl_->constants.lightDirAndFlags[2] = 0.0f;
+    impl_->constants.lightDirAndFlags[3] = 0;  // No textures
+    impl_->constants.shadowParams[3] = 0;
+    impl_->constants.iblParams[3] = 0;
+    
+    UINT drawOffset = impl_->currentDrawIndex * Impl::kAlignedConstantSize;
+    memcpy(impl_->constantBufferMapped + drawOffset, &impl_->constants, sizeof(impl_->constants));
+    
+    D3D12_GPU_VIRTUAL_ADDRESS cbAddr = impl_->constantBuffer->GetGPUVirtualAddress() + drawOffset;
+    impl_->cmdList->SetGraphicsRootConstantBufferView(0, cbAddr);
+    impl_->currentDrawIndex++;
+    
+    // Set dummy textures
+    D3D12_GPU_DESCRIPTOR_HANDLE srvGpuStart = impl_->srvHeap->GetGPUDescriptorHandleForHeapStart();
+    D3D12_GPU_DESCRIPTOR_HANDLE srv = srvGpuStart;
+    srv.ptr += impl_->defaultTextureSrvIndex * impl_->srvDescSize;
+    impl_->cmdList->SetGraphicsRootDescriptorTable(1, srv);
+    impl_->cmdList->SetGraphicsRootDescriptorTable(2, srv);
+    impl_->cmdList->SetGraphicsRootDescriptorTable(3, srv);
+    srv = srvGpuStart; srv.ptr += impl_->shadowMapSrvIndex * impl_->srvDescSize;
+    impl_->cmdList->SetGraphicsRootDescriptorTable(4, srv);
+    srv = srvGpuStart; srv.ptr += impl_->irradianceSrvIndex * impl_->srvDescSize;
+    impl_->cmdList->SetGraphicsRootDescriptorTable(5, srv);
+    srv = srvGpuStart; srv.ptr += impl_->prefilteredSrvIndex * impl_->srvDescSize;
+    impl_->cmdList->SetGraphicsRootDescriptorTable(6, srv);
+    srv = srvGpuStart; srv.ptr += impl_->brdfLutSrvIndex * impl_->srvDescSize;
+    impl_->cmdList->SetGraphicsRootDescriptorTable(7, srv);
+    
+    // Draw single mesh as wireframe
+    impl_->cmdList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    impl_->cmdList->IASetVertexBuffers(0, 1, &dx12Mesh.vbv);
+    impl_->cmdList->IASetIndexBuffer(&dx12Mesh.ibv);
+    impl_->cmdList->DrawIndexedInstanced(dx12Mesh.indexCount, 1, 0, 0, 0);
+}
+
+void UnifiedRenderer::renderMeshWireframeOverlay(const RHILoadedModel& model, const float* worldMatrix,
+                                                  int meshIndex, const float* wireColor) {
+    // OVERLAY PASS: Draw wireframe on top of shaded model (like Maya/Blender mesh selection)
+    // Uses wireframePipelineState with UNLIT mode (roughness = -1.0)
+    if (!impl_->ready || model.meshes.empty() || !impl_->cameraSet) return;
+    if (meshIndex < 0 || meshIndex >= static_cast<int>(model.meshes.size())) return;
+    if (!impl_->wireframePipelineState) return;
+    
+    const auto& gpu = model.meshes[meshIndex];
+    if (gpu.meshIndex >= impl_->meshStorage.size()) return;
+    const auto& dx12Mesh = impl_->meshStorage[gpu.meshIndex];
+    
+    // Use overlay wireframe pipeline (UNLIT shader) if available, otherwise fall back to wireframe
+    impl_->cmdList->SetGraphicsRootSignature(impl_->rootSignature.Get());
+    
+    // Prefer overlayWireframePipelineState (unlit shader, normal depth test with bias)
+    ID3D12PipelineState* pipelineToUse = nullptr;
+    if (impl_->overlayWireframePipelineState) {
+        pipelineToUse = impl_->overlayWireframePipelineState.Get();
+        printf("[OVERLAY] Using overlayWireframePipelineState (UNLIT)\n");
+    } else if (impl_->unlitWireframePipelineState) {
+        pipelineToUse = impl_->unlitWireframePipelineState.Get();
+        printf("[OVERLAY] Using unlitWireframePipelineState\n");
+    } else {
+        pipelineToUse = impl_->wireframePipelineState.Get();
+        printf("[OVERLAY] WARNING: Using wireframePipelineState (PBR fallback)\n");
+    }
+    impl_->cmdList->SetPipelineState(pipelineToUse);
+    
+    ID3D12DescriptorHeap* heaps[] = { impl_->srvHeap.Get() };
+    impl_->cmdList->SetDescriptorHeaps(1, heaps);
+    
+    float wvp[16];
+    math::multiply(wvp, worldMatrix, impl_->viewMatrix);
+    math::multiply(wvp, wvp, impl_->projMatrix);
+    
+    memcpy(impl_->constants.worldViewProj, wvp, sizeof(wvp));
+    memcpy(impl_->constants.world, worldMatrix, 64);
+    memcpy(impl_->constants.lightViewProj, impl_->lightViewProj, 64);
+    
+    // Set wireframe color (baseColorAndRough.xyz is used by unlit shader)
+    impl_->constants.baseColorAndRough[0] = wireColor[0];
+    impl_->constants.baseColorAndRough[1] = wireColor[1];
+    impl_->constants.baseColorAndRough[2] = wireColor[2];
+    impl_->constants.baseColorAndRough[3] = -1.0f;  // UNLIT mode flag (for PBR fallback)
+    impl_->constants.cameraPosAndMetal[0] = impl_->cameraPos[0];
+    impl_->constants.cameraPosAndMetal[1] = impl_->cameraPos[1];
+    impl_->constants.cameraPosAndMetal[2] = impl_->cameraPos[2];
+    impl_->constants.cameraPosAndMetal[3] = 0.0f;
+    impl_->constants.lightDirAndFlags[0] = 0.0f;
+    impl_->constants.lightDirAndFlags[1] = -1.0f;
+    impl_->constants.lightDirAndFlags[2] = 0.0f;
+    impl_->constants.lightDirAndFlags[3] = 0;  // No textures
+    impl_->constants.shadowParams[3] = 0;
+    impl_->constants.iblParams[3] = 0;
+    
+    UINT drawOffset = impl_->currentDrawIndex * Impl::kAlignedConstantSize;
+    memcpy(impl_->constantBufferMapped + drawOffset, &impl_->constants, sizeof(impl_->constants));
+    
+    D3D12_GPU_VIRTUAL_ADDRESS cbAddr = impl_->constantBuffer->GetGPUVirtualAddress() + drawOffset;
+    impl_->cmdList->SetGraphicsRootConstantBufferView(0, cbAddr);
+    impl_->currentDrawIndex++;
+    
+    // Bind dummy textures (required by root signature)
+    D3D12_GPU_DESCRIPTOR_HANDLE srvGpuStart = impl_->srvHeap->GetGPUDescriptorHandleForHeapStart();
+    D3D12_GPU_DESCRIPTOR_HANDLE srv = srvGpuStart;
+    srv.ptr += impl_->defaultTextureSrvIndex * impl_->srvDescSize;
+    impl_->cmdList->SetGraphicsRootDescriptorTable(1, srv);
+    impl_->cmdList->SetGraphicsRootDescriptorTable(2, srv);
+    impl_->cmdList->SetGraphicsRootDescriptorTable(3, srv);
+    srv = srvGpuStart; srv.ptr += impl_->shadowMapSrvIndex * impl_->srvDescSize;
+    impl_->cmdList->SetGraphicsRootDescriptorTable(4, srv);
+    srv = srvGpuStart; srv.ptr += impl_->irradianceSrvIndex * impl_->srvDescSize;
+    impl_->cmdList->SetGraphicsRootDescriptorTable(5, srv);
+    srv = srvGpuStart; srv.ptr += impl_->prefilteredSrvIndex * impl_->srvDescSize;
+    impl_->cmdList->SetGraphicsRootDescriptorTable(6, srv);
+    srv = srvGpuStart; srv.ptr += impl_->brdfLutSrvIndex * impl_->srvDescSize;
+    impl_->cmdList->SetGraphicsRootDescriptorTable(7, srv);
+    
+    // Draw the selected mesh as wireframe overlay
+    impl_->cmdList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    impl_->cmdList->IASetVertexBuffers(0, 1, &dx12Mesh.vbv);
+    impl_->cmdList->IASetIndexBuffer(&dx12Mesh.ibv);
+    impl_->cmdList->DrawIndexedInstanced(dx12Mesh.indexCount, 1, 0, 0, 0);
+    
+    printf("[OVERLAY] Drew %u indices for mesh %d (color: %.1f,%.1f,%.1f)\n", 
+           dx12Mesh.indexCount, meshIndex, wireColor[0], wireColor[1], wireColor[2]);
+}
+
+void UnifiedRenderer::renderModelWireframe(const RHILoadedModel& model, const float* worldMatrix, const float* wireColor) {
+    if (!impl_->ready || model.meshes.empty() || !impl_->cameraSet) return;
+    if (!impl_->wireframePipelineState) {
+        // Fallback to normal rendering if wireframe pipeline not ready
+        renderModel(model, worldMatrix);
+        return;
+    }
+    
+    impl_->cmdList->SetGraphicsRootSignature(impl_->rootSignature.Get());
+    impl_->cmdList->SetPipelineState(impl_->wireframePipelineState.Get());  // Use wireframe pipeline!
+    
+    ID3D12DescriptorHeap* heaps[] = { impl_->srvHeap.Get() };
+    impl_->cmdList->SetDescriptorHeaps(1, heaps);
+    
+    float wvp[16];
+    math::multiply(wvp, worldMatrix, impl_->viewMatrix);
+    math::multiply(wvp, wvp, impl_->projMatrix);
+    
+    memcpy(impl_->constants.worldViewProj, wvp, sizeof(wvp));
+    memcpy(impl_->constants.world, worldMatrix, 64);
+    memcpy(impl_->constants.lightViewProj, impl_->lightViewProj, 64);
+    
+    impl_->constants.lightDirAndFlags[0] = 0.5f;
+    impl_->constants.lightDirAndFlags[1] = -0.7f;
+    impl_->constants.lightDirAndFlags[2] = -0.5f;
+    impl_->constants.cameraPosAndMetal[0] = impl_->cameraPos[0];
+    impl_->constants.cameraPosAndMetal[1] = impl_->cameraPos[1];
+    impl_->constants.cameraPosAndMetal[2] = impl_->cameraPos[2];
+    
+    // No textures for wireframe, use wire color
+    impl_->constants.lightDirAndFlags[3] = 0;  // No texture flags
+    impl_->constants.shadowParams[3] = 0;  // No shadows
+    impl_->constants.iblParams[3] = 0;  // No IBL
+    
+    impl_->cmdList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    
+    D3D12_GPU_DESCRIPTOR_HANDLE srvGpuStart = impl_->srvHeap->GetGPUDescriptorHandleForHeapStart();
+    
+    for (size_t i = 0; i < model.meshes.size(); ++i) {
+        const auto& gpu = model.meshes[i];
+        if (gpu.meshIndex >= impl_->meshStorage.size()) continue;
+        const auto& dx12Mesh = impl_->meshStorage[gpu.meshIndex];
+        
+        // Use wire color (default to dark gray)
+        impl_->constants.baseColorAndRough[0] = wireColor ? wireColor[0] : 0.2f;
+        impl_->constants.baseColorAndRough[1] = wireColor ? wireColor[1] : 0.2f;
+        impl_->constants.baseColorAndRough[2] = wireColor ? wireColor[2] : 0.2f;
+        impl_->constants.baseColorAndRough[3] = 0.0f;  // No roughness effect
+        impl_->constants.cameraPosAndMetal[3] = 0.0f;  // No metallic
+        
+        // Write to ring buffer
+        UINT drawOffset = impl_->currentDrawIndex * Impl::kAlignedConstantSize;
+        memcpy(impl_->constantBufferMapped + drawOffset, &impl_->constants, sizeof(impl_->constants));
+        
+        D3D12_GPU_VIRTUAL_ADDRESS cbAddr = impl_->constantBuffer->GetGPUVirtualAddress() + drawOffset;
+        impl_->cmdList->SetGraphicsRootConstantBufferView(0, cbAddr);
+        impl_->currentDrawIndex++;
+        
+        // Set default textures for SRV slots (required by root signature)
+        D3D12_GPU_DESCRIPTOR_HANDLE srv;
+        srv = srvGpuStart; srv.ptr += dx12Mesh.diffuseSrvIndex * impl_->srvDescSize;
+        impl_->cmdList->SetGraphicsRootDescriptorTable(1, srv);
+        srv = srvGpuStart; srv.ptr += dx12Mesh.normalSrvIndex * impl_->srvDescSize;
+        impl_->cmdList->SetGraphicsRootDescriptorTable(2, srv);
+        srv = srvGpuStart; srv.ptr += dx12Mesh.specularSrvIndex * impl_->srvDescSize;
+        impl_->cmdList->SetGraphicsRootDescriptorTable(3, srv);
+        srv = srvGpuStart; srv.ptr += impl_->shadowMapSrvIndex * impl_->srvDescSize;
+        impl_->cmdList->SetGraphicsRootDescriptorTable(4, srv);
+        srv = srvGpuStart; srv.ptr += impl_->irradianceSrvIndex * impl_->srvDescSize;
+        impl_->cmdList->SetGraphicsRootDescriptorTable(5, srv);
+        srv = srvGpuStart; srv.ptr += impl_->prefilteredSrvIndex * impl_->srvDescSize;
+        impl_->cmdList->SetGraphicsRootDescriptorTable(6, srv);
+        srv = srvGpuStart; srv.ptr += impl_->brdfLutSrvIndex * impl_->srvDescSize;
+        impl_->cmdList->SetGraphicsRootDescriptorTable(7, srv);
+        
+        impl_->cmdList->IASetVertexBuffers(0, 1, &dx12Mesh.vbv);
+        impl_->cmdList->IASetIndexBuffer(&dx12Mesh.ibv);
+        impl_->cmdList->DrawIndexedInstanced(dx12Mesh.indexCount, 1, 0, 0, 0);
+    }
+}
+
+void UnifiedRenderer::renderModelSolid(const RHILoadedModel& model, const float* worldMatrix, const float* solidColor) {
+    if (!impl_->ready || model.meshes.empty() || !impl_->cameraSet) return;
+    
+    impl_->cmdList->SetGraphicsRootSignature(impl_->rootSignature.Get());
+    impl_->cmdList->SetPipelineState(impl_->pipelineState.Get());
+    
+    ID3D12DescriptorHeap* heaps[] = { impl_->srvHeap.Get() };
+    impl_->cmdList->SetDescriptorHeaps(1, heaps);
+    
+    float wvp[16];
+    math::multiply(wvp, worldMatrix, impl_->viewMatrix);
+    math::multiply(wvp, wvp, impl_->projMatrix);
+    
+    memcpy(impl_->constants.worldViewProj, wvp, sizeof(wvp));
+    memcpy(impl_->constants.world, worldMatrix, 64);
+    memcpy(impl_->constants.lightViewProj, impl_->lightViewProj, 64);
+    
+    impl_->constants.lightDirAndFlags[0] = 0.5f;
+    impl_->constants.lightDirAndFlags[1] = -0.7f;
+    impl_->constants.lightDirAndFlags[2] = -0.5f;
+    impl_->constants.cameraPosAndMetal[0] = impl_->cameraPos[0];
+    impl_->constants.cameraPosAndMetal[1] = impl_->cameraPos[1];
+    impl_->constants.cameraPosAndMetal[2] = impl_->cameraPos[2];
+    
+    // Solid color - no textures
+    impl_->constants.lightDirAndFlags[3] = 0;  // No textures
+    impl_->constants.shadowParams[0] = impl_->shadowSettings.bias;
+    impl_->constants.shadowParams[1] = impl_->shadowSettings.normalBias;
+    impl_->constants.shadowParams[2] = impl_->shadowSettings.softness;
+    impl_->constants.shadowParams[3] = 0;  // No shadows
+    impl_->constants.iblParams[3] = 0;  // No IBL
+    
+    impl_->cmdList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    
+    D3D12_GPU_DESCRIPTOR_HANDLE srvGpuStart = impl_->srvHeap->GetGPUDescriptorHandleForHeapStart();
+    
+    for (size_t i = 0; i < model.meshes.size(); ++i) {
+        const auto& gpu = model.meshes[i];
+        if (gpu.meshIndex >= impl_->meshStorage.size()) continue;
+        const auto& dx12Mesh = impl_->meshStorage[gpu.meshIndex];
+        
+        // Use solid color
+        impl_->constants.baseColorAndRough[0] = solidColor ? solidColor[0] : 0.6f;
+        impl_->constants.baseColorAndRough[1] = solidColor ? solidColor[1] : 0.6f;
+        impl_->constants.baseColorAndRough[2] = solidColor ? solidColor[2] : 0.6f;
+        impl_->constants.baseColorAndRough[3] = 0.5f;
+        impl_->constants.cameraPosAndMetal[3] = 0.0f;
+        
+        // Write to ring buffer
+        UINT drawOffset = impl_->currentDrawIndex * Impl::kAlignedConstantSize;
+        memcpy(impl_->constantBufferMapped + drawOffset, &impl_->constants, sizeof(impl_->constants));
+        
+        D3D12_GPU_VIRTUAL_ADDRESS cbAddr = impl_->constantBuffer->GetGPUVirtualAddress() + drawOffset;
+        impl_->cmdList->SetGraphicsRootConstantBufferView(0, cbAddr);
+        impl_->currentDrawIndex++;
+        
+        D3D12_GPU_DESCRIPTOR_HANDLE srv;
+        srv = srvGpuStart; srv.ptr += dx12Mesh.diffuseSrvIndex * impl_->srvDescSize;
+        impl_->cmdList->SetGraphicsRootDescriptorTable(1, srv);
+        srv = srvGpuStart; srv.ptr += dx12Mesh.normalSrvIndex * impl_->srvDescSize;
+        impl_->cmdList->SetGraphicsRootDescriptorTable(2, srv);
+        srv = srvGpuStart; srv.ptr += dx12Mesh.specularSrvIndex * impl_->srvDescSize;
+        impl_->cmdList->SetGraphicsRootDescriptorTable(3, srv);
+        srv = srvGpuStart; srv.ptr += impl_->shadowMapSrvIndex * impl_->srvDescSize;
+        impl_->cmdList->SetGraphicsRootDescriptorTable(4, srv);
+        srv = srvGpuStart; srv.ptr += impl_->irradianceSrvIndex * impl_->srvDescSize;
+        impl_->cmdList->SetGraphicsRootDescriptorTable(5, srv);
+        srv = srvGpuStart; srv.ptr += impl_->prefilteredSrvIndex * impl_->srvDescSize;
+        impl_->cmdList->SetGraphicsRootDescriptorTable(6, srv);
+        srv = srvGpuStart; srv.ptr += impl_->brdfLutSrvIndex * impl_->srvDescSize;
+        impl_->cmdList->SetGraphicsRootDescriptorTable(7, srv);
+        
+        impl_->cmdList->IASetVertexBuffers(0, 1, &dx12Mesh.vbv);
+        impl_->cmdList->IASetIndexBuffer(&dx12Mesh.ibv);
+        impl_->cmdList->DrawIndexedInstanced(dx12Mesh.indexCount, 1, 0, 0, 0);
+    }
+}
+
 void UnifiedRenderer::renderGizmoLines(const float* lines, uint32_t lineCount) {
     if (!impl_->ready || lineCount == 0 || !impl_->cameraSet) return;
     if (!impl_->linePipelineState) return;  // Line pipeline not ready
@@ -2690,14 +3697,14 @@ void UnifiedRenderer::renderGizmoLines(const float* lines, uint32_t lineCount) {
     
     // Create persistent gizmo vertex buffer if needed
     if (!impl_->gizmoVertexBuffer) {
-        D3D12_HEAP_PROPERTIES heapProps{}; heapProps.Type = D3D12_HEAP_TYPE_UPLOAD;
-        D3D12_RESOURCE_DESC bufDesc{}; 
-        bufDesc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+    D3D12_HEAP_PROPERTIES heapProps{}; heapProps.Type = D3D12_HEAP_TYPE_UPLOAD;
+    D3D12_RESOURCE_DESC bufDesc{}; 
+    bufDesc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
         bufDesc.Width = Impl::kMaxGizmoVertices * sizeof(LineVertex);
-        bufDesc.Height = 1; bufDesc.DepthOrArraySize = 1;
-        bufDesc.MipLevels = 1; bufDesc.SampleDesc.Count = 1;
-        bufDesc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
-        
+    bufDesc.Height = 1; bufDesc.DepthOrArraySize = 1;
+    bufDesc.MipLevels = 1; bufDesc.SampleDesc.Count = 1;
+    bufDesc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+    
         HRESULT hr = impl_->device->CreateCommittedResource(&heapProps, D3D12_HEAP_FLAG_NONE, &bufDesc,
             D3D12_RESOURCE_STATE_GENERIC_READ, nullptr, IID_PPV_ARGS(&impl_->gizmoVertexBuffer));
         if (FAILED(hr)) return;
@@ -2748,6 +3755,498 @@ void UnifiedRenderer::renderGizmoLines(const float* lines, uint32_t lineCount) {
     // Restore state for ImGui
     ID3D12DescriptorHeap* heaps[] = {impl_->srvHeap.Get()};
     impl_->cmdList->SetDescriptorHeaps(1, heaps);
+}
+
+void UnifiedRenderer::renderEditModeEdges(const float* vertices, uint32_t vertexCount,
+                                          const uint32_t* indices, uint32_t indexCount,
+                                          const float* worldMatrix, const float* color) {
+    if (!impl_->ready || vertexCount == 0 || indexCount == 0 || !impl_->cameraSet) return;
+    if (!impl_->linePipelineState) return;
+    
+    // Use overlay wireframe pipeline for depth-tested lines
+    ID3D12PipelineState* pipelineToUse = impl_->overlayWireframePipelineState ?
+        impl_->overlayWireframePipelineState.Get() : impl_->linePipelineState.Get();
+    
+    struct LineVertex { float pos[3]; float col[4]; };
+    
+    // Cap vertex count
+    uint32_t maxVerts = Impl::kMaxGizmoVertices;
+    uint32_t actualIndexCount = std::min(indexCount, maxVerts);
+    
+    // Create buffer if needed
+    if (!impl_->gizmoVertexBuffer) {
+        D3D12_HEAP_PROPERTIES heapProps{}; heapProps.Type = D3D12_HEAP_TYPE_UPLOAD;
+        D3D12_RESOURCE_DESC bufDesc{}; 
+        bufDesc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+        bufDesc.Width = maxVerts * sizeof(LineVertex);
+        bufDesc.Height = 1; bufDesc.DepthOrArraySize = 1;
+        bufDesc.MipLevels = 1; bufDesc.SampleDesc.Count = 1;
+        bufDesc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+        
+        HRESULT hr = impl_->device->CreateCommittedResource(&heapProps, D3D12_HEAP_FLAG_NONE, &bufDesc,
+            D3D12_RESOURCE_STATE_GENERIC_READ, nullptr, IID_PPV_ARGS(&impl_->gizmoVertexBuffer));
+        if (FAILED(hr)) return;
+        
+        impl_->gizmoVertexBuffer->Map(0, nullptr, &impl_->gizmoVbMapped);
+        impl_->gizmoVbv.BufferLocation = impl_->gizmoVertexBuffer->GetGPUVirtualAddress();
+        impl_->gizmoVbv.SizeInBytes = maxVerts * sizeof(LineVertex);
+        impl_->gizmoVbv.StrideInBytes = sizeof(LineVertex);
+    }
+    
+    // Fill vertex buffer with indexed lines
+    LineVertex* outVerts = static_cast<LineVertex*>(impl_->gizmoVbMapped);
+    uint32_t outVertCount = 0;
+    
+    for (uint32_t i = 0; i + 1 < actualIndexCount && outVertCount + 2 <= maxVerts; i += 2) {
+        uint32_t i0 = indices[i];
+        uint32_t i1 = indices[i + 1];
+        
+        if (i0 >= vertexCount || i1 >= vertexCount) continue;
+        
+        const float* p0 = vertices + i0 * 3;
+        const float* p1 = vertices + i1 * 3;
+        
+        // Transform vertices by world matrix
+        float t0[3], t1[3];
+        if (worldMatrix) {
+            t0[0] = worldMatrix[0]*p0[0] + worldMatrix[4]*p0[1] + worldMatrix[8]*p0[2] + worldMatrix[12];
+            t0[1] = worldMatrix[1]*p0[0] + worldMatrix[5]*p0[1] + worldMatrix[9]*p0[2] + worldMatrix[13];
+            t0[2] = worldMatrix[2]*p0[0] + worldMatrix[6]*p0[1] + worldMatrix[10]*p0[2] + worldMatrix[14];
+            
+            t1[0] = worldMatrix[0]*p1[0] + worldMatrix[4]*p1[1] + worldMatrix[8]*p1[2] + worldMatrix[12];
+            t1[1] = worldMatrix[1]*p1[0] + worldMatrix[5]*p1[1] + worldMatrix[9]*p1[2] + worldMatrix[13];
+            t1[2] = worldMatrix[2]*p1[0] + worldMatrix[6]*p1[1] + worldMatrix[10]*p1[2] + worldMatrix[14];
+        } else {
+            memcpy(t0, p0, sizeof(t0));
+            memcpy(t1, p1, sizeof(t1));
+        }
+        
+        outVerts[outVertCount++] = {{t0[0], t0[1], t0[2]}, {color[0], color[1], color[2], color[3]}};
+        outVerts[outVertCount++] = {{t1[0], t1[1], t1[2]}, {color[0], color[1], color[2], color[3]}};
+    }
+    
+    if (outVertCount == 0) return;
+    
+    // Setup rendering
+    impl_->cmdList->SetPipelineState(pipelineToUse);
+    impl_->cmdList->SetGraphicsRootSignature(impl_->rootSignature.Get());
+    
+    // Set up constants (identity world since we pre-transformed)
+    float identity[16]; math::identity(identity);
+    float wvp[16];
+    math::multiply(wvp, identity, impl_->viewMatrix);
+    math::multiply(wvp, wvp, impl_->projMatrix);
+    
+    memcpy(impl_->constants.worldViewProj, wvp, sizeof(wvp));
+    memcpy(impl_->constants.world, identity, sizeof(identity));
+    
+    UINT drawOffset = impl_->currentDrawIndex * Impl::kAlignedConstantSize;
+    memcpy(impl_->constantBufferMapped + drawOffset, &impl_->constants, sizeof(impl_->constants));
+    D3D12_GPU_VIRTUAL_ADDRESS cbAddr = impl_->constantBuffer->GetGPUVirtualAddress() + drawOffset;
+    impl_->cmdList->SetGraphicsRootConstantBufferView(0, cbAddr);
+    impl_->currentDrawIndex++;
+    
+    impl_->cmdList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_LINELIST);
+    impl_->cmdList->IASetVertexBuffers(0, 1, &impl_->gizmoVbv);
+    impl_->cmdList->DrawInstanced(outVertCount, 1, 0, 0);
+    
+    // Restore heap
+    ID3D12DescriptorHeap* heaps[] = {impl_->srvHeap.Get()};
+    impl_->cmdList->SetDescriptorHeaps(1, heaps);
+}
+
+void UnifiedRenderer::renderOriginalEdges(const RHILoadedModel& model, int meshIndex,
+                                          const float* worldMatrix, const float* color) {
+    if (!impl_->ready || !impl_->cameraSet) return;
+    if (meshIndex < 0 || meshIndex >= static_cast<int>(model.meshes.size())) return;
+    
+    const auto& gpuMesh = model.meshes[meshIndex];
+    if (!gpuMesh.hasOriginalEdges || gpuMesh.originalEdges.empty()) {
+        // Fallback to triangulated wireframe if no original edges
+        renderMeshWireframeOverlay(model, worldMatrix, meshIndex, color);
+        return;
+    }
+    
+    // Get the DX12 mesh data to access vertex positions
+    size_t storageIdx = model.meshStorageStartIndex + meshIndex;
+    if (storageIdx >= impl_->meshStorage.size()) return;
+    
+    const auto& dx12Mesh = impl_->meshStorage[storageIdx];
+    
+    // We need to read vertex positions from the GPU buffer
+    // For now, we'll map and read (not ideal for performance, but works)
+    
+    // Use overlay wireframe pipeline
+    ID3D12PipelineState* pipelineToUse = impl_->overlayWireframePipelineState ?
+        impl_->overlayWireframePipelineState.Get() : impl_->linePipelineState.Get();
+    if (!pipelineToUse) return;
+    
+    struct LineVertex { float pos[3]; float col[4]; };
+    uint32_t maxVerts = Impl::kMaxGizmoVertices;
+    
+    // Create buffer if needed
+    if (!impl_->gizmoVertexBuffer) {
+        D3D12_HEAP_PROPERTIES heapProps{}; heapProps.Type = D3D12_HEAP_TYPE_UPLOAD;
+        D3D12_RESOURCE_DESC bufDesc{}; 
+        bufDesc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+        bufDesc.Width = maxVerts * sizeof(LineVertex);
+        bufDesc.Height = 1; bufDesc.DepthOrArraySize = 1;
+        bufDesc.MipLevels = 1; bufDesc.SampleDesc.Count = 1;
+        bufDesc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+        
+        HRESULT hr = impl_->device->CreateCommittedResource(&heapProps, D3D12_HEAP_FLAG_NONE, &bufDesc,
+            D3D12_RESOURCE_STATE_GENERIC_READ, nullptr, IID_PPV_ARGS(&impl_->gizmoVertexBuffer));
+        if (FAILED(hr)) return;
+        
+        impl_->gizmoVertexBuffer->Map(0, nullptr, &impl_->gizmoVbMapped);
+        impl_->gizmoVbv.BufferLocation = impl_->gizmoVertexBuffer->GetGPUVirtualAddress();
+        impl_->gizmoVbv.SizeInBytes = maxVerts * sizeof(LineVertex);
+        impl_->gizmoVbv.StrideInBytes = sizeof(LineVertex);
+    }
+    
+    // Read vertex positions from the upload buffer
+    // (The vertex buffer is UPLOAD type, so we can read it)
+    void* mappedVB = nullptr;
+    D3D12_RANGE readRange = {0, dx12Mesh.vbv.SizeInBytes};
+    HRESULT hr = dx12Mesh.vertexBuffer->Map(0, &readRange, &mappedVB);
+    if (FAILED(hr) || !mappedVB) return;
+    
+    const Vertex* srcVerts = static_cast<const Vertex*>(mappedVB);
+    uint32_t vertexCount = dx12Mesh.vbv.SizeInBytes / sizeof(Vertex);
+    
+    // Fill line vertex buffer with edge data
+    LineVertex* outVerts = static_cast<LineVertex*>(impl_->gizmoVbMapped);
+    uint32_t outVertCount = 0;
+    
+    for (const auto& edge : gpuMesh.originalEdges) {
+        if (outVertCount + 2 > maxVerts) break;
+        if (edge.v0 >= vertexCount || edge.v1 >= vertexCount) continue;
+        
+        const float* p0 = srcVerts[edge.v0].position;
+        const float* p1 = srcVerts[edge.v1].position;
+        
+        // Transform by world matrix
+        float t0[3], t1[3];
+        if (worldMatrix) {
+            t0[0] = worldMatrix[0]*p0[0] + worldMatrix[4]*p0[1] + worldMatrix[8]*p0[2] + worldMatrix[12];
+            t0[1] = worldMatrix[1]*p0[0] + worldMatrix[5]*p0[1] + worldMatrix[9]*p0[2] + worldMatrix[13];
+            t0[2] = worldMatrix[2]*p0[0] + worldMatrix[6]*p0[1] + worldMatrix[10]*p0[2] + worldMatrix[14];
+            
+            t1[0] = worldMatrix[0]*p1[0] + worldMatrix[4]*p1[1] + worldMatrix[8]*p1[2] + worldMatrix[12];
+            t1[1] = worldMatrix[1]*p1[0] + worldMatrix[5]*p1[1] + worldMatrix[9]*p1[2] + worldMatrix[13];
+            t1[2] = worldMatrix[2]*p1[0] + worldMatrix[6]*p1[1] + worldMatrix[10]*p1[2] + worldMatrix[14];
+        } else {
+            memcpy(t0, p0, sizeof(t0));
+            memcpy(t1, p1, sizeof(t1));
+        }
+        
+        outVerts[outVertCount++] = {{t0[0], t0[1], t0[2]}, {color[0], color[1], color[2], color[3]}};
+        outVerts[outVertCount++] = {{t1[0], t1[1], t1[2]}, {color[0], color[1], color[2], color[3]}};
+    }
+    
+    dx12Mesh.vertexBuffer->Unmap(0, nullptr);
+    
+    if (outVertCount == 0) return;
+    
+    // Render
+    impl_->cmdList->SetPipelineState(pipelineToUse);
+    impl_->cmdList->SetGraphicsRootSignature(impl_->rootSignature.Get());
+    
+    // Set up constants
+    float identity[16]; math::identity(identity);
+    float wvp[16];
+    math::multiply(wvp, identity, impl_->viewMatrix);
+    math::multiply(wvp, wvp, impl_->projMatrix);
+    
+    memcpy(impl_->constants.worldViewProj, wvp, sizeof(wvp));
+    memcpy(impl_->constants.world, identity, sizeof(identity));
+    
+    UINT drawOffset = impl_->currentDrawIndex * Impl::kAlignedConstantSize;
+    memcpy(impl_->constantBufferMapped + drawOffset, &impl_->constants, sizeof(impl_->constants));
+    D3D12_GPU_VIRTUAL_ADDRESS cbAddr = impl_->constantBuffer->GetGPUVirtualAddress() + drawOffset;
+    impl_->cmdList->SetGraphicsRootConstantBufferView(0, cbAddr);
+    impl_->currentDrawIndex++;
+    
+    impl_->cmdList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_LINELIST);
+    impl_->cmdList->IASetVertexBuffers(0, 1, &impl_->gizmoVbv);
+    impl_->cmdList->DrawInstanced(outVertCount, 1, 0, 0);
+    
+    // Restore heap
+    ID3D12DescriptorHeap* heaps[] = {impl_->srvHeap.Get()};
+    impl_->cmdList->SetDescriptorHeaps(1, heaps);
+}
+
+void UnifiedRenderer::renderOriginalEdgesSkinned(const RHILoadedModel& model, int meshIndex,
+                                                  const float* worldMatrix, const float* color,
+                                                  const float* boneMatrices,
+                                                  const std::vector<SkinnedVertex>& skinnedVertices) {
+    if (!impl_->ready || !impl_->cameraSet) return;
+    if (meshIndex < 0 || meshIndex >= static_cast<int>(model.meshes.size())) return;
+    if (skinnedVertices.empty()) {
+        // Fall back to non-skinned version
+        renderOriginalEdges(model, meshIndex, worldMatrix, color);
+        return;
+    }
+    
+    const auto& gpuMesh = model.meshes[meshIndex];
+    if (!gpuMesh.hasOriginalEdges || gpuMesh.originalEdges.empty()) {
+        renderMeshWireframeOverlay(model, worldMatrix, meshIndex, color);
+        return;
+    }
+    
+    // Use gizmo pipeline (no depth test) so wireframe is always visible through the model
+    // This matches Blender/Maya behavior where edit mode wireframe shows through surfaces
+    ID3D12PipelineState* pipelineToUse = impl_->gizmoPipelineState ?
+        impl_->gizmoPipelineState.Get() : 
+        (impl_->overlayWireframePipelineState ? impl_->overlayWireframePipelineState.Get() : impl_->linePipelineState.Get());
+    if (!pipelineToUse) return;
+    
+    struct LineVertex { float pos[3]; float col[4]; };
+    uint32_t maxVerts = Impl::kMaxGizmoVertices;
+    
+    // Use dedicated buffer for edit wireframe (separate from gizmo buffer to avoid conflicts)
+    if (!impl_->editWireframeBuffer) {
+        D3D12_HEAP_PROPERTIES heapProps{}; heapProps.Type = D3D12_HEAP_TYPE_UPLOAD;
+        D3D12_RESOURCE_DESC bufDesc{}; 
+        bufDesc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+        bufDesc.Width = maxVerts * sizeof(LineVertex);
+        bufDesc.Height = 1; bufDesc.DepthOrArraySize = 1;
+        bufDesc.MipLevels = 1; bufDesc.SampleDesc.Count = 1;
+        bufDesc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+        
+        HRESULT hr = impl_->device->CreateCommittedResource(&heapProps, D3D12_HEAP_FLAG_NONE, &bufDesc,
+            D3D12_RESOURCE_STATE_GENERIC_READ, nullptr, IID_PPV_ARGS(&impl_->editWireframeBuffer));
+        if (FAILED(hr)) return;
+        
+        impl_->editWireframeBuffer->Map(0, nullptr, &impl_->editWireframeMapped);
+        impl_->editWireframeVbv.BufferLocation = impl_->editWireframeBuffer->GetGPUVirtualAddress();
+        impl_->editWireframeVbv.SizeInBytes = maxVerts * sizeof(LineVertex);
+        impl_->editWireframeVbv.StrideInBytes = sizeof(LineVertex);
+    }
+    
+    // NOTE: GPU rendering currently doesn't use skinning (vertex buffer uses Vertex, not SkinnedVertex)
+    // So for consistency, we also don't apply skinning to wireframe - just use original positions
+    // This ensures wireframe matches the rendered mesh
+    // TODO: When GPU skinning is properly implemented, enable this path
+    
+    // Helper lambda to transform vertex position (NO skinning, just world matrix)
+    auto skinVertex = [&](uint32_t vi, float* outPos) {
+        if (vi >= skinnedVertices.size()) {
+            outPos[0] = outPos[1] = outPos[2] = 0;
+            return;
+        }
+        
+        const auto& sv = skinnedVertices[vi];
+        const float* pos = sv.position;
+        
+        // Just apply world matrix, no bone transforms (matches GPU rendering)
+        if (worldMatrix) {
+            outPos[0] = worldMatrix[0]*pos[0] + worldMatrix[4]*pos[1] + worldMatrix[8]*pos[2] + worldMatrix[12];
+            outPos[1] = worldMatrix[1]*pos[0] + worldMatrix[5]*pos[1] + worldMatrix[9]*pos[2] + worldMatrix[13];
+            outPos[2] = worldMatrix[2]*pos[0] + worldMatrix[6]*pos[1] + worldMatrix[10]*pos[2] + worldMatrix[14];
+        } else {
+            outPos[0] = pos[0];
+            outPos[1] = pos[1];
+            outPos[2] = pos[2];
+        }
+    };
+    
+    // Fill edit wireframe vertex buffer (separate from gizmo)
+    LineVertex* outVerts = static_cast<LineVertex*>(impl_->editWireframeMapped);
+    uint32_t outVertCount = 0;
+    
+    // Debug: track valid/invalid edges
+    static int lastDebugMesh = -1;
+    int validEdges = 0, invalidEdges = 0;
+    
+    for (const auto& edge : gpuMesh.originalEdges) {
+        if (outVertCount + 2 > maxVerts) break;
+        
+        // Check if indices are valid
+        if (edge.v0 >= skinnedVertices.size() || edge.v1 >= skinnedVertices.size()) {
+            invalidEdges++;
+            continue;  // Skip invalid edges
+        }
+        
+        float p0[3], p1[3];
+        skinVertex(edge.v0, p0);
+        skinVertex(edge.v1, p1);
+        
+        outVerts[outVertCount++] = {{p0[0], p0[1], p0[2]}, {color[0], color[1], color[2], color[3]}};
+        outVerts[outVertCount++] = {{p1[0], p1[1], p1[2]}, {color[0], color[1], color[2], color[3]}};
+        validEdges++;
+    }
+    
+    // Debug output once per mesh selection
+    if (lastDebugMesh != meshIndex) {
+        lastDebugMesh = meshIndex;
+        std::cout << "[WIREFRAME] Mesh " << meshIndex 
+                  << ": validEdges=" << validEdges 
+                  << ", invalidEdges=" << invalidEdges 
+                  << ", skinnedVerts=" << skinnedVertices.size()
+                  << ", totalEdges=" << gpuMesh.originalEdges.size() 
+                  << ", outVerts=" << outVertCount << std::endl;
+        
+        // Print bounding box of vertices
+        if (!skinnedVertices.empty()) {
+            float minX = 1e9f, minY = 1e9f, minZ = 1e9f;
+            float maxX = -1e9f, maxY = -1e9f, maxZ = -1e9f;
+            for (const auto& sv : skinnedVertices) {
+                minX = std::min(minX, sv.position[0]);
+                minY = std::min(minY, sv.position[1]);
+                minZ = std::min(minZ, sv.position[2]);
+                maxX = std::max(maxX, sv.position[0]);
+                maxY = std::max(maxY, sv.position[1]);
+                maxZ = std::max(maxZ, sv.position[2]);
+            }
+            std::cout << "  Bounds: (" << minX << "," << minY << "," << minZ 
+                      << ") to (" << maxX << "," << maxY << "," << maxZ << ")" << std::endl;
+        }
+    }
+    
+    if (outVertCount == 0) return;
+    
+    // Render
+    impl_->cmdList->SetPipelineState(pipelineToUse);
+    impl_->cmdList->SetGraphicsRootSignature(impl_->rootSignature.Get());
+    
+    float identity[16]; math::identity(identity);
+    float wvp[16];
+    math::multiply(wvp, identity, impl_->viewMatrix);
+    math::multiply(wvp, wvp, impl_->projMatrix);
+    
+    memcpy(impl_->constants.worldViewProj, wvp, sizeof(wvp));
+    memcpy(impl_->constants.world, identity, sizeof(identity));
+    
+    UINT drawOffset = impl_->currentDrawIndex * Impl::kAlignedConstantSize;
+    memcpy(impl_->constantBufferMapped + drawOffset, &impl_->constants, sizeof(impl_->constants));
+    D3D12_GPU_VIRTUAL_ADDRESS cbAddr = impl_->constantBuffer->GetGPUVirtualAddress() + drawOffset;
+    impl_->cmdList->SetGraphicsRootConstantBufferView(0, cbAddr);
+    impl_->currentDrawIndex++;
+    
+    impl_->cmdList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_LINELIST);
+    impl_->cmdList->IASetVertexBuffers(0, 1, &impl_->editWireframeVbv);  // Use dedicated wireframe buffer
+    impl_->cmdList->DrawInstanced(outVertCount, 1, 0, 0);
+    
+    ID3D12DescriptorHeap* heaps[] = {impl_->srvHeap.Get()};
+    impl_->cmdList->SetDescriptorHeaps(1, heaps);
+}
+
+void UnifiedRenderer::buildEditMeshFromGPU(const RHILoadedModel& model, int meshIndex, EditMesh& outMesh) {
+    outMesh.clear();
+    
+    if (meshIndex < 0 || meshIndex >= static_cast<int>(model.meshes.size())) return;
+    
+    const auto& gpuMesh = model.meshes[meshIndex];
+    size_t storageIdx = model.meshStorageStartIndex + meshIndex;
+    if (storageIdx >= impl_->meshStorage.size()) return;
+    
+    const auto& dx12Mesh = impl_->meshStorage[storageIdx];
+    
+    // Read vertex positions from GPU buffer
+    void* mappedVB = nullptr;
+    D3D12_RANGE readRange = {0, dx12Mesh.vbv.SizeInBytes};
+    HRESULT hr = dx12Mesh.vertexBuffer->Map(0, &readRange, &mappedVB);
+    if (FAILED(hr) || !mappedVB) return;
+    
+    const Vertex* srcVerts = static_cast<const Vertex*>(mappedVB);
+    uint32_t vertexCount = dx12Mesh.vbv.SizeInBytes / sizeof(Vertex);
+    
+    // Store UV data for later use (EditVertex doesn't store UV, Loop does)
+    std::vector<std::pair<float, float>> vertexUVs(vertexCount);
+    
+    // Copy vertices to EditMesh
+    for (uint32_t i = 0; i < vertexCount; i++) {
+        outMesh.addVertex(srcVerts[i].position[0], srcVerts[i].position[1], srcVerts[i].position[2]);
+        vertexUVs[i] = {srcVerts[i].uv[0], srcVerts[i].uv[1]};
+    }
+    
+    dx12Mesh.vertexBuffer->Unmap(0, nullptr);
+    
+    // Add edges from originalEdges
+    if (gpuMesh.hasOriginalEdges) {
+        for (const auto& edge : gpuMesh.originalEdges) {
+            outMesh.addEdgeIfNotExists(edge.v0, edge.v1, true);
+        }
+    }
+    
+    // Add faces from originalFaces (quads/ngons)
+    int quadCount = 0, ngonCount = 0;
+    if (gpuMesh.hasOriginalFaces) {
+        for (const auto& srcFace : gpuMesh.originalFaces) {
+            if (srcFace.vertexIndices.size() < 3) continue;
+            
+            // Create face with loops
+            luma::EditFace face;
+            for (uint32_t vi : srcFace.vertexIndices) {
+                if (vi < outMesh.vertices.size()) {
+                    luma::Loop loop;
+                    loop.vertexIndex = vi;
+                    loop.uv[0] = vertexUVs[vi].first;
+                    loop.uv[1] = vertexUVs[vi].second;
+                    face.loops.push_back(loop);
+                }
+            }
+            
+            if (face.loops.size() >= 3) {
+                outMesh.faces.push_back(face);
+                if (face.loops.size() == 4) quadCount++;
+                else if (face.loops.size() > 4) ngonCount++;
+            }
+        }
+    }
+    
+    std::cout << "[buildEditMeshFromGPU] Created " << outMesh.vertices.size() 
+              << " verts, " << outMesh.edges.size() << " edges, "
+              << outMesh.faces.size() << " faces (" << quadCount << " quads, " 
+              << ngonCount << " ngons)" << std::endl;
+}
+
+void UnifiedRenderer::buildEditMeshFromGPUTriangles(const RHILoadedModel& model, int meshIndex, EditMesh& outMesh) {
+    outMesh.clear();
+    
+    if (meshIndex < 0 || meshIndex >= static_cast<int>(model.meshes.size())) return;
+    
+    size_t storageIdx = model.meshStorageStartIndex + meshIndex;
+    if (storageIdx >= impl_->meshStorage.size()) return;
+    
+    const auto& dx12Mesh = impl_->meshStorage[storageIdx];
+    
+    // Read vertex positions
+    void* mappedVB = nullptr;
+    D3D12_RANGE readRange = {0, dx12Mesh.vbv.SizeInBytes};
+    HRESULT hr = dx12Mesh.vertexBuffer->Map(0, &readRange, &mappedVB);
+    if (FAILED(hr) || !mappedVB) return;
+    
+    const Vertex* srcVerts = static_cast<const Vertex*>(mappedVB);
+    uint32_t vertexCount = dx12Mesh.vbv.SizeInBytes / sizeof(Vertex);
+    
+    // Copy vertices
+    for (uint32_t i = 0; i < vertexCount; i++) {
+        outMesh.addVertex(srcVerts[i].position[0], srcVerts[i].position[1], srcVerts[i].position[2]);
+    }
+    
+    dx12Mesh.vertexBuffer->Unmap(0, nullptr);
+    
+    // Read indices and create triangle faces
+    void* mappedIB = nullptr;
+    D3D12_RANGE ibReadRange = {0, dx12Mesh.ibv.SizeInBytes};
+    hr = dx12Mesh.indexBuffer->Map(0, &ibReadRange, &mappedIB);
+    if (FAILED(hr) || !mappedIB) return;
+    
+    const uint32_t* indices = static_cast<const uint32_t*>(mappedIB);
+    uint32_t indexCount = dx12Mesh.indexCount;
+    
+    // Create triangle faces
+    for (uint32_t i = 0; i + 2 < indexCount; i += 3) {
+        std::vector<uint32_t> triVerts = { indices[i], indices[i+1], indices[i+2] };
+        outMesh.addFace(triVerts);
+    }
+    
+    dx12Mesh.indexBuffer->Unmap(0, nullptr);
+    
+    std::cout << "[buildEditMeshFromGPUTriangles] Created " << outMesh.vertices.size() 
+              << " verts, " << outMesh.faces.size() << " faces" << std::endl;
 }
 
 bool UnifiedRenderer::getViewProjectionInverse(float* outMatrix16) const {
@@ -2938,9 +4437,9 @@ void UnifiedRenderer::endShadowPass() {
         impl_->cmdList->OMSetRenderTargets(1, &hdrRtv, FALSE, &dsv);
     } else {
         // Restore to swapchain
-        D3D12_CPU_DESCRIPTOR_HANDLE rtv = impl_->rtvHeap->GetCPUDescriptorHandleForHeapStart();
-        rtv.ptr += impl_->frameIndex * impl_->rtvDescSize;
-        impl_->cmdList->OMSetRenderTargets(1, &rtv, FALSE, &dsv);
+    D3D12_CPU_DESCRIPTOR_HANDLE rtv = impl_->rtvHeap->GetCPUDescriptorHandleForHeapStart();
+    rtv.ptr += impl_->frameIndex * impl_->rtvDescSize;
+    impl_->cmdList->OMSetRenderTargets(1, &rtv, FALSE, &dsv);
     }
     
     // Restore viewport

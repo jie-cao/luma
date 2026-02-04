@@ -37,9 +37,26 @@ struct TextureData {
     std::string path;
 };
 
+// Original polygon face (before triangulation)
+// Used for edit mode to preserve quad/ngon topology
+struct OriginalFace {
+    std::vector<uint32_t> vertexIndices;  // Can be 3 (tri), 4 (quad), or more (ngon)
+    
+    bool isTriangle() const { return vertexIndices.size() == 3; }
+    bool isQuad() const { return vertexIndices.size() == 4; }
+    bool isNgon() const { return vertexIndices.size() > 4; }
+};
+
 struct Mesh {
+    std::string name;  // Mesh name from source file (e.g., "Fitness_Grandma_BodyGeo")
+    
     std::vector<Vertex> vertices;
     std::vector<uint32_t> indices;
+    
+    // Original faces from source file (before triangulation)
+    // Empty if loaded from already-triangulated source
+    std::vector<OriginalFace> originalFaces;
+    bool hasOriginalFaces = false;
     
     // Skinned vertices (used if hasSkeleton is true)
     std::vector<SkinnedVertex> skinnedVertices;
@@ -58,6 +75,19 @@ struct Mesh {
     float metallic = 0.0f;
     float roughness = 0.5f;
     std::string materialName;
+    
+    // Statistics
+    int getQuadCount() const {
+        int count = 0;
+        for (const auto& f : originalFaces) if (f.isQuad()) count++;
+        return count;
+    }
+    
+    int getNgonCount() const {
+        int count = 0;
+        for (const auto& f : originalFaces) if (f.isNgon()) count++;
+        return count;
+    }
 };
 
 // Generate a unit cube centered at origin
@@ -222,6 +252,102 @@ inline Mesh create_cylinder(float radius, float height, int segments = 16) {
         mesh.indices.push_back(base + 2);
         mesh.indices.push_back(base + 1);
         mesh.indices.push_back(base + 3);
+    }
+    
+    return mesh;
+}
+
+// Generate a sphere mesh (UV sphere)
+// segments: horizontal divisions
+// rings: vertical divisions
+inline Mesh create_sphere(int segments = 32, int rings = 16, float radius = 1.0f) {
+    Mesh mesh;
+    
+    for (int ring = 0; ring <= rings; ring++) {
+        float phi = 3.14159f * ring / rings;
+        float sinPhi = sinf(phi);
+        float cosPhi = cosf(phi);
+        
+        for (int seg = 0; seg <= segments; seg++) {
+            float theta = 2.0f * 3.14159f * seg / segments;
+            float sinTheta = sinf(theta);
+            float cosTheta = cosf(theta);
+            
+            float x = cosTheta * sinPhi;
+            float y = cosPhi;
+            float z = sinTheta * sinPhi;
+            
+            mesh.vertices.push_back({
+                {x * radius, y * radius, z * radius},  // position
+                {x, y, z},                              // normal
+                {-sinTheta, 0, cosTheta, 1},           // tangent
+                {(float)seg / segments, (float)ring / rings},  // uv
+                {1, 1, 1}                              // color
+            });
+        }
+    }
+    
+    // Generate indices
+    for (int ring = 0; ring < rings; ring++) {
+        for (int seg = 0; seg < segments; seg++) {
+            int curr = ring * (segments + 1) + seg;
+            int next = curr + segments + 1;
+            
+            // First triangle
+            mesh.indices.push_back(curr);
+            mesh.indices.push_back(next);
+            mesh.indices.push_back(curr + 1);
+            
+            // Second triangle
+            mesh.indices.push_back(curr + 1);
+            mesh.indices.push_back(next);
+            mesh.indices.push_back(next + 1);
+        }
+    }
+    
+    return mesh;
+}
+
+// Generate a plane mesh
+inline Mesh create_plane(float width = 1.0f, float depth = 1.0f, int subdivisionsW = 1, int subdivisionsD = 1) {
+    Mesh mesh;
+    
+    float halfW = width * 0.5f;
+    float halfD = depth * 0.5f;
+    
+    for (int z = 0; z <= subdivisionsD; z++) {
+        for (int x = 0; x <= subdivisionsW; x++) {
+            float px = -halfW + (width * x / subdivisionsW);
+            float pz = -halfD + (depth * z / subdivisionsD);
+            float u = (float)x / subdivisionsW;
+            float v = (float)z / subdivisionsD;
+            
+            mesh.vertices.push_back({
+                {px, 0, pz},        // position
+                {0, 1, 0},          // normal (up)
+                {1, 0, 0, 1},       // tangent
+                {u, v},             // uv
+                {1, 1, 1}           // color
+            });
+        }
+    }
+    
+    // Generate indices
+    for (int z = 0; z < subdivisionsD; z++) {
+        for (int x = 0; x < subdivisionsW; x++) {
+            int curr = z * (subdivisionsW + 1) + x;
+            int next = curr + subdivisionsW + 1;
+            
+            // First triangle
+            mesh.indices.push_back(curr);
+            mesh.indices.push_back(next);
+            mesh.indices.push_back(curr + 1);
+            
+            // Second triangle
+            mesh.indices.push_back(curr + 1);
+            mesh.indices.push_back(next);
+            mesh.indices.push_back(next + 1);
+        }
     }
     
     return mesh;

@@ -51,6 +51,7 @@
 #include "engine/build/build_system.h"
 #include "engine/asset/asset_browser.h"
 #include "engine/script/visual_script.h"
+#include "engine/ui/localization.h"
 #include <string>
 #include <vector>
 #include <functional>
@@ -64,13 +65,14 @@ struct EditorLayout {
     // Layout constants
     static constexpr float kMenuBarHeight = 19.0f;
     static constexpr float kToolbarHeight = 36.0f;
+    static constexpr float kModeBarHeight = 32.0f;   // NEW: Mode switching bar
     static constexpr float kStatusBarHeight = 24.0f;
     static constexpr float kLeftPanelWidth = 280.0f;
     static constexpr float kRightPanelWidth = 320.0f;
     static constexpr float kBottomPanelHeight = 200.0f;
     
     // Calculate layout regions based on current window size
-    static float getTopOffset() { return kMenuBarHeight + kToolbarHeight; }
+    static float getTopOffset() { return kMenuBarHeight + kToolbarHeight + kModeBarHeight; }
     
     static ImVec2 getLeftPanelPos() { 
         return ImVec2(0, getTopOffset()); 
@@ -299,92 +301,92 @@ inline SceneCallbacks& getSceneCallbacks() {
 inline void drawMainMenuBar(EditorState& state, Viewport& viewport, bool& shouldQuit) {
     if (ImGui::BeginMainMenuBar()) {
         // File Menu
-        if (ImGui::BeginMenu("File")) {
-            if (ImGui::MenuItem("New Scene", "Ctrl+N")) {
+        if (ImGui::BeginMenu(loc("File"))) {
+            if (ImGui::MenuItem(loc("New Scene"), "Ctrl+N")) {
                 auto& cb = getSceneCallbacks();
                 if (cb.onNewScene) cb.onNewScene();
             }
-            if (ImGui::MenuItem("Open Scene...", "Ctrl+O")) {
+            if (ImGui::MenuItem(loc("Open..."), "Ctrl+O")) {
                 if (state.onSceneLoad) state.onSceneLoad("");
             }
-            if (ImGui::MenuItem("Save Scene", "Ctrl+S")) {
+            if (ImGui::MenuItem(loc("Save"), "Ctrl+S")) {
                 if (state.onSceneSave) state.onSceneSave("");
             }
-            if (ImGui::MenuItem("Save Scene As...", "Ctrl+Shift+S")) {
+            if (ImGui::MenuItem(loc("Save As..."), "Ctrl+Shift+S")) {
                 if (state.onSceneSave) state.onSceneSave("");  // Will show dialog if path empty
             }
             ImGui::Separator();
-            if (ImGui::MenuItem("Import Model...")) {
+            if (ImGui::MenuItem(loc("Import Model..."))) {
                 if (state.onModelLoad) state.onModelLoad("");
             }
             ImGui::Separator();
-            if (ImGui::MenuItem("Screenshot", "F12")) {
+            if (ImGui::MenuItem(loc("Screenshot"), "F12")) {
                 state.screenshotPending = true;
             }
-            if (ImGui::MenuItem("Screenshot Settings...")) {
+            if (ImGui::MenuItem(loc("Screenshot Settings..."))) {
                 state.showScreenshotDialog = true;
             }
             ImGui::Separator();
-            if (ImGui::MenuItem("Exit", "Alt+F4")) {
+            if (ImGui::MenuItem(loc("Exit"), "Alt+F4")) {
                 shouldQuit = true;
             }
             ImGui::EndMenu();
         }
         
         // Edit Menu
-        if (ImGui::BeginMenu("Edit")) {
+        if (ImGui::BeginMenu(loc("Edit"))) {
             auto& history = getCommandHistory();
             
             std::string undoLabel = history.canUndo() 
-                ? "Undo " + history.getUndoDescription() 
-                : "Undo";
+                ? std::string(loc("Undo")) + " " + history.getUndoDescription() 
+                : loc("Undo");
             if (ImGui::MenuItem(undoLabel.c_str(), "Ctrl+Z", false, history.canUndo())) {
                 history.undo();
             }
             
             std::string redoLabel = history.canRedo() 
-                ? "Redo " + history.getRedoDescription() 
-                : "Redo";
+                ? std::string(loc("Redo")) + " " + history.getRedoDescription() 
+                : loc("Redo");
             if (ImGui::MenuItem(redoLabel.c_str(), "Ctrl+Shift+Z", false, history.canRedo())) {
                 history.redo();
             }
             
             ImGui::Separator();
-            if (ImGui::MenuItem("Delete", "Delete")) {
+            if (ImGui::MenuItem(loc("Delete"), "Delete")) {
                 auto& cb = getSceneCallbacks();
                 if (cb.onDeleteSelected) cb.onDeleteSelected();
             }
-            if (ImGui::MenuItem("Duplicate", "Ctrl+D")) {
+            if (ImGui::MenuItem(loc("Duplicate"), "Ctrl+D")) {
                 auto& cb = getSceneCallbacks();
                 if (cb.onDuplicateSelected) cb.onDuplicateSelected();
             }
             ImGui::Separator();
-            ImGui::MenuItem("History Panel", nullptr, &state.showHistory);
+            ImGui::MenuItem(loc("History"), nullptr, &state.showHistory);
             ImGui::EndMenu();
         }
         
         // View Menu
-        if (ImGui::BeginMenu("View")) {
+        if (ImGui::BeginMenu(loc("View"))) {
             // Core Panels (docked)
-            if (ImGui::BeginMenu("Panels")) {
-                ImGui::MenuItem("Hierarchy", "H", &state.showHierarchy);
-                ImGui::MenuItem("Inspector", "I", &state.showInspector);
-                ImGui::MenuItem("Asset Browser", "A", &state.showAssetBrowser);
+            if (ImGui::BeginMenu(loc("Panels"))) {
+                ImGui::MenuItem(loc("Hierarchy"), "H", &state.showHierarchy);
+                ImGui::MenuItem(loc("Inspector"), "I", &state.showInspector);
+                ImGui::MenuItem(loc("Assets"), "A", &state.showAssetBrowser);
                 ImGui::EndMenu();
             }
             
             ImGui::Separator();
             
             // Rendering panels
-            if (ImGui::BeginMenu("Rendering")) {
-                ImGui::MenuItem("Post Processing", nullptr, &state.showPostProcess);
-                ImGui::MenuItem("Render Settings", nullptr, &state.showRenderSettings);
-                ImGui::MenuItem("Lighting", nullptr, &state.showLighting);
+            if (ImGui::BeginMenu(loc("Rendering"))) {
+                ImGui::MenuItem(loc("Post Processing"), nullptr, &state.showPostProcess);
+                ImGui::MenuItem(loc("Render Settings"), nullptr, &state.showRenderSettings);
+                ImGui::MenuItem(loc("Lighting"), nullptr, &state.showLighting);
                 ImGui::EndMenu();
             }
             
             // Animation
-            ImGui::MenuItem("Animation Timeline", nullptr, &state.showAnimationTimeline);
+            ImGui::MenuItem(loc("Animation Timeline"), nullptr, &state.showAnimationTimeline);
             
             ImGui::Separator();
             
@@ -452,60 +454,60 @@ inline void drawMainMenuBar(EditorState& state, Viewport& viewport, bool& should
         }
         
         // Window Menu
-        if (ImGui::BeginMenu("Window")) {
-            ImGui::Text("Panels");
+        if (ImGui::BeginMenu(loc("Window"))) {
+            ImGui::Text("%s", loc("Panels"));
             ImGui::Separator();
-            ImGui::MenuItem("Hierarchy", nullptr, &state.showHierarchy);
-            ImGui::MenuItem("Inspector", nullptr, &state.showInspector);
-            ImGui::MenuItem("Asset Browser", nullptr, &state.showAssetBrowser);
-            ImGui::MenuItem("Console", nullptr, &state.showConsole);
-            ImGui::MenuItem("Statistics", nullptr, &state.showStats);
+            ImGui::MenuItem(loc("Hierarchy"), nullptr, &state.showHierarchy);
+            ImGui::MenuItem(loc("Inspector"), nullptr, &state.showInspector);
+            ImGui::MenuItem(loc("Assets"), nullptr, &state.showAssetBrowser);
+            ImGui::MenuItem(loc("Console"), nullptr, &state.showConsole);
+            ImGui::MenuItem(loc("Statistics"), nullptr, &state.showStats);
             
             ImGui::Separator();
-            ImGui::Text("Rendering");
+            ImGui::Text("%s", loc("Rendering"));
             ImGui::Separator();
-            ImGui::MenuItem("Post-Processing", nullptr, &state.showPostProcess);
-            ImGui::MenuItem("Advanced Post-Process", nullptr, &state.showAdvancedPostProcess);
-            ImGui::MenuItem("Advanced Shadows", nullptr, &state.showAdvancedShadows);
-            ImGui::MenuItem("Environment / IBL", nullptr, &state.showEnvironment);
-            ImGui::MenuItem("Lighting", nullptr, &state.showLighting);
-            ImGui::MenuItem("LOD Settings", nullptr, &state.showLODSettings);
-            ImGui::MenuItem("Particle Editor", nullptr, &state.showParticleEditor);
-            ImGui::MenuItem("Physics Editor", nullptr, &state.showPhysicsEditor);
-            ImGui::MenuItem("Terrain Editor", nullptr, &state.showTerrainEditor);
-            ImGui::MenuItem("Audio Editor", nullptr, &state.showAudioEditor);
-            ImGui::MenuItem("GI Editor", nullptr, &state.showGIEditor);
-            ImGui::MenuItem("Video Export", nullptr, &state.showVideoExport);
-            ImGui::MenuItem("Network", nullptr, &state.showNetworkPanel);
-            ImGui::MenuItem("AI Editor", nullptr, &state.showAIEditor);
-            ImGui::MenuItem("Game UI Editor", nullptr, &state.showGameUIEditor);
-            ImGui::MenuItem("Scene Manager", nullptr, &state.showSceneManager);
-            ImGui::MenuItem("Data Manager", nullptr, &state.showDataManager);
+            ImGui::MenuItem(loc("Post-Processing"), nullptr, &state.showPostProcess);
+            ImGui::MenuItem(loc("Advanced Post-Process"), nullptr, &state.showAdvancedPostProcess);
+            ImGui::MenuItem(loc("Advanced Shadows"), nullptr, &state.showAdvancedShadows);
+            ImGui::MenuItem(loc("Environment / IBL"), nullptr, &state.showEnvironment);
+            ImGui::MenuItem(loc("Lighting"), nullptr, &state.showLighting);
+            ImGui::MenuItem(loc("LOD Settings"), nullptr, &state.showLODSettings);
+            ImGui::MenuItem(loc("Particle Editor"), nullptr, &state.showParticleEditor);
+            ImGui::MenuItem(loc("Physics Editor"), nullptr, &state.showPhysicsEditor);
+            ImGui::MenuItem(loc("Terrain Editor"), nullptr, &state.showTerrainEditor);
+            ImGui::MenuItem(loc("Audio Editor"), nullptr, &state.showAudioEditor);
+            ImGui::MenuItem(loc("GI Editor"), nullptr, &state.showGIEditor);
+            ImGui::MenuItem(loc("Video Export"), nullptr, &state.showVideoExport);
+            ImGui::MenuItem(loc("Network"), nullptr, &state.showNetworkPanel);
+            ImGui::MenuItem(loc("AI Editor"), nullptr, &state.showAIEditor);
+            ImGui::MenuItem(loc("Game UI Editor"), nullptr, &state.showGameUIEditor);
+            ImGui::MenuItem(loc("Scene Manager"), nullptr, &state.showSceneManager);
+            ImGui::MenuItem(loc("Data Manager"), nullptr, &state.showDataManager);
             ImGui::Separator();
-            ImGui::MenuItem("Build Settings", nullptr, &state.showBuildSettings);
+            ImGui::MenuItem(loc("Build Settings"), nullptr, &state.showBuildSettings);
             
             ImGui::Separator();
-            ImGui::Text("Tools");
+            ImGui::Text("%s", loc("Tools"));
             ImGui::Separator();
-            ImGui::MenuItem("Character Creator", nullptr, &state.showCharacterCreator);
+            ImGui::MenuItem(loc("Character Creator"), nullptr, &state.showCharacterCreator);
             
             ImGui::Separator();
-            ImGui::Text("Scripting");
+            ImGui::Text("%s", loc("Scripting"));
             ImGui::Separator();
-            ImGui::MenuItem("Visual Script", nullptr, &state.showVisualScript);
-            ImGui::MenuItem("Script Editor", nullptr, &state.showScriptEditor);
+            ImGui::MenuItem(loc("Visual Script"), nullptr, &state.showVisualScript);
+            ImGui::MenuItem(loc("Script Editor"), nullptr, &state.showScriptEditor);
             
             ImGui::Separator();
-            ImGui::Text("Animation");
+            ImGui::Text("%s", loc("Animation"));
             ImGui::Separator();
-            ImGui::MenuItem("Timeline", nullptr, &state.showAnimationTimeline);
-            ImGui::MenuItem("State Machine Editor", nullptr, &state.showStateMachineEditor);
-            ImGui::MenuItem("Blend Tree Editor", nullptr, &state.showBlendTreeEditor);
-            ImGui::MenuItem("Animation Layers", nullptr, &state.showAnimationLayers);
-            ImGui::MenuItem("IK Settings", nullptr, &state.showIKSettings);
+            ImGui::MenuItem(loc("Timeline"), nullptr, &state.showAnimationTimeline);
+            ImGui::MenuItem(loc("State Machine Editor"), nullptr, &state.showStateMachineEditor);
+            ImGui::MenuItem(loc("Blend Tree Editor"), nullptr, &state.showBlendTreeEditor);
+            ImGui::MenuItem(loc("Animation Layers"), nullptr, &state.showAnimationLayers);
+            ImGui::MenuItem(loc("IK Settings"), nullptr, &state.showIKSettings);
             
             ImGui::Separator();
-            if (ImGui::MenuItem("Reset Layout")) {
+            if (ImGui::MenuItem(loc("Reset Layout"))) {
                 state.showHierarchy = true;
                 state.showInspector = true;
                 state.showPostProcess = true;
@@ -515,14 +517,14 @@ inline void drawMainMenuBar(EditorState& state, Viewport& viewport, bool& should
         }
         
         // Help Menu
-        if (ImGui::BeginMenu("Help")) {
-            if (ImGui::MenuItem("Demo Scenes...")) {
+        if (ImGui::BeginMenu(loc("Help"))) {
+            if (ImGui::MenuItem(loc("Demo Scenes..."))) {
                 state.showDemoMenu = true;
             }
             ImGui::Separator();
-            ImGui::MenuItem("Keyboard Shortcuts", "F1", &state.showHelp);
+            ImGui::MenuItem(loc("Shortcuts"), "F1", &state.showHelp);
             ImGui::Separator();
-            if (ImGui::MenuItem("About LUMA Studio")) {
+            if (ImGui::MenuItem(loc("About"))) {
                 // Show about dialog
             }
             ImGui::EndMenu();
@@ -556,8 +558,13 @@ inline void drawToolbar(EditorState& state, TransformGizmo& gizmo) {
         bool isRotate = state.gizmoMode == GizmoMode::Rotate;
         bool isScale = state.gizmoMode == GizmoMode::Scale;
         
+        char moveBtnText[32], rotateBtnText[32], scaleBtnText[32];
+        snprintf(moveBtnText, sizeof(moveBtnText), "%s (W)", loc("Move"));
+        snprintf(rotateBtnText, sizeof(rotateBtnText), "%s (E)", loc("Rotate"));
+        snprintf(scaleBtnText, sizeof(scaleBtnText), "%s (R)", loc("Scale"));
+        
         if (isTranslate) ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.3f, 0.5f, 0.8f, 1.0f));
-        if (ImGui::Button("Move (W)", ImVec2(70, 26))) {
+        if (ImGui::Button(moveBtnText, ImVec2(80, 26))) {
             state.gizmoMode = GizmoMode::Translate;
             gizmo.setMode(GizmoMode::Translate);
         }
@@ -565,7 +572,7 @@ inline void drawToolbar(EditorState& state, TransformGizmo& gizmo) {
         
         ImGui::SameLine();
         if (isRotate) ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.3f, 0.5f, 0.8f, 1.0f));
-        if (ImGui::Button("Rotate (E)", ImVec2(70, 26))) {
+        if (ImGui::Button(rotateBtnText, ImVec2(80, 26))) {
             state.gizmoMode = GizmoMode::Rotate;
             gizmo.setMode(GizmoMode::Rotate);
         }
@@ -573,7 +580,7 @@ inline void drawToolbar(EditorState& state, TransformGizmo& gizmo) {
         
         ImGui::SameLine();
         if (isScale) ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.3f, 0.5f, 0.8f, 1.0f));
-        if (ImGui::Button("Scale (R)", ImVec2(70, 26))) {
+        if (ImGui::Button(scaleBtnText, ImVec2(80, 26))) {
             state.gizmoMode = GizmoMode::Scale;
             gizmo.setMode(GizmoMode::Scale);
         }
@@ -584,7 +591,7 @@ inline void drawToolbar(EditorState& state, TransformGizmo& gizmo) {
         ImGui::SameLine();
         
         // Local/World space toggle
-        if (ImGui::Button(state.gizmoLocalSpace ? "Local" : "World", ImVec2(60, 26))) {
+        if (ImGui::Button(state.gizmoLocalSpace ? loc("Local") : loc("World"), ImVec2(60, 26))) {
             state.gizmoLocalSpace = !state.gizmoLocalSpace;
         }
         
@@ -593,7 +600,7 @@ inline void drawToolbar(EditorState& state, TransformGizmo& gizmo) {
         ImGui::SameLine();
         
         // Snap toggle
-        ImGui::Checkbox("Snap", &state.snapEnabled);
+        ImGui::Checkbox(loc("Snap"), &state.snapEnabled);
         if (state.snapEnabled) {
             ImGui::SameLine();
             ImGui::SetNextItemWidth(60);
@@ -672,11 +679,11 @@ inline void drawHierarchyPanel(SceneGraph& scene, EditorState& state) {
     ImGui::SetNextWindowSize(EditorLayout::getLeftPanelSize(io.DisplaySize.y, hasBottomPanel), ImGuiCond_Always);
     
     ImGuiWindowFlags flags = ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoResize;
-    if (ImGui::Begin("Hierarchy", &state.showHierarchy, flags)) {
+    if (ImGui::Begin(loc("Hierarchy"), &state.showHierarchy, flags)) {
         // Search bar
         static char searchBuf[128] = "";
         ImGui::SetNextItemWidth(-60);
-        ImGui::InputTextWithHint("##Search", "Search...", searchBuf, sizeof(searchBuf));
+        ImGui::InputTextWithHint("##Search", loc("Search..."), searchBuf, sizeof(searchBuf));
         ImGui::SameLine();
         if (ImGui::Button("+", ImVec2(24, 0))) {
             ImGui::OpenPopup("AddEntityPopup");
@@ -879,7 +886,7 @@ inline void drawHierarchyPanel(SceneGraph& scene, EditorState& state) {
                 IM_COL32(100, 100, 150, 50)
             );
         }
-        ImGui::TextDisabled("Drop assets or entities here");
+        ImGui::TextDisabled("%s", loc("Drop assets or entities here"));
     }
     ImGui::End();
 }
@@ -895,11 +902,11 @@ inline void drawInspectorPanel(SceneGraph& scene, EditorState& state) {
     ImGui::SetNextWindowSize(EditorLayout::getRightPanelSize(io.DisplaySize.y, hasBottomPanel), ImGuiCond_Always);
     
     ImGuiWindowFlags flags = ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoResize;
-    if (ImGui::Begin("Inspector", &state.showInspector, flags)) {
+    if (ImGui::Begin(loc("Inspector"), &state.showInspector, flags)) {
         Entity* selected = scene.getSelectedEntity();
         
         if (!selected) {
-            ImGui::TextColored(ImVec4(0.5f, 0.5f, 0.5f, 1.0f), "No entity selected");
+            ImGui::TextColored(ImVec4(0.5f, 0.5f, 0.5f, 1.0f), "%s", loc("No entity selected"));
             ImGui::End();
             return;
         }
@@ -925,14 +932,14 @@ inline void drawInspectorPanel(SceneGraph& scene, EditorState& state) {
         ImGui::Spacing();
         
         // Transform component
-        if (ImGui::CollapsingHeader("Transform", ImGuiTreeNodeFlags_DefaultOpen)) {
+        if (ImGui::CollapsingHeader(loc("Transform"), ImGuiTreeNodeFlags_DefaultOpen)) {
             ImGui::Indent(10);
             
             // Position
             float pos[3] = {selected->localTransform.position.x, 
                            selected->localTransform.position.y, 
                            selected->localTransform.position.z};
-            ImGui::Text("Position");
+            ImGui::Text("%s", loc("Position"));
             ImGui::SetNextItemWidth(-1);
             if (ImGui::DragFloat3("##Position", pos, 0.1f)) {
                 selected->localTransform.position = {pos[0], pos[1], pos[2]};
@@ -942,7 +949,7 @@ inline void drawInspectorPanel(SceneGraph& scene, EditorState& state) {
             // Rotation
             Vec3 eulerDeg = selected->localTransform.getEulerDegrees();
             float rot[3] = {eulerDeg.x, eulerDeg.y, eulerDeg.z};
-            ImGui::Text("Rotation");
+            ImGui::Text("%s", loc("Rotation"));
             ImGui::SetNextItemWidth(-1);
             if (ImGui::DragFloat3("##Rotation", rot, 1.0f)) {
                 selected->localTransform.setEulerDegrees({rot[0], rot[1], rot[2]});
@@ -953,7 +960,7 @@ inline void drawInspectorPanel(SceneGraph& scene, EditorState& state) {
             float scl[3] = {selected->localTransform.scale.x, 
                            selected->localTransform.scale.y, 
                            selected->localTransform.scale.z};
-            ImGui::Text("Scale");
+            ImGui::Text("%s", loc("Scale"));
             ImGui::SetNextItemWidth(-1);
             if (ImGui::DragFloat3("##Scale", scl, 0.01f, 0.001f, 100.0f)) {
                 selected->localTransform.scale = {scl[0], scl[1], scl[2]};
@@ -1811,11 +1818,11 @@ inline void drawAssetBrowser(EditorState& state) {
     ImGui::SetNextWindowSize(EditorLayout::getBottomPanelSize(io.DisplaySize.x), ImGuiCond_Always);
     
     ImGuiWindowFlags flags = ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoResize;
-    if (ImGui::Begin("Assets", &state.showAssetBrowser, flags)) {
+    if (ImGui::Begin(loc("Assets"), &state.showAssetBrowser, flags)) {
         // Path bar
-        ImGui::Text("Path: %s", state.currentAssetPath.c_str());
+        ImGui::Text("%s %s", loc("Path:"), state.currentAssetPath.c_str());
         ImGui::SameLine(ImGui::GetContentRegionAvail().x - 60);
-        if (ImGui::Button("Refresh")) {
+        if (ImGui::Button(loc("Refresh"))) {
             // Refresh directory
         }
         
@@ -1882,7 +1889,7 @@ inline void drawAssetBrowser(EditorState& state) {
                 }
             }
         } catch (...) {
-            ImGui::TextColored(ImVec4(1, 0.3f, 0.3f, 1), "Cannot read directory");
+            ImGui::TextColored(ImVec4(1, 0.3f, 0.3f, 1), "%s", loc("Cannot read directory"));
         }
         
         ImGui::EndChild();
@@ -1900,13 +1907,13 @@ inline void drawConsole(EditorState& state) {
     ImGui::SetNextWindowSize(EditorLayout::getBottomPanelSize(io.DisplaySize.x), ImGuiCond_Always);
     
     ImGuiWindowFlags flags = ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoResize;
-    if (ImGui::Begin("Console", &state.showConsole, flags)) {
-        if (ImGui::Button("Clear")) {
+    if (ImGui::Begin(loc("Console"), &state.showConsole, flags)) {
+        if (ImGui::Button(loc("Clear"))) {
             state.consoleLogs.clear();
         }
         ImGui::SameLine();
         static bool autoScroll = true;
-        ImGui::Checkbox("Auto-scroll", &autoScroll);
+        ImGui::Checkbox(loc("Auto-scroll"), &autoScroll);
         
         ImGui::Separator();
         
@@ -2386,15 +2393,15 @@ inline void drawAssetBrowserExtended(EditorState& state, const AssetCacheStats* 
     ImGui::SetNextWindowSize(EditorLayout::getBottomPanelSize(io.DisplaySize.x), ImGuiCond_Always);
     
     ImGuiWindowFlags flags = ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoResize;
-    if (ImGui::Begin("Assets", &state.showAssetBrowser, flags)) {
+    if (ImGui::Begin(loc("Assets"), &state.showAssetBrowser, flags)) {
         // Tab bar for browser and cache
         if (ImGui::BeginTabBar("AssetTabs")) {
             // File browser tab
-            if (ImGui::BeginTabItem("Browser")) {
+            if (ImGui::BeginTabItem(loc("Browser"))) {
                 // Path bar
-                ImGui::Text("Path: %s", state.currentAssetPath.c_str());
+                ImGui::Text("%s %s", loc("Path:"), state.currentAssetPath.c_str());
                 ImGui::SameLine(ImGui::GetContentRegionAvail().x - 60);
-                if (ImGui::Button("Refresh")) {
+                if (ImGui::Button(loc("Refresh"))) {
                     // Refresh directory (no-op, will re-read on next frame)
                 }
                 
@@ -2478,7 +2485,7 @@ inline void drawAssetBrowserExtended(EditorState& state, const AssetCacheStats* 
                         }
                     }
                 } catch (...) {
-                    ImGui::TextColored(ImVec4(1, 0.3f, 0.3f, 1), "Cannot read directory");
+                    ImGui::TextColored(ImVec4(1, 0.3f, 0.3f, 1), "%s", loc("Cannot read directory"));
                 }
                 
                 ImGui::EndChild();
@@ -2486,7 +2493,7 @@ inline void drawAssetBrowserExtended(EditorState& state, const AssetCacheStats* 
             }
             
             // Cache tab
-            if (ImGui::BeginTabItem("Cache")) {
+            if (ImGui::BeginTabItem(loc("Cache"))) {
                 if (cacheStats) {
                     ImGui::Columns(2, "CacheColumns", false);
                     

@@ -11,12 +11,24 @@
 #include <vector>
 #include <memory>
 
+// Forward declarations
+namespace luma { 
+    class EditMesh; 
+    struct Model;  // From model_loader.h
+}
+
 namespace luma {
+
+// ===== Original Edge (for quad/ngon wireframe display) =====
+struct OriginalEdge {
+    uint32_t v0, v1;
+};
 
 // ===== GPU Mesh =====
 // Platform-agnostic mesh representation
 // Actual GPU resources are stored internally by the renderer
 struct RHIGPUMesh {
+    std::string name;  // Mesh name from source file
     uint32_t indexCount = 0;
     uint32_t meshIndex = 0;  // Internal index for renderer's mesh storage
     
@@ -29,6 +41,23 @@ struct RHIGPUMesh {
     float baseColor[3] = {1.0f, 1.0f, 1.0f};
     float metallic = 0.0f;
     float roughness = 0.5f;
+    
+    // Original edges for quad/ngon wireframe display
+    // These are the edges from the original mesh topology (before triangulation)
+    std::vector<OriginalEdge> originalEdges;
+    bool hasOriginalEdges = false;
+    
+    // Original faces for edit mode (quads/ngons before triangulation)
+    // Uses simple vector of vertex indices per face
+    struct GPUOriginalFace {
+        std::vector<uint32_t> vertexIndices;
+    };
+    std::vector<GPUOriginalFace> originalFaces;
+    bool hasOriginalFaces = false;
+    
+    // Skinned vertices for CPU skinning (edit mode wireframe on animated models)
+    std::vector<SkinnedVertex> skinnedVertices;
+    bool hasSkinning = false;
 };
 
 // ===== Loaded Model =====
@@ -112,6 +141,11 @@ public:
     // Async model loading - geometry loads immediately, textures load in background
     bool loadModelAsync(const std::string& path, RHILoadedModel& outModel);
     
+    // Async model loading with skeleton and animation output
+    // This version also returns the loaded Model so caller can extract skeleton/animations
+    // without needing to load the file twice
+    bool loadModelAsync(const std::string& path, RHILoadedModel& outModel, Model& outSourceModel);
+    
     // Get async loading progress (0.0 - 1.0)
     float getAsyncLoadProgress() const;
     
@@ -132,6 +166,10 @@ public:
     // Set camera for subsequent render calls
     void setCamera(const RHICameraParams& camera, float sceneRadius);
     
+    // Get current camera matrices (for picking, etc.)
+    void getViewMatrix(float* outMatrix16) const;
+    void getProjectionMatrix(float* outMatrix16) const;
+    
     // Render model with explicit world transform matrix (16 floats, column-major)
     void renderModel(const RHILoadedModel& model, const float* worldMatrix);
     
@@ -141,6 +179,64 @@ public:
     
     // Render model with selection outline (for selected objects)
     void renderModelOutline(const RHILoadedModel& model, const float* worldMatrix, const float* outlineColor);
+    
+    // Render model with specific mesh highlighted (for edit mode)
+    // highlightMeshIndex: -1 = no highlight, 0+ = highlight specific mesh
+    // highlightColor: RGBA color for the highlight overlay
+    void renderModelWithHighlight(const RHILoadedModel& model, const float* worldMatrix, 
+                                   int highlightMeshIndex, const float* highlightColor);
+    
+    // Render model in wireframe mode
+    void renderModelWireframe(const RHILoadedModel& model, const float* worldMatrix, const float* wireColor);
+    
+    // Render single mesh highlight (orange wireframe overlay, always visible - like Maya/Blender)
+    void renderMeshHighlight(const RHILoadedModel& model, const float* worldMatrix, 
+                             int meshIndex, const float* highlightColor);
+    
+    // Render single mesh as wireframe (for edit mode highlight)
+    void renderSingleMeshWireframe(const RHILoadedModel& model, const float* worldMatrix,
+                                   int meshIndex, const float* wireColor);
+    
+    // Render entire model as wireframe with one mesh highlighted (unlit, solid colors)
+    void renderModelWireframeUnlit(const RHILoadedModel& model, const float* worldMatrix,
+                                   int highlightMeshIndex, const float* highlightColor);
+    
+    // Render model in edit mode - wireframe only, no solid fill (like Blender/Maya)
+    // Selected mesh = highlightColor (orange), other meshes = grayColor
+    void renderEditModeWireframe(const RHILoadedModel& model, const float* worldMatrix,
+                                  int selectedMeshIndex, const float* highlightColor, const float* grayColor);
+    
+    // Render ONLY selected mesh as wireframe overlay (like Maya/Blender mesh highlight)
+    // This is an OVERLAY pass - call AFTER main shaded rendering
+    // Uses: depth test ON, depth write OFF, depth bias to avoid z-fighting
+    void renderMeshWireframeOverlay(const RHILoadedModel& model, const float* worldMatrix,
+                                     int meshIndex, const float* wireColor);
+    
+    // Render original edges wireframe (for quad/ngon display in edit mode)
+    // vertices: array of float3 positions
+    // indices: array of line indices (pairs)
+    // color: RGBA color
+    void renderEditModeEdges(const float* vertices, uint32_t vertexCount,
+                             const uint32_t* indices, uint32_t indexCount,
+                             const float* worldMatrix, const float* color);
+    
+    // Render original edges from GPU mesh (quad/ngon edges, not triangulated)
+    void renderOriginalEdges(const RHILoadedModel& model, int meshIndex,
+                             const float* worldMatrix, const float* color);
+    
+    // Render original edges with skinning (for animated models)
+    // boneMatrices: array of MAX_BONES 4x4 matrices, boneIndices/weights from skinnedVertices
+    void renderOriginalEdgesSkinned(const RHILoadedModel& model, int meshIndex,
+                                    const float* worldMatrix, const float* color,
+                                    const float* boneMatrices,
+                                    const std::vector<SkinnedVertex>& skinnedVertices);
+    
+    // Build EditMesh from GPU mesh data (for edit mode)
+    void buildEditMeshFromGPU(const RHILoadedModel& model, int meshIndex, EditMesh& outMesh);
+    void buildEditMeshFromGPUTriangles(const RHILoadedModel& model, int meshIndex, EditMesh& outMesh);
+    
+    // Render model in solid (clay) mode - uniform gray shading
+    void renderModelSolid(const RHILoadedModel& model, const float* worldMatrix, const float* solidColor);
     
     // Render line list for gizmos (pairs of points, RGBA color per line)
     // lines: array of {startX, startY, startZ, endX, endY, endZ, r, g, b, a} per line

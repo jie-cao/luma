@@ -217,6 +217,13 @@ TextureData get_material_texture(const aiMaterial* mat, aiTextureType type, cons
 // Process a single mesh
 Mesh process_mesh(const aiMesh* aiMesh, const aiScene* scene, Model& model) {
     Mesh mesh;
+    
+    // Get mesh name from Assimp
+    mesh.name = aiMesh->mName.C_Str();
+    if (mesh.name.empty()) {
+        mesh.name = "Mesh_" + std::to_string(model.meshes.size());
+    }
+    
     mesh.vertices.reserve(aiMesh->mNumVertices);
     mesh.indices.reserve(aiMesh->mNumFaces * 3);
 
@@ -451,16 +458,45 @@ Mesh process_mesh(const aiMesh* aiMesh, const aiScene* scene, Model& model) {
         mesh.vertices.push_back(v);
     }
 
-    // Process indices
+    // Process indices and save original face topology
+    int quadCount = 0;
+    int ngonCount = 0;
+    
     for (unsigned int i = 0; i < aiMesh->mNumFaces; i++) {
         const aiFace& face = aiMesh->mFaces[i];
+        
+        // Save original face (before triangulation flag may split it)
+        OriginalFace origFace;
         for (unsigned int j = 0; j < face.mNumIndices; j++) {
-            mesh.indices.push_back(face.mIndices[j]);
+            origFace.vertexIndices.push_back(face.mIndices[j]);
         }
+        mesh.originalFaces.push_back(origFace);
+        
+        if (origFace.isQuad()) quadCount++;
+        else if (origFace.isNgon()) ngonCount++;
+        
+        // Generate triangulated indices for GPU rendering
+        // Fan triangulation for convex polygons
+        if (face.mNumIndices >= 3) {
+            for (unsigned int j = 1; j < face.mNumIndices - 1; j++) {
+                mesh.indices.push_back(face.mIndices[0]);
+                mesh.indices.push_back(face.mIndices[j]);
+                mesh.indices.push_back(face.mIndices[j + 1]);
+            }
+        }
+    }
+    
+    mesh.hasOriginalFaces = !mesh.originalFaces.empty();
+    
+    if (quadCount > 0 || ngonCount > 0) {
+        std::cout << "[model] Preserved original faces: " 
+                  << mesh.originalFaces.size() << " total, "
+                  << quadCount << " quads, " 
+                  << ngonCount << " ngons" << std::endl;
     }
 
     model.totalVertices += mesh.vertices.size();
-    model.totalTriangles += aiMesh->mNumFaces;
+    model.totalTriangles += mesh.indices.size() / 3;
 
     return mesh;
 }
@@ -484,8 +520,9 @@ std::optional<Model> load_model(const std::string& path) {
     g_modelDir = fsPath.parent_path().string();
     
     Assimp::Importer importer;
+    // Note: We DON'T use aiProcess_Triangulate because we want to preserve
+    // original quad/ngon faces for edit mode. We triangulate manually in process_mesh().
     const aiScene* scene = importer.ReadFile(path,
-        aiProcess_Triangulate |
         aiProcess_GenNormals |
         aiProcess_CalcTangentSpace |  // Required for normal mapping
         // Note: Don't use aiProcess_FlipUVs for DirectX (UV origin is top-left, same as textures)
@@ -818,8 +855,8 @@ std::optional<Model> load_model_with_animations(const std::string& path) {
     g_modelDir = fsPath.parent_path().string();
     
     Assimp::Importer importer;
+    // Note: We DON'T use aiProcess_Triangulate to preserve original quad/ngon faces
     const aiScene* scene = importer.ReadFile(path,
-        aiProcess_Triangulate |
         aiProcess_GenNormals |
         aiProcess_CalcTangentSpace |
         aiProcess_JoinIdenticalVertices |
