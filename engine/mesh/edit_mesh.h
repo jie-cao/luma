@@ -376,6 +376,11 @@ public:
         selectedFaces.clear();
     }
     
+    // Alias for selectNone
+    void clearSelection() {
+        selectNone();
+    }
+    
     void selectVertex(uint32_t index, bool add = false) {
         if (!add) selectedVertices.clear();
         selectedVertices.insert(index);
@@ -567,6 +572,110 @@ public:
         selectedFaces.clear();
         rebuildEdges();
         removeUnusedVertices();
+        markDirty();
+    }
+    
+    // 按距离合并顶点
+    void mergeByDistance(float threshold = 0.001f) {
+        if (vertices.empty()) return;
+        pushUndo();
+        
+        // Build mapping from old to new vertex indices
+        std::vector<int> vertexMap(vertices.size());
+        std::vector<EditVertex> newVertices;
+        
+        for (size_t i = 0; i < vertices.size(); i++) {
+            int merged = -1;
+            for (size_t j = 0; j < newVertices.size(); j++) {
+                float dx = vertices[i].position[0] - newVertices[j].position[0];
+                float dy = vertices[i].position[1] - newVertices[j].position[1];
+                float dz = vertices[i].position[2] - newVertices[j].position[2];
+                float dist = std::sqrt(dx*dx + dy*dy + dz*dz);
+                if (dist < threshold) {
+                    merged = static_cast<int>(j);
+                    break;
+                }
+            }
+            
+            if (merged >= 0) {
+                vertexMap[i] = merged;
+            } else {
+                vertexMap[i] = static_cast<int>(newVertices.size());
+                newVertices.push_back(vertices[i]);
+            }
+        }
+        
+        // Update face vertex indices
+        for (auto& face : faces) {
+            for (auto& loop : face.loops) {
+                loop.vertexIndex = static_cast<uint32_t>(vertexMap[loop.vertexIndex]);
+            }
+        }
+        
+        // Update edge vertex indices
+        for (auto& edge : edges) {
+            edge.v0 = static_cast<uint32_t>(vertexMap[edge.v0]);
+            edge.v1 = static_cast<uint32_t>(vertexMap[edge.v1]);
+        }
+        
+        vertices = std::move(newVertices);
+        
+        // Update selection
+        std::set<uint32_t> newSelectedVertices;
+        for (uint32_t vi : selectedVertices) {
+            if (vi < vertexMap.size()) {
+                newSelectedVertices.insert(static_cast<uint32_t>(vertexMap[vi]));
+            }
+        }
+        selectedVertices = std::move(newSelectedVertices);
+        
+        rebuildEdges();
+        markDirty();
+    }
+    
+    // 重新计算法线
+    void recalculateNormals() {
+        // Recalculate face normals
+        for (auto& face : faces) {
+            face.calculateNormal(vertices);
+        }
+        
+        // For smooth shading, average normals at shared vertices
+        std::vector<float> vertexNormals(vertices.size() * 3, 0.0f);
+        std::vector<int> vertexFaceCount(vertices.size(), 0);
+        
+        // Accumulate normals from faces
+        for (const auto& face : faces) {
+            if (face.loops.empty()) continue;
+            const float* faceNormal = face.loops[0].normal;  // All loops have same normal after calculateNormal
+            
+            for (const auto& loop : face.loops) {
+                uint32_t vi = loop.vertexIndex;
+                vertexNormals[vi * 3 + 0] += faceNormal[0];
+                vertexNormals[vi * 3 + 1] += faceNormal[1];
+                vertexNormals[vi * 3 + 2] += faceNormal[2];
+                vertexFaceCount[vi]++;
+            }
+        }
+        
+        // Normalize accumulated normals
+        for (size_t i = 0; i < vertices.size(); i++) {
+            if (vertexFaceCount[i] > 0) {
+                float* n = &vertexNormals[i * 3];
+                math::normalize3(n);
+            }
+        }
+        
+        // Apply averaged normals to loops (smooth shading)
+        for (auto& face : faces) {
+            for (auto& loop : face.loops) {
+                uint32_t vi = loop.vertexIndex;
+                loop.normal[0] = vertexNormals[vi * 3 + 0];
+                loop.normal[1] = vertexNormals[vi * 3 + 1];
+                loop.normal[2] = vertexNormals[vi * 3 + 2];
+            }
+        }
+        
         markDirty();
     }
     

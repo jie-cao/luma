@@ -9,6 +9,7 @@
 #include "engine/rendering/ssao.h"
 #include "engine/rendering/ibl.h"
 #include "engine/rendering/advanced_shadows.h"
+#include "engine/mesh/edit_mesh.h"
 
 #include <iostream>
 #include <cassert>
@@ -17,6 +18,10 @@
 #include <string>
 #include <functional>
 #include <chrono>
+
+// Forward declare test namespaces
+namespace luma { namespace test { namespace MeshEditTests { inline void registerMeshEditTests(class UnitTestRunner& runner); }}}
+namespace luma { namespace test { namespace SelectionTests { inline void registerSelectionTests(class UnitTestRunner& runner); }}}
 
 namespace luma {
 namespace test {
@@ -762,6 +767,12 @@ inline void registerAllTests(UnitTestRunner& runner) {
     runner.addTest("Timeline", "Animation Curve", TimelineTests::testAnimationCurve);
     runner.addTest("Timeline", "Timeline Playback", TimelineTests::testTimeline);
     runner.addTest("Timeline", "Timeline Markers", TimelineTests::testTimelineMarkers);
+    
+    // Mesh Edit Tests (new)
+    MeshEditTests::registerMeshEditTests(runner);
+    
+    // Selection Tests (new)
+    SelectionTests::registerSelectionTests(runner);
 }
 
 // ===== Run All Unit Tests =====

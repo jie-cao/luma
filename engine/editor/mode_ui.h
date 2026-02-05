@@ -9,6 +9,7 @@
 #include "engine/ui/localization.h"
 #include <string>
 #include <functional>
+#include <algorithm>
 
 namespace luma {
 namespace editor {
@@ -754,22 +755,10 @@ public:
         drawViewBtn(ViewMode::Material, loc("Material"), loc("Full PBR material rendering"));
         ImGui::SameLine(0, 4);
         drawViewBtn(ViewMode::Solid, loc("Solid"), loc("Solid gray shading (clay)"));
-        
-        ImGui::SetCursorPosX(ImGui::GetCursorPosX() + 4);
-        drawViewBtn(ViewMode::Wireframe, loc("Wire+"), loc("Material + wireframe overlay"));
         ImGui::SameLine(0, 4);
-        drawViewBtn(ViewMode::WireframeOnly, loc("Wire"), loc("Wireframe only (no solid)"));
+        drawViewBtn(ViewMode::Wireframe, loc("Wire"), loc("Wireframe only"));
         
         ImGui::PopStyleVar();
-        
-        ImGui::Spacing();
-        
-        // Wireframe overlay checkbox (for Material and Solid modes)
-        if (currentViewMode == ViewMode::Material || currentViewMode == ViewMode::Solid) {
-            if (ImGui::Checkbox(loc("Show Wireframe Overlay"), &showWireframeOverlay)) {
-                changed = true;
-            }
-        }
         
         ImGui::Spacing();
         ImGui::Separator();
@@ -900,6 +889,10 @@ public:
     enum class SelectMode { Vertex, Edge, Face };
     SelectMode selectMode = SelectMode::Face;
     
+    // 选择工具类型
+    enum class SelectTool { Click, Box, Circle, Lasso };
+    SelectTool selectTool = SelectTool::Box;  // 默认框选
+    
     // 编辑工具
     enum class EditTool { Select, Move, Rotate, Scale, Extrude };
     EditTool currentTool = EditTool::Select;
@@ -907,6 +900,7 @@ public:
     // 线框显示选项
     bool showOriginalEdges = true;  // 显示四边面原始边
     bool showAllEdges = false;      // 显示所有边（包括三角化边）
+    bool showVertices = true;       // 点模式时显示顶点
     
     // 回调
     std::function<void(SelectMode)> onSelectModeChanged;
@@ -949,6 +943,41 @@ public:
         ImGui::PopStyleVar();
         
         ImGui::Spacing();
+        
+        // === 选择工具 ===
+        ImGui::TextColored(ImVec4(0.6f, 0.6f, 0.6f, 1.0f), "%s", loc("Select Tool"));
+        
+        ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 4.0f);
+        float toolWidth = (panelWidth - 40) / 4.0f;
+        
+        auto drawSelectToolBtn = [&](SelectTool tool, const char* label, const char* tooltip) {
+            bool selected = (selectTool == tool);
+            if (selected) {
+                ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.4f, 0.6f, 0.8f, 1.0f));
+            }
+            
+            if (ImGui::Button(label, ImVec2(toolWidth, 24))) {
+                selectTool = tool;
+                changed = true;
+            }
+            if (ImGui::IsItemHovered()) {
+                ImGui::SetTooltip("%s", tooltip);
+            }
+            
+            if (selected) ImGui::PopStyleColor();
+        };
+        
+        drawSelectToolBtn(SelectTool::Click, loc("Click"), loc("Click to select (W)"));
+        ImGui::SameLine(0, 2);
+        drawSelectToolBtn(SelectTool::Box, loc("Box"), loc("Box select (B)"));
+        ImGui::SameLine(0, 2);
+        drawSelectToolBtn(SelectTool::Circle, loc("Circle"), loc("Circle select (C)"));
+        ImGui::SameLine(0, 2);
+        drawSelectToolBtn(SelectTool::Lasso, loc("Lasso"), loc("Lasso select (L)"));
+        
+        ImGui::PopStyleVar();
+        
+        ImGui::Spacing();
         ImGui::Separator();
         ImGui::Spacing();
         
@@ -957,7 +986,7 @@ public:
         ImGui::Separator();
         
         ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 4.0f);
-        float toolBtnWidth = (panelWidth - 20) / 2.5f;
+        float editBtnWidth = (panelWidth - 20) / 2.5f;
         
         auto drawToolBtn = [&](EditTool tool, const char* icon, const char* label, const char* shortcut) {
             bool selected = (currentTool == tool);
@@ -968,7 +997,7 @@ public:
             char fullLabel[64];
             snprintf(fullLabel, sizeof(fullLabel), "%s %s", icon, label);
             
-            if (ImGui::Button(fullLabel, ImVec2(toolBtnWidth, 32))) {
+            if (ImGui::Button(fullLabel, ImVec2(editBtnWidth, 32))) {
                 currentTool = tool;
                 changed = true;
                 if (onToolChanged) onToolChanged(tool);
@@ -1000,8 +1029,8 @@ public:
         ImGui::Separator();
         ImGui::Spacing();
         
-        // === 线框显示选项 ===
-        ImGui::TextColored(ImVec4(0.7f, 0.7f, 0.7f, 1.0f), "%s", loc("Wireframe Display"));
+        // === 显示选项 ===
+        ImGui::TextColored(ImVec4(0.7f, 0.7f, 0.7f, 1.0f), "%s", loc("Display Options"));
         ImGui::Separator();
         
         if (ImGui::Checkbox(loc("Show Quad Edges"), &showOriginalEdges)) {
@@ -1016,6 +1045,13 @@ public:
         }
         if (ImGui::IsItemHovered()) {
             ImGui::SetTooltip("%s", loc("Show all edges including triangulation"));
+        }
+        
+        if (ImGui::Checkbox(loc("Show Vertices"), &showVertices)) {
+            changed = true;
+        }
+        if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip("%s", loc("Show vertex points in vertex mode"));
         }
         
         ImGui::Spacing();
@@ -1042,6 +1078,24 @@ public:
         if (ImGui::IsKeyPressed(ImGuiKey_3, false)) {
             selectMode = SelectMode::Face;
             if (onSelectModeChanged) onSelectModeChanged(selectMode);
+            changed = true;
+        }
+        
+        // 选择工具快捷键
+        if (ImGui::IsKeyPressed(ImGuiKey_W, false) && !ImGui::GetIO().KeyCtrl) {
+            selectTool = SelectTool::Click;
+            changed = true;
+        }
+        if (ImGui::IsKeyPressed(ImGuiKey_B, false)) {
+            selectTool = SelectTool::Box;
+            changed = true;
+        }
+        if (ImGui::IsKeyPressed(ImGuiKey_C, false) && !ImGui::GetIO().KeyCtrl) {
+            selectTool = SelectTool::Circle;
+            changed = true;
+        }
+        if (ImGui::IsKeyPressed(ImGuiKey_L, false)) {
+            selectTool = SelectTool::Lasso;
             changed = true;
         }
         
@@ -1073,6 +1127,154 @@ public:
         }
         
         return changed;
+    }
+};
+
+// ===== Edit Mode Viewport Header (Blender-style) =====
+// 在视口顶部显示的工具栏，类似 Blender
+class EditModeViewportHeader {
+public:
+    EditModeToolbar::SelectMode* selectMode = nullptr;
+    EditModeToolbar::SelectTool* selectTool = nullptr;
+    ViewMode* viewMode = nullptr;
+    
+    std::function<void()> onUndo;
+    std::function<void()> onRedo;
+    
+    void draw(float viewportX, float viewportY, float viewportWidth) {
+        float headerHeight = 32.0f;
+        
+        ImGui::SetNextWindowPos(ImVec2(viewportX, viewportY));
+        ImGui::SetNextWindowSize(ImVec2(viewportWidth, headerHeight));
+        
+        ImGuiWindowFlags flags = ImGuiWindowFlags_NoTitleBar |
+                                 ImGuiWindowFlags_NoResize |
+                                 ImGuiWindowFlags_NoMove |
+                                 ImGuiWindowFlags_NoScrollbar |
+                                 ImGuiWindowFlags_NoBringToFrontOnFocus;
+        
+        ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0.18f, 0.19f, 0.22f, 0.95f));
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(8, 4));
+        ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(4, 4));
+        
+        if (ImGui::Begin("##EditModeViewportHeader", nullptr, flags)) {
+            // === 选择模式按钮 ===
+            if (selectMode) {
+                ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 3.0f);
+                
+                auto drawModeBtn = [&](EditModeToolbar::SelectMode mode, const char* label) {
+                    bool selected = (*selectMode == mode);
+                    if (selected) {
+                        ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.96f, 0.53f, 0.26f, 1.0f));
+                    }
+                    if (ImGui::Button(label, ImVec2(50, 22))) {
+                        *selectMode = mode;
+                    }
+                    if (selected) {
+                        ImGui::PopStyleColor();
+                    }
+                };
+                
+                drawModeBtn(EditModeToolbar::SelectMode::Vertex, loc("Vertex"));
+                ImGui::SameLine();
+                drawModeBtn(EditModeToolbar::SelectMode::Edge, loc("Edge"));
+                ImGui::SameLine();
+                drawModeBtn(EditModeToolbar::SelectMode::Face, loc("Face"));
+                
+                ImGui::PopStyleVar();
+            }
+            
+            // 分隔符
+            ImGui::SameLine(0, 15);
+            ImGui::TextColored(ImVec4(0.4f, 0.4f, 0.4f, 1.0f), "|");
+            ImGui::SameLine(0, 15);
+            
+            // === 选择工具 ===
+            if (selectTool) {
+                ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 3.0f);
+                
+                auto drawToolBtn = [&](EditModeToolbar::SelectTool tool, const char* icon, const char* tooltip) {
+                    bool selected = (*selectTool == tool);
+                    if (selected) {
+                        ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.4f, 0.6f, 0.8f, 1.0f));
+                    }
+                    if (ImGui::Button(icon, ImVec2(26, 22))) {
+                        *selectTool = tool;
+                    }
+                    if (ImGui::IsItemHovered()) {
+                        ImGui::SetTooltip("%s", tooltip);
+                    }
+                    if (selected) {
+                        ImGui::PopStyleColor();
+                    }
+                };
+                
+                drawToolBtn(EditModeToolbar::SelectTool::Click, "[]", loc("Click Select (W)"));
+                ImGui::SameLine();
+                drawToolBtn(EditModeToolbar::SelectTool::Box, "[B]", loc("Box Select (B)"));
+                ImGui::SameLine();
+                drawToolBtn(EditModeToolbar::SelectTool::Circle, "(O)", loc("Circle Select (C)"));
+                ImGui::SameLine();
+                drawToolBtn(EditModeToolbar::SelectTool::Lasso, "~", loc("Lasso Select (L)"));
+                
+                ImGui::PopStyleVar();
+            }
+            
+            // 分隔符
+            ImGui::SameLine(0, 15);
+            ImGui::TextColored(ImVec4(0.4f, 0.4f, 0.4f, 1.0f), "|");
+            ImGui::SameLine(0, 15);
+            
+            // === 视图模式 ===
+            if (viewMode) {
+                ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 3.0f);
+                
+                auto drawViewBtn = [&](ViewMode mode, const char* label) {
+                    bool selected = (*viewMode == mode);
+                    if (selected) {
+                        ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.3f, 0.5f, 0.3f, 1.0f));
+                    }
+                    if (ImGui::Button(label, ImVec2(50, 22))) {
+                        *viewMode = mode;
+                    }
+                    if (selected) {
+                        ImGui::PopStyleColor();
+                    }
+                };
+                
+                drawViewBtn(ViewMode::Material, loc("Mat"));
+                ImGui::SameLine();
+                drawViewBtn(ViewMode::Solid, loc("Solid"));
+                ImGui::SameLine();
+                drawViewBtn(ViewMode::Wireframe, loc("Wire"));
+                
+                ImGui::PopStyleVar();
+            }
+            
+            // 右侧 - Undo/Redo
+            float undoRedoWidth = 120.0f;
+            ImGui::SameLine(viewportWidth - undoRedoWidth - 10);
+            
+            ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 3.0f);
+            if (ImGui::Button("<-", ImVec2(30, 22))) {
+                if (onUndo) onUndo();
+            }
+            if (ImGui::IsItemHovered()) {
+                ImGui::SetTooltip("%s (Ctrl+Z)", loc("Undo"));
+            }
+            ImGui::SameLine();
+            if (ImGui::Button("->", ImVec2(30, 22))) {
+                if (onRedo) onRedo();
+            }
+            if (ImGui::IsItemHovered()) {
+                ImGui::SetTooltip("%s (Ctrl+Y)", loc("Redo"));
+            }
+            ImGui::PopStyleVar();
+        }
+        ImGui::End();
+        
+        ImGui::PopStyleVar(2);
+        ImGui::PopStyleColor();
     }
 };
 
@@ -1204,6 +1406,87 @@ public:
             ImGui::Spacing();
             ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.2f, 1.0f), "%s", loc("* Unsaved changes"));
         }
+    }
+};
+
+// ===== Selection Box Overlay =====
+// 框选/圆选的视觉反馈
+class SelectionBoxOverlay {
+public:
+    bool isSelecting = false;
+    ImVec2 startPos{0, 0};
+    ImVec2 currentPos{0, 0};
+    EditModeToolbar::SelectTool selectTool = EditModeToolbar::SelectTool::Box;
+    float circleRadius = 50.0f;  // 圆选半径
+    
+    // 开始选择
+    void beginSelection(float x, float y, EditModeToolbar::SelectTool tool) {
+        isSelecting = true;
+        startPos = ImVec2(x, y);
+        currentPos = ImVec2(x, y);
+        selectTool = tool;
+    }
+    
+    // 更新选择（鼠标移动）
+    void updateSelection(float x, float y) {
+        if (isSelecting) {
+            currentPos = ImVec2(x, y);
+        }
+    }
+    
+    // 结束选择
+    void endSelection() {
+        isSelecting = false;
+    }
+    
+    // 获取选择矩形（标准化，确保 min < max）
+    void getSelectionRect(float& minX, float& minY, float& maxX, float& maxY) const {
+        minX = std::min(startPos.x, currentPos.x);
+        minY = std::min(startPos.y, currentPos.y);
+        maxX = std::max(startPos.x, currentPos.x);
+        maxY = std::max(startPos.y, currentPos.y);
+    }
+    
+    // 绘制选择框/圆
+    void draw() {
+        if (!isSelecting) return;
+        
+        ImDrawList* drawList = ImGui::GetForegroundDrawList();
+        
+        ImU32 fillColor = IM_COL32(100, 150, 255, 40);    // 半透明蓝色填充
+        ImU32 borderColor = IM_COL32(100, 150, 255, 200); // 蓝色边框
+        
+        switch (selectTool) {
+            case EditModeToolbar::SelectTool::Box: {
+                // 绘制矩形选择框
+                float minX, minY, maxX, maxY;
+                getSelectionRect(minX, minY, maxX, maxY);
+                drawList->AddRectFilled(ImVec2(minX, minY), ImVec2(maxX, maxY), fillColor);
+                drawList->AddRect(ImVec2(minX, minY), ImVec2(maxX, maxY), borderColor, 0, 0, 2.0f);
+                break;
+            }
+            case EditModeToolbar::SelectTool::Circle: {
+                // 绘制圆形选择区域（跟随鼠标）
+                drawList->AddCircleFilled(currentPos, circleRadius, fillColor, 32);
+                drawList->AddCircle(currentPos, circleRadius, borderColor, 32, 2.0f);
+                break;
+            }
+            case EditModeToolbar::SelectTool::Lasso: {
+                // 套索选择 - 绘制从起点到当前点的线
+                // TODO: 实现完整的套索路径记录
+                drawList->AddLine(startPos, currentPos, borderColor, 2.0f);
+                drawList->AddCircleFilled(startPos, 4.0f, borderColor);
+                drawList->AddCircleFilled(currentPos, 4.0f, borderColor);
+                break;
+            }
+            default:
+                break;
+        }
+    }
+    
+    // 调整圆选半径（滚轮）
+    void adjustCircleRadius(float delta) {
+        circleRadius = std::max(10.0f, std::min(200.0f, circleRadius + delta * 5.0f));
     }
 };
 

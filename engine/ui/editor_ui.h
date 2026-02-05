@@ -2171,10 +2171,10 @@ inline void drawScreenshotDialog(EditorState& state) {
 inline void drawStatsPanel(EditorState& state) {
     if (!state.showStats) return;
     
-    // Small overlay in viewport area (top-right of viewport, not overlapping Inspector)
+    // Small overlay in viewport area - position below edit mode header bar
     ImGuiIO& io = ImGui::GetIO();
     float x = EditorLayout::kLeftPanelWidth + 10;
-    float y = EditorLayout::getTopOffset() + 10;
+    float y = EditorLayout::getTopOffset() + 45;  // Below viewport header (32px + margin)
     
     ImGui::SetNextWindowPos(ImVec2(x, y), ImGuiCond_Always);
     ImGui::SetNextWindowSize(ImVec2(150, 0), ImGuiCond_Always);  // Auto height

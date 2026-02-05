@@ -394,16 +394,105 @@ float4 PSMain(PSInput input) : SV_TARGET {
 }
 )";
 
+// ===== Solid Mode Shader - Simple diffuse lighting, no textures =====
+static const char* kSolidModeShaderSource = R"(
+cbuffer ConstantBuffer : register(b0) {
+    float4x4 worldViewProj;
+    float4x4 world;
+    float4x4 lightViewProj;
+    float4 lightDirAndFlags;
+    float4 cameraPosAndMetal;
+    float4 baseColorAndRough;  // xyz = solid color
+    float4 shadowParams;
+    float4 iblParams;
+};
+
+// Declare all textures from root signature (required for compatibility)
+Texture2D diffuseTexture : register(t0);
+Texture2D normalTexture : register(t1);
+Texture2D specularTexture : register(t2);
+Texture2D shadowMap : register(t3);
+TextureCube irradianceMap : register(t4);
+TextureCube prefilteredMap : register(t5);
+Texture2D brdfLUT : register(t6);
+SamplerState texSampler : register(s0);
+SamplerComparisonState shadowSampler : register(s1);
+
+struct VSInput {
+    float3 position : POSITION;
+    float3 normal : NORMAL;
+    float4 tangent : TANGENT;
+    float2 uv : TEXCOORD;
+    float3 color : COLOR;
+};
+
+struct PSInput {
+    float4 position : SV_POSITION;
+    float3 worldNormal : TEXCOORD0;
+    float3 worldPos : TEXCOORD1;
+};
+
+PSInput VSMain(VSInput input) {
+    PSInput output;
+    output.position = mul(worldViewProj, float4(input.position, 1.0));
+    output.worldNormal = normalize(mul((float3x3)world, input.normal));
+    output.worldPos = mul(world, float4(input.position, 1.0)).xyz;
+    return output;
+}
+
+float4 PSMain(PSInput input) : SV_TARGET {
+    // Simple diffuse lighting
+    float3 N = normalize(input.worldNormal);
+    float3 L = normalize(-lightDirAndFlags.xyz);  // Light direction
+    float3 V = normalize(cameraPosAndMetal.xyz - input.worldPos);  // View direction
+    
+    // Diffuse (Lambert)
+    float NdotL = max(dot(N, L), 0.0);
+    float3 diffuse = baseColorAndRough.xyz * NdotL * 0.8;
+    
+    // Simple specular (Blinn-Phong)
+    float3 H = normalize(L + V);
+    float NdotH = max(dot(N, H), 0.0);
+    float spec = pow(NdotH, 32.0) * 0.3;
+    
+    // Ambient
+    float3 ambient = baseColorAndRough.xyz * 0.25;
+    
+    // Hemisphere ambient (subtle)
+    float3 skyColor = float3(0.5, 0.6, 0.8);
+    float3 groundColor = float3(0.3, 0.25, 0.2);
+    float3 hemiAmbient = lerp(groundColor, skyColor, N.y * 0.5 + 0.5) * baseColorAndRough.xyz * 0.1;
+    
+    float3 finalColor = ambient + hemiAmbient + diffuse + float3(spec, spec, spec);
+    
+    return float4(finalColor, 1.0);
+}
+)";
+
 // ===== Shader Loading Helper =====
 static std::string loadShaderFile(const std::string& path) {
     std::ifstream file(path);
     if (!file.is_open()) {
-        std::cerr << "[shader] Failed to open: " << path << std::endl;
-        return "";
+        return "";  // Silent fail - will use fallback
     }
     std::stringstream buffer;
     buffer << file.rdbuf();
     return buffer.str();
+}
+
+// Shader base path for external files
+static const char* kShaderBasePath = "engine/renderer/shaders/";
+
+// Load shader with fallback to embedded source
+static std::string loadShaderWithFallback(const std::string& name, const char* embeddedSource) {
+    std::string filePath = std::string(kShaderBasePath) + name;
+    std::string fileSource = loadShaderFile(filePath);
+    if (!fileSource.empty()) {
+        std::cout << "[shader] Loaded from file: " << filePath << std::endl;
+        return fileSource;
+    }
+    // Fallback to embedded source
+    return embeddedSource ? embeddedSource : "";
 }
 
 // ===== Math Helpers =====
@@ -557,6 +646,7 @@ struct UnifiedRenderer::Impl {
     ComPtr<ID3D12PipelineState> highlightPipelineState;  // Mesh highlight pipeline (always visible, no depth test)
     ComPtr<ID3D12PipelineState> unlitWireframePipelineState;  // Unlit wireframe - solid color, no lighting
     ComPtr<ID3D12PipelineState> overlayWireframePipelineState;  // Overlay wireframe - normal depth test, depth bias
+    ComPtr<ID3D12PipelineState> solidModePipelineState;  // Solid mode - simple lighting, no textures
     ComPtr<ID3D12Resource> constantBuffer;
     ComPtr<ID3D12Resource> defaultTexture;
     
@@ -862,18 +952,19 @@ struct UnifiedRenderer::Impl {
         device->CreateRootSignature(0, signature->GetBufferPointer(), signature->GetBufferSize(), 
             IID_PPV_ARGS(&rootSignature));
         
-        // Compile shaders
+        // Compile shaders - load from file with fallback to embedded
         ComPtr<ID3DBlob> vs, ps, errorBlob;
         UINT flags = 0;
 #ifdef _DEBUG
         flags = D3DCOMPILE_DEBUG | D3DCOMPILE_SKIP_OPTIMIZATION;
 #endif
-        if (FAILED(D3DCompile(kPBRShaderSource, strlen(kPBRShaderSource), "pbr.hlsl", nullptr, nullptr, 
+        std::string pbrSource = loadShaderWithFallback("pbr.hlsl", kPBRShaderSource);
+        if (FAILED(D3DCompile(pbrSource.c_str(), pbrSource.size(), "pbr.hlsl", nullptr, nullptr, 
                               "VSMain", "vs_5_0", flags, 0, &vs, &errorBlob))) {
             if (errorBlob) std::cerr << (char*)errorBlob->GetBufferPointer() << std::endl;
             return;
         }
-        if (FAILED(D3DCompile(kPBRShaderSource, strlen(kPBRShaderSource), "pbr.hlsl", nullptr, nullptr, 
+        if (FAILED(D3DCompile(pbrSource.c_str(), pbrSource.size(), "pbr.hlsl", nullptr, nullptr, 
                               "PSMain", "ps_5_0", flags, 0, &ps, &errorBlob))) {
             if (errorBlob) std::cerr << (char*)errorBlob->GetBufferPointer() << std::endl;
             return;
@@ -917,7 +1008,8 @@ struct UnifiedRenderer::Impl {
         
         // Shadow pass pipeline (depth-only, no pixel shader)
         ComPtr<ID3DBlob> shadowVs;
-        if (FAILED(D3DCompile(kShadowShaderSource, strlen(kShadowShaderSource), "shadow.hlsl", nullptr, nullptr, 
+        std::string shadowSource = loadShaderWithFallback("shadow.hlsl", kShadowShaderSource);
+        if (FAILED(D3DCompile(shadowSource.c_str(), shadowSource.size(), "shadow.hlsl", nullptr, nullptr, 
                               "VSMain", "vs_5_0", flags, 0, &shadowVs, &errorBlob))) {
             if (errorBlob) std::cerr << "Shadow shader error: " << (char*)errorBlob->GetBufferPointer() << std::endl;
             return;
@@ -970,9 +1062,10 @@ struct UnifiedRenderer::Impl {
         flags |= D3DCOMPILE_DEBUG | D3DCOMPILE_SKIP_OPTIMIZATION;
 #endif
         
-        D3DCompile(kLineShaderSource, strlen(kLineShaderSource), "line.hlsl", nullptr, nullptr, 
+        std::string lineSource = loadShaderWithFallback("line.hlsl", kLineShaderSource);
+        D3DCompile(lineSource.c_str(), lineSource.size(), "line.hlsl", nullptr, nullptr, 
                    "VSMain", "vs_5_0", flags, 0, &vs, &errorBlob);
-        D3DCompile(kLineShaderSource, strlen(kLineShaderSource), "line.hlsl", nullptr, nullptr, 
+        D3DCompile(lineSource.c_str(), lineSource.size(), "line.hlsl", nullptr, nullptr, 
                    "PSMain", "ps_5_0", flags, 0, &ps, &errorBlob);
         
         D3D12_INPUT_ELEMENT_DESC lineLayout[] = {
@@ -1017,7 +1110,8 @@ struct UnifiedRenderer::Impl {
         device->CreateGraphicsPipelineState(&psoDesc, IID_PPV_ARGS(&gizmoPipelineState));
         
         // Create wireframe pipeline (same as main pipeline but with D3D12_FILL_MODE_WIREFRAME)
-        D3D12_GRAPHICS_PIPELINE_STATE_DESC wirePsoDesc = psoDesc;  // Copy from main pipeline
+        D3D12_GRAPHICS_PIPELINE_STATE_DESC wirePsoDesc = psoDesc;  // Copy from current psoDesc
+        wirePsoDesc.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;  // 必须是三角形！
         wirePsoDesc.RasterizerState.FillMode = D3D12_FILL_MODE_WIREFRAME;  // WIREFRAME!
         wirePsoDesc.RasterizerState.AntialiasedLineEnable = TRUE;
         wirePsoDesc.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;  // Show all edges
@@ -1025,7 +1119,11 @@ struct UnifiedRenderer::Impl {
         wirePsoDesc.RasterizerState.DepthBiasClamp = 0.0f;
         wirePsoDesc.RasterizerState.SlopeScaledDepthBias = -1.0f;
         wirePsoDesc.BlendState.RenderTarget[0].BlendEnable = FALSE;
-        device->CreateGraphicsPipelineState(&wirePsoDesc, IID_PPV_ARGS(&wireframePipelineState));
+        wirePsoDesc.DepthStencilState.DepthEnable = TRUE;
+        wirePsoDesc.DepthStencilState.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ALL;
+        wirePsoDesc.DepthStencilState.DepthFunc = D3D12_COMPARISON_FUNC_LESS;
+        HRESULT hrWire = device->CreateGraphicsPipelineState(&wirePsoDesc, IID_PPV_ARGS(&wireframePipelineState));
+        printf("[INIT] wireframePipelineState: hr=%08X, ptr=%p\n", (unsigned)hrWire, (void*)wireframePipelineState.Get());
         
         // Create highlight pipeline for selected mesh (always visible, like Maya/Blender)
         D3D12_GRAPHICS_PIPELINE_STATE_DESC highlightPsoDesc = wirePsoDesc;  // Start from wireframe
@@ -1041,12 +1139,13 @@ struct UnifiedRenderer::Impl {
         // Create unlit wireframe pipeline - solid color output, no lighting (for mesh highlight)
         {
             ComPtr<ID3DBlob> unlitVs, unlitPs, unlitErr;
-            HRESULT vsHr = D3DCompile(kUnlitWireframeShaderSource, strlen(kUnlitWireframeShaderSource), "unlit.hlsl", nullptr, nullptr,
+            std::string wireframeSource = loadShaderWithFallback("wireframe.hlsl", kUnlitWireframeShaderSource);
+            HRESULT vsHr = D3DCompile(wireframeSource.c_str(), wireframeSource.size(), "wireframe.hlsl", nullptr, nullptr,
                        "VSMain", "vs_5_0", flags, 0, &unlitVs, &unlitErr);
             printf("[INIT] Unlit VS compile: hr=%08X\n", (unsigned)vsHr);
             if (unlitErr) { std::cerr << "[unlit] VS error: " << (char*)unlitErr->GetBufferPointer() << std::endl; unlitErr.Reset(); }
             
-            HRESULT psHr = D3DCompile(kUnlitWireframeShaderSource, strlen(kUnlitWireframeShaderSource), "unlit.hlsl", nullptr, nullptr,
+            HRESULT psHr = D3DCompile(wireframeSource.c_str(), wireframeSource.size(), "wireframe.hlsl", nullptr, nullptr,
                        "PSMain", "ps_5_0", flags, 0, &unlitPs, &unlitErr);
             printf("[INIT] Unlit PS compile: hr=%08X\n", (unsigned)psHr);
             if (unlitErr) { std::cerr << "[unlit] PS error: " << (char*)unlitErr->GetBufferPointer() << std::endl; unlitErr.Reset(); }
@@ -1107,6 +1206,67 @@ struct UnifiedRenderer::Impl {
                 printf("[INIT] overlayWireframePipelineState: hr=%08X, ptr=%p\n", (unsigned)hr2, (void*)overlayWireframePipelineState.Get());
             } else {
                 printf("[ERROR] Unlit shader compilation failed - unlitVs=%p, unlitPs=%p\n", (void*)unlitVs.Get(), (void*)unlitPs.Get());
+            }
+        }
+        
+        // ===== Create Solid Mode Pipeline (simple lighting, no textures) =====
+        {
+            ComPtr<ID3DBlob> solidVs, solidPs, errors;
+            std::string solidSource = loadShaderWithFallback("solid.hlsl", kSolidModeShaderSource);
+            HRESULT hr1 = D3DCompile(solidSource.c_str(), solidSource.size(),
+                "solid.hlsl", nullptr, nullptr, "VSMain", "vs_5_0",
+                D3DCOMPILE_OPTIMIZATION_LEVEL3, 0, &solidVs, &errors);
+            if (FAILED(hr1) && errors) {
+                printf("[ERROR] Solid VS compile: %s\n", (char*)errors->GetBufferPointer());
+            }
+            
+            HRESULT hr2 = D3DCompile(solidSource.c_str(), solidSource.size(),
+                "solid.hlsl", nullptr, nullptr, "PSMain", "ps_5_0",
+                D3DCOMPILE_OPTIMIZATION_LEVEL3, 0, &solidPs, &errors);
+            if (FAILED(hr2) && errors) {
+                printf("[ERROR] Solid PS compile: %s\n", (char*)errors->GetBufferPointer());
+            }
+            
+            if (solidVs && solidPs) {
+                // 定义完整的输入布局（与主PBR管线相同）
+                D3D12_INPUT_ELEMENT_DESC solidInputLayout[] = {
+                    {"POSITION", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 0, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0},
+                    {"NORMAL", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 12, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0},
+                    {"TANGENT", 0, DXGI_FORMAT_R32G32B32A32_FLOAT, 0, 24, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0},
+                    {"TEXCOORD", 0, DXGI_FORMAT_R32G32_FLOAT, 0, 40, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0},
+                    {"COLOR", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 48, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0},
+                };
+                
+                // 从头创建管线描述（不依赖其他psoDesc）
+                D3D12_GRAPHICS_PIPELINE_STATE_DESC solidPsoDesc{};
+                solidPsoDesc.pRootSignature = rootSignature.Get();
+                solidPsoDesc.VS = { solidVs->GetBufferPointer(), solidVs->GetBufferSize() };
+                solidPsoDesc.PS = { solidPs->GetBufferPointer(), solidPs->GetBufferSize() };
+                solidPsoDesc.InputLayout = { solidInputLayout, _countof(solidInputLayout) };
+                solidPsoDesc.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+                solidPsoDesc.NumRenderTargets = 1;
+                solidPsoDesc.RTVFormats[0] = DXGI_FORMAT_R8G8B8A8_UNORM;
+                solidPsoDesc.DSVFormat = DXGI_FORMAT_D32_FLOAT;
+                solidPsoDesc.SampleDesc.Count = 1;
+                solidPsoDesc.SampleMask = UINT_MAX;
+                
+                // 光栅化器状态
+                solidPsoDesc.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID;
+                solidPsoDesc.RasterizerState.CullMode = D3D12_CULL_MODE_BACK;
+                solidPsoDesc.RasterizerState.DepthClipEnable = TRUE;
+                
+                // 深度模板状态
+                solidPsoDesc.DepthStencilState.DepthEnable = TRUE;
+                solidPsoDesc.DepthStencilState.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ALL;
+                solidPsoDesc.DepthStencilState.DepthFunc = D3D12_COMPARISON_FUNC_LESS;
+                
+                // 混合状态
+                solidPsoDesc.BlendState.RenderTarget[0].RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
+                
+                HRESULT hr = device->CreateGraphicsPipelineState(&solidPsoDesc, IID_PPV_ARGS(&solidModePipelineState));
+                printf("[INIT] solidModePipelineState: hr=%08X, ptr=%p\n", (unsigned)hr, (void*)solidModePipelineState.Get());
+            } else {
+                printf("[ERROR] Solid shader compilation failed\n");
             }
         }
         
@@ -3332,6 +3492,19 @@ void UnifiedRenderer::renderModelWireframeUnlit(const RHILoadedModel& model, con
     
     impl_->cmdList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
     
+    // 绑定默认纹理（root signature 需要）
+    D3D12_GPU_DESCRIPTOR_HANDLE srvGpuStart = impl_->srvHeap->GetGPUDescriptorHandleForHeapStart();
+    UINT srvSize = impl_->device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+    D3D12_GPU_DESCRIPTOR_HANDLE defaultHandle = srvGpuStart;
+    defaultHandle.ptr += impl_->defaultTextureSrvIndex * srvSize;
+    impl_->cmdList->SetGraphicsRootDescriptorTable(1, defaultHandle);
+    impl_->cmdList->SetGraphicsRootDescriptorTable(2, defaultHandle);
+    impl_->cmdList->SetGraphicsRootDescriptorTable(3, defaultHandle);
+    impl_->cmdList->SetGraphicsRootDescriptorTable(4, defaultHandle);
+    impl_->cmdList->SetGraphicsRootDescriptorTable(5, defaultHandle);
+    impl_->cmdList->SetGraphicsRootDescriptorTable(6, defaultHandle);
+    impl_->cmdList->SetGraphicsRootDescriptorTable(7, defaultHandle);
+    
     // Render ALL meshes - highlight one with orange, others with gray
     for (size_t i = 0; i < model.meshes.size(); ++i) {
         const auto& gpu = model.meshes[i];
@@ -3525,14 +3698,25 @@ void UnifiedRenderer::renderMeshWireframeOverlay(const RHILoadedModel& model, co
 
 void UnifiedRenderer::renderModelWireframe(const RHILoadedModel& model, const float* worldMatrix, const float* wireColor) {
     if (!impl_->ready || model.meshes.empty() || !impl_->cameraSet) return;
+    
+    // DEBUG
+    static bool firstCall = true;
+    if (firstCall) {
+        printf("[WIREFRAME] renderModelWireframe called! wireframePipelineState=%p\n", 
+               (void*)impl_->wireframePipelineState.Get());
+        firstCall = false;
+    }
+    
+    // 使用 wireframePipelineState（基于主管线，只改填充模式为线框）
+    // 这样可以复用主 shader 的所有逻辑，通过标志位禁用纹理
     if (!impl_->wireframePipelineState) {
-        // Fallback to normal rendering if wireframe pipeline not ready
+        printf("[WIREFRAME] ERROR: wireframePipelineState is NULL!\n");
         renderModel(model, worldMatrix);
         return;
     }
     
     impl_->cmdList->SetGraphicsRootSignature(impl_->rootSignature.Get());
-    impl_->cmdList->SetPipelineState(impl_->wireframePipelineState.Get());  // Use wireframe pipeline!
+    impl_->cmdList->SetPipelineState(impl_->wireframePipelineState.Get());  // 主管线的线框版本
     
     ID3D12DescriptorHeap* heaps[] = { impl_->srvHeap.Get() };
     impl_->cmdList->SetDescriptorHeaps(1, heaps);
@@ -3545,35 +3729,38 @@ void UnifiedRenderer::renderModelWireframe(const RHILoadedModel& model, const fl
     memcpy(impl_->constants.world, worldMatrix, 64);
     memcpy(impl_->constants.lightViewProj, impl_->lightViewProj, 64);
     
+    // 禁用纹理，使用纯色
     impl_->constants.lightDirAndFlags[0] = 0.5f;
     impl_->constants.lightDirAndFlags[1] = -0.7f;
     impl_->constants.lightDirAndFlags[2] = -0.5f;
+    impl_->constants.lightDirAndFlags[3] = 0.0f;  // 禁用diffuse纹理
+    impl_->constants.shadowParams[3] = 0.0f;     // 禁用阴影
+    impl_->constants.iblParams[3] = 0.0f;        // 禁用IBL
+    
     impl_->constants.cameraPosAndMetal[0] = impl_->cameraPos[0];
     impl_->constants.cameraPosAndMetal[1] = impl_->cameraPos[1];
     impl_->constants.cameraPosAndMetal[2] = impl_->cameraPos[2];
-    
-    // No textures for wireframe, use wire color
-    impl_->constants.lightDirAndFlags[3] = 0;  // No texture flags
-    impl_->constants.shadowParams[3] = 0;  // No shadows
-    impl_->constants.iblParams[3] = 0;  // No IBL
+    impl_->constants.cameraPosAndMetal[3] = 0.0f;  // metallic = 0
     
     impl_->cmdList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
     
     D3D12_GPU_DESCRIPTOR_HANDLE srvGpuStart = impl_->srvHeap->GetGPUDescriptorHandleForHeapStart();
     
-    for (size_t i = 0; i < model.meshes.size(); ++i) {
+    // 默认线框颜色（蓝灰色）
+    float defaultWireColor[3] = {0.3f, 0.5f, 0.6f};
+    const float* color = wireColor ? wireColor : defaultWireColor;
+    
+    for (size_t i = 0; i < model.meshes.size(); i++) {
         const auto& gpu = model.meshes[i];
         if (gpu.meshIndex >= impl_->meshStorage.size()) continue;
         const auto& dx12Mesh = impl_->meshStorage[gpu.meshIndex];
         
-        // Use wire color (default to dark gray)
-        impl_->constants.baseColorAndRough[0] = wireColor ? wireColor[0] : 0.2f;
-        impl_->constants.baseColorAndRough[1] = wireColor ? wireColor[1] : 0.2f;
-        impl_->constants.baseColorAndRough[2] = wireColor ? wireColor[2] : 0.2f;
-        impl_->constants.baseColorAndRough[3] = 0.0f;  // No roughness effect
-        impl_->constants.cameraPosAndMetal[3] = 0.0f;  // No metallic
+        // 设置线框颜色
+        impl_->constants.baseColorAndRough[0] = color[0];
+        impl_->constants.baseColorAndRough[1] = color[1];
+        impl_->constants.baseColorAndRough[2] = color[2];
+        impl_->constants.baseColorAndRough[3] = 1.0f;  // roughness = 1
         
-        // Write to ring buffer
         UINT drawOffset = impl_->currentDrawIndex * Impl::kAlignedConstantSize;
         memcpy(impl_->constantBufferMapped + drawOffset, &impl_->constants, sizeof(impl_->constants));
         
@@ -3581,14 +3768,12 @@ void UnifiedRenderer::renderModelWireframe(const RHILoadedModel& model, const fl
         impl_->cmdList->SetGraphicsRootConstantBufferView(0, cbAddr);
         impl_->currentDrawIndex++;
         
-        // Set default textures for SRV slots (required by root signature)
+        // 绑定默认纹理（禁用纹理采样）
         D3D12_GPU_DESCRIPTOR_HANDLE srv;
-        srv = srvGpuStart; srv.ptr += dx12Mesh.diffuseSrvIndex * impl_->srvDescSize;
-        impl_->cmdList->SetGraphicsRootDescriptorTable(1, srv);
-        srv = srvGpuStart; srv.ptr += dx12Mesh.normalSrvIndex * impl_->srvDescSize;
-        impl_->cmdList->SetGraphicsRootDescriptorTable(2, srv);
-        srv = srvGpuStart; srv.ptr += dx12Mesh.specularSrvIndex * impl_->srvDescSize;
-        impl_->cmdList->SetGraphicsRootDescriptorTable(3, srv);
+        srv = srvGpuStart; srv.ptr += impl_->defaultTextureSrvIndex * impl_->srvDescSize;
+        impl_->cmdList->SetGraphicsRootDescriptorTable(1, srv);  // diffuse
+        impl_->cmdList->SetGraphicsRootDescriptorTable(2, srv);  // normal
+        impl_->cmdList->SetGraphicsRootDescriptorTable(3, srv);  // specular
         srv = srvGpuStart; srv.ptr += impl_->shadowMapSrvIndex * impl_->srvDescSize;
         impl_->cmdList->SetGraphicsRootDescriptorTable(4, srv);
         srv = srvGpuStart; srv.ptr += impl_->irradianceSrvIndex * impl_->srvDescSize;
@@ -3607,8 +3792,10 @@ void UnifiedRenderer::renderModelWireframe(const RHILoadedModel& model, const fl
 void UnifiedRenderer::renderModelSolid(const RHILoadedModel& model, const float* worldMatrix, const float* solidColor) {
     if (!impl_->ready || model.meshes.empty() || !impl_->cameraSet) return;
     
+    // DEBUG: 直接用主管线但禁用纹理，看看是否生效
+    // 如果这样能显示灰色，说明问题在 solidModePipelineState
     impl_->cmdList->SetGraphicsRootSignature(impl_->rootSignature.Get());
-    impl_->cmdList->SetPipelineState(impl_->pipelineState.Get());
+    impl_->cmdList->SetPipelineState(impl_->pipelineState.Get());  // 用主管线！
     
     ID3D12DescriptorHeap* heaps[] = { impl_->srvHeap.Get() };
     impl_->cmdList->SetDescriptorHeaps(1, heaps);
@@ -3621,38 +3808,37 @@ void UnifiedRenderer::renderModelSolid(const RHILoadedModel& model, const float*
     memcpy(impl_->constants.world, worldMatrix, 64);
     memcpy(impl_->constants.lightViewProj, impl_->lightViewProj, 64);
     
+    // 禁用纹理，强制使用灰色
     impl_->constants.lightDirAndFlags[0] = 0.5f;
     impl_->constants.lightDirAndFlags[1] = -0.7f;
     impl_->constants.lightDirAndFlags[2] = -0.5f;
+    impl_->constants.lightDirAndFlags[3] = 0.0f;  // 禁用diffuse纹理
+    impl_->constants.shadowParams[3] = 0.0f;     // 禁用阴影
+    impl_->constants.iblParams[3] = 0.0f;        // 禁用IBL
+    
     impl_->constants.cameraPosAndMetal[0] = impl_->cameraPos[0];
     impl_->constants.cameraPosAndMetal[1] = impl_->cameraPos[1];
     impl_->constants.cameraPosAndMetal[2] = impl_->cameraPos[2];
-    
-    // Solid color - no textures
-    impl_->constants.lightDirAndFlags[3] = 0;  // No textures
-    impl_->constants.shadowParams[0] = impl_->shadowSettings.bias;
-    impl_->constants.shadowParams[1] = impl_->shadowSettings.normalBias;
-    impl_->constants.shadowParams[2] = impl_->shadowSettings.softness;
-    impl_->constants.shadowParams[3] = 0;  // No shadows
-    impl_->constants.iblParams[3] = 0;  // No IBL
+    impl_->constants.cameraPosAndMetal[3] = 0.0f;  // metallic = 0
     
     impl_->cmdList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
     
     D3D12_GPU_DESCRIPTOR_HANDLE srvGpuStart = impl_->srvHeap->GetGPUDescriptorHandleForHeapStart();
     
-    for (size_t i = 0; i < model.meshes.size(); ++i) {
+    // 强制灰色
+    float grayColor[3] = {0.6f, 0.6f, 0.65f};
+    
+    for (size_t i = 0; i < model.meshes.size(); i++) {
         const auto& gpu = model.meshes[i];
         if (gpu.meshIndex >= impl_->meshStorage.size()) continue;
         const auto& dx12Mesh = impl_->meshStorage[gpu.meshIndex];
         
-        // Use solid color
-        impl_->constants.baseColorAndRough[0] = solidColor ? solidColor[0] : 0.6f;
-        impl_->constants.baseColorAndRough[1] = solidColor ? solidColor[1] : 0.6f;
-        impl_->constants.baseColorAndRough[2] = solidColor ? solidColor[2] : 0.6f;
-        impl_->constants.baseColorAndRough[3] = 0.5f;
-        impl_->constants.cameraPosAndMetal[3] = 0.0f;
+        // 强制设置灰色，覆盖材质颜色
+        impl_->constants.baseColorAndRough[0] = grayColor[0];
+        impl_->constants.baseColorAndRough[1] = grayColor[1];
+        impl_->constants.baseColorAndRough[2] = grayColor[2];
+        impl_->constants.baseColorAndRough[3] = 1.0f;  // roughness = 1
         
-        // Write to ring buffer
         UINT drawOffset = impl_->currentDrawIndex * Impl::kAlignedConstantSize;
         memcpy(impl_->constantBufferMapped + drawOffset, &impl_->constants, sizeof(impl_->constants));
         
@@ -3660,13 +3846,12 @@ void UnifiedRenderer::renderModelSolid(const RHILoadedModel& model, const float*
         impl_->cmdList->SetGraphicsRootConstantBufferView(0, cbAddr);
         impl_->currentDrawIndex++;
         
+        // 绑定默认纹理（禁用纹理采样）
         D3D12_GPU_DESCRIPTOR_HANDLE srv;
-        srv = srvGpuStart; srv.ptr += dx12Mesh.diffuseSrvIndex * impl_->srvDescSize;
-        impl_->cmdList->SetGraphicsRootDescriptorTable(1, srv);
-        srv = srvGpuStart; srv.ptr += dx12Mesh.normalSrvIndex * impl_->srvDescSize;
-        impl_->cmdList->SetGraphicsRootDescriptorTable(2, srv);
-        srv = srvGpuStart; srv.ptr += dx12Mesh.specularSrvIndex * impl_->srvDescSize;
-        impl_->cmdList->SetGraphicsRootDescriptorTable(3, srv);
+        srv = srvGpuStart; srv.ptr += impl_->defaultTextureSrvIndex * impl_->srvDescSize;
+        impl_->cmdList->SetGraphicsRootDescriptorTable(1, srv);  // diffuse
+        impl_->cmdList->SetGraphicsRootDescriptorTable(2, srv);  // normal
+        impl_->cmdList->SetGraphicsRootDescriptorTable(3, srv);  // specular
         srv = srvGpuStart; srv.ptr += impl_->shadowMapSrvIndex * impl_->srvDescSize;
         impl_->cmdList->SetGraphicsRootDescriptorTable(4, srv);
         srv = srvGpuStart; srv.ptr += impl_->irradianceSrvIndex * impl_->srvDescSize;
@@ -3773,8 +3958,8 @@ void UnifiedRenderer::renderEditModeEdges(const float* vertices, uint32_t vertex
     uint32_t maxVerts = Impl::kMaxGizmoVertices;
     uint32_t actualIndexCount = std::min(indexCount, maxVerts);
     
-    // Create buffer if needed
-    if (!impl_->gizmoVertexBuffer) {
+    // Use dedicated edit wireframe buffer (separate from gizmo)
+    if (!impl_->editWireframeBuffer) {
         D3D12_HEAP_PROPERTIES heapProps{}; heapProps.Type = D3D12_HEAP_TYPE_UPLOAD;
         D3D12_RESOURCE_DESC bufDesc{}; 
         bufDesc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
@@ -3784,17 +3969,17 @@ void UnifiedRenderer::renderEditModeEdges(const float* vertices, uint32_t vertex
         bufDesc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
         
         HRESULT hr = impl_->device->CreateCommittedResource(&heapProps, D3D12_HEAP_FLAG_NONE, &bufDesc,
-            D3D12_RESOURCE_STATE_GENERIC_READ, nullptr, IID_PPV_ARGS(&impl_->gizmoVertexBuffer));
+            D3D12_RESOURCE_STATE_GENERIC_READ, nullptr, IID_PPV_ARGS(&impl_->editWireframeBuffer));
         if (FAILED(hr)) return;
         
-        impl_->gizmoVertexBuffer->Map(0, nullptr, &impl_->gizmoVbMapped);
-        impl_->gizmoVbv.BufferLocation = impl_->gizmoVertexBuffer->GetGPUVirtualAddress();
-        impl_->gizmoVbv.SizeInBytes = maxVerts * sizeof(LineVertex);
-        impl_->gizmoVbv.StrideInBytes = sizeof(LineVertex);
+        impl_->editWireframeBuffer->Map(0, nullptr, &impl_->editWireframeMapped);
+        impl_->editWireframeVbv.BufferLocation = impl_->editWireframeBuffer->GetGPUVirtualAddress();
+        impl_->editWireframeVbv.SizeInBytes = maxVerts * sizeof(LineVertex);
+        impl_->editWireframeVbv.StrideInBytes = sizeof(LineVertex);
     }
     
     // Fill vertex buffer with indexed lines
-    LineVertex* outVerts = static_cast<LineVertex*>(impl_->gizmoVbMapped);
+    LineVertex* outVerts = static_cast<LineVertex*>(impl_->editWireframeMapped);
     uint32_t outVertCount = 0;
     
     for (uint32_t i = 0; i + 1 < actualIndexCount && outVertCount + 2 <= maxVerts; i += 2) {
@@ -3847,7 +4032,7 @@ void UnifiedRenderer::renderEditModeEdges(const float* vertices, uint32_t vertex
     impl_->currentDrawIndex++;
     
     impl_->cmdList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_LINELIST);
-    impl_->cmdList->IASetVertexBuffers(0, 1, &impl_->gizmoVbv);
+    impl_->cmdList->IASetVertexBuffers(0, 1, &impl_->editWireframeVbv);  // Use dedicated wireframe buffer
     impl_->cmdList->DrawInstanced(outVertCount, 1, 0, 0);
     
     // Restore heap
@@ -3884,8 +4069,8 @@ void UnifiedRenderer::renderOriginalEdges(const RHILoadedModel& model, int meshI
     struct LineVertex { float pos[3]; float col[4]; };
     uint32_t maxVerts = Impl::kMaxGizmoVertices;
     
-    // Create buffer if needed
-    if (!impl_->gizmoVertexBuffer) {
+    // Use dedicated edit wireframe buffer (shared with renderOriginalEdgesSkinned, mutually exclusive)
+    if (!impl_->editWireframeBuffer) {
         D3D12_HEAP_PROPERTIES heapProps{}; heapProps.Type = D3D12_HEAP_TYPE_UPLOAD;
         D3D12_RESOURCE_DESC bufDesc{}; 
         bufDesc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
@@ -3895,13 +4080,13 @@ void UnifiedRenderer::renderOriginalEdges(const RHILoadedModel& model, int meshI
         bufDesc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
         
         HRESULT hr = impl_->device->CreateCommittedResource(&heapProps, D3D12_HEAP_FLAG_NONE, &bufDesc,
-            D3D12_RESOURCE_STATE_GENERIC_READ, nullptr, IID_PPV_ARGS(&impl_->gizmoVertexBuffer));
+            D3D12_RESOURCE_STATE_GENERIC_READ, nullptr, IID_PPV_ARGS(&impl_->editWireframeBuffer));
         if (FAILED(hr)) return;
         
-        impl_->gizmoVertexBuffer->Map(0, nullptr, &impl_->gizmoVbMapped);
-        impl_->gizmoVbv.BufferLocation = impl_->gizmoVertexBuffer->GetGPUVirtualAddress();
-        impl_->gizmoVbv.SizeInBytes = maxVerts * sizeof(LineVertex);
-        impl_->gizmoVbv.StrideInBytes = sizeof(LineVertex);
+        impl_->editWireframeBuffer->Map(0, nullptr, &impl_->editWireframeMapped);
+        impl_->editWireframeVbv.BufferLocation = impl_->editWireframeBuffer->GetGPUVirtualAddress();
+        impl_->editWireframeVbv.SizeInBytes = maxVerts * sizeof(LineVertex);
+        impl_->editWireframeVbv.StrideInBytes = sizeof(LineVertex);
     }
     
     // Read vertex positions from the upload buffer
@@ -3915,7 +4100,7 @@ void UnifiedRenderer::renderOriginalEdges(const RHILoadedModel& model, int meshI
     uint32_t vertexCount = dx12Mesh.vbv.SizeInBytes / sizeof(Vertex);
     
     // Fill line vertex buffer with edge data
-    LineVertex* outVerts = static_cast<LineVertex*>(impl_->gizmoVbMapped);
+    LineVertex* outVerts = static_cast<LineVertex*>(impl_->editWireframeMapped);
     uint32_t outVertCount = 0;
     
     for (const auto& edge : gpuMesh.originalEdges) {
@@ -3968,7 +4153,7 @@ void UnifiedRenderer::renderOriginalEdges(const RHILoadedModel& model, int meshI
     impl_->currentDrawIndex++;
     
     impl_->cmdList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_LINELIST);
-    impl_->cmdList->IASetVertexBuffers(0, 1, &impl_->gizmoVbv);
+    impl_->cmdList->IASetVertexBuffers(0, 1, &impl_->editWireframeVbv);  // Use dedicated wireframe buffer
     impl_->cmdList->DrawInstanced(outVertCount, 1, 0, 0);
     
     // Restore heap

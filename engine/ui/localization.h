@@ -173,10 +173,29 @@ private:
         
         // Wireframe Display
         chinese_["Wireframe Display"] = "线框显示";
+        chinese_["Display Options"] = "显示选项";
         chinese_["Show Quad Edges"] = "显示四边面边";
         chinese_["Show All Edges"] = "显示所有边";
+        chinese_["Show Vertices"] = "显示顶点";
         chinese_["Show original quad/ngon edges (hide triangulation)"] = "显示原始四边面/多边面边（隐藏三角化边）";
         chinese_["Show all edges including triangulation"] = "显示所有边包括三角化边";
+        chinese_["Show vertex points in vertex mode"] = "在顶点模式下显示顶点点";
+        
+        // Select Tool
+        chinese_["Select Tool"] = "选择工具";
+        chinese_["Click"] = "点选";
+        chinese_["Box"] = "框选";
+        chinese_["Circle"] = "圆选";
+        chinese_["Lasso"] = "套索";
+        chinese_["Click to select (W)"] = "点击选择 (W)";
+        chinese_["Box select (B)"] = "框选 (B)";
+        chinese_["Circle select (C)"] = "圆形选择 (C)";
+        chinese_["Lasso select (L)"] = "套索选择 (L)";
+        chinese_["Click Select (W)"] = "点选 (W)";
+        chinese_["Box Select (B)"] = "框选 (B)";
+        chinese_["Circle Select (C)"] = "圆选 (C)";
+        chinese_["Lasso Select (L)"] = "套索 (L)";
+        chinese_["Mat"] = "材质";
         
         // Mesh Statistics
         chinese_["Mesh Statistics"] = "网格统计";

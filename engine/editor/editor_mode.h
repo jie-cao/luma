@@ -24,12 +24,7 @@ enum class EditorMode {
 enum class ViewMode {
     Material,       // Full PBR material rendering (default)
     Solid,          // Solid gray shading (clay render)
-    Wireframe,      // Wireframe overlay
-    WireframeOnly,  // Wireframe only (no solid)
-    UV,             // UV checker pattern
-    Normal,         // Display normal directions
-    Vertex,         // Vertex colors
-    MatCap          // Material capture lighting
+    Wireframe       // Wireframe only (no solid)
 };
 
 // ===== Object Types =====

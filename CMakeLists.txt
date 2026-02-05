@@ -63,6 +63,7 @@ set(LUMA_CORE_SOURCES
     engine/asset/async_texture_loader.cpp
     engine/asset/hdr_loader.cpp
     engine/renderer/ibl_generator.cpp
+    engine/renderer/shader_manager.cpp
     engine/util/file_watcher.cpp
     engine/script/script_engine.cpp
 )
