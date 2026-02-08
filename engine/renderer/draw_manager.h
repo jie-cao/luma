@@ -93,14 +93,13 @@ public:
             }
             
             case RenderViewMode::Wireframe: {
-                // Render wireframe only
+                // Render wireframe only (GPU-side, fast)
                 float wireColor[4] = {0.4f, 0.5f, 0.6f, 1.0f};
-                // Use original edges if available
                 for (size_t meshIdx = 0; meshIdx < editingEntity->model.meshes.size(); ++meshIdx) {
                     const auto& gpuMesh = editingEntity->model.meshes[meshIdx];
                     if (gpuMesh.hasOriginalEdges) {
                         renderer->renderOriginalEdges(editingEntity->model, static_cast<int>(meshIdx),
-                                                     editingEntity->worldMatrix.m, wireColor);
+                                                     editingEntity->worldMatrix.m, wireColor, false);
                     } else {
                         renderer->renderMeshWireframeOverlay(editingEntity->model, editingEntity->worldMatrix.m,
                                                            static_cast<int>(meshIdx), wireColor);
@@ -153,6 +152,11 @@ public:
         renderer = nullptr;
     }
     
+    // X-Ray mode: when true, wireframe/selection shows through surfaces (Blender Alt+Z)
+    // When false, occluded elements are hidden (default solid view behavior)
+    void setXRayMode(bool enabled) { xRayMode = enabled; }
+    bool getXRayMode() const { return xRayMode; }
+    
     // Render based on view mode
     void render(const RenderContext& ctx,
                RenderViewMode viewMode,
@@ -172,6 +176,11 @@ public:
             }
             
             case RenderViewMode::Wireframe:
+                // When X-Ray is OFF, render depth pre-pass first (fills depth buffer)
+                // so edge lines can be depth-tested for hidden line removal
+                if (!xRayMode) {
+                    renderer->renderModelDepthOnly(entity->model, entity->worldMatrix.m);
+                }
                 renderWireframe(entity, meshIndex);
                 break;
         }
@@ -183,9 +192,11 @@ public:
         if (meshIndex < 0 || meshIndex >= static_cast<int>(entity->model.meshes.size())) return;
         
         const auto& gpuMesh = entity->model.meshes[meshIndex];
+        // depthTest = !xRayMode: when X-Ray OFF, depth test against pre-pass for hidden line removal
+        bool useDepthTest = !xRayMode;
         if (gpuMesh.hasOriginalEdges) {
             renderer->renderOriginalEdges(entity->model, meshIndex,
-                                         entity->worldMatrix.m, color);
+                                         entity->worldMatrix.m, color, useDepthTest);
         } else {
             renderer->renderMeshWireframeOverlay(entity->model, entity->worldMatrix.m,
                                                 meshIndex, color);
@@ -214,7 +225,11 @@ public:
         }
         
         if (!pointLines.empty()) {
-            renderer->renderGizmoLines(pointLines.data(), static_cast<uint32_t>(pointLines.size() / 10));
+            if (xRayMode) {
+                renderer->renderGizmoLines(pointLines.data(), static_cast<uint32_t>(pointLines.size() / 10));
+            } else {
+                renderer->renderGizmoLinesWithDepth(pointLines.data(), static_cast<uint32_t>(pointLines.size() / 10));
+            }
         }
     }
     
@@ -244,7 +259,11 @@ public:
         }
         
         if (!edgeLines.empty()) {
-            renderer->renderGizmoLines(edgeLines.data(), static_cast<uint32_t>(edgeLines.size() / 10));
+            if (xRayMode) {
+                renderer->renderGizmoLines(edgeLines.data(), static_cast<uint32_t>(edgeLines.size() / 10));
+            } else {
+                renderer->renderGizmoLinesWithDepth(edgeLines.data(), static_cast<uint32_t>(edgeLines.size() / 10));
+            }
         }
     }
     
@@ -280,12 +299,17 @@ public:
         }
         
         if (!faceEdgeLines.empty()) {
-            renderer->renderGizmoLines(faceEdgeLines.data(), static_cast<uint32_t>(faceEdgeLines.size() / 10));
+            if (xRayMode) {
+                renderer->renderGizmoLines(faceEdgeLines.data(), static_cast<uint32_t>(faceEdgeLines.size() / 10));
+            } else {
+                renderer->renderGizmoLinesWithDepth(faceEdgeLines.data(), static_cast<uint32_t>(faceEdgeLines.size() / 10));
+            }
         }
     }
     
 private:
     UnifiedRenderer* renderer = nullptr;
+    bool xRayMode = false;  // Default: X-Ray OFF (hidden line removal)
     
     void renderWireframe(Entity* entity, int meshIndex) {
         float wireColor[4] = {0.4f, 0.5f, 0.6f, 1.0f};

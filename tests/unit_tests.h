@@ -22,6 +22,7 @@
 // Forward declare test namespaces
 namespace luma { namespace test { namespace MeshEditTests { inline void registerMeshEditTests(class UnitTestRunner& runner); }}}
 namespace luma { namespace test { namespace SelectionTests { inline void registerSelectionTests(class UnitTestRunner& runner); }}}
+namespace luma { namespace test { namespace ShaderTests { inline void registerShaderTests(class UnitTestRunner& runner); }}}
 
 namespace luma {
 namespace test {
@@ -773,6 +774,9 @@ inline void registerAllTests(UnitTestRunner& runner) {
     
     // Selection Tests (new)
     SelectionTests::registerSelectionTests(runner);
+    
+    // Shader Tests (new)
+    ShaderTests::registerShaderTests(runner);
 }
 
 // ===== Run All Unit Tests =====

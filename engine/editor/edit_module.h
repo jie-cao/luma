@@ -55,6 +55,7 @@ protected:
 // Input event structure
 struct InputEvent {
     enum class Type {
+        None,       // No event / invalid
         KeyDown,
         KeyUp,
         MouseDown,
@@ -64,7 +65,7 @@ struct InputEvent {
         Char
     };
     
-    Type type;
+    Type type = Type::None;
     int key = 0;          // Key code or mouse button
     int modifiers = 0;    // Ctrl=1, Shift=2, Alt=4
     float mouseX = 0;

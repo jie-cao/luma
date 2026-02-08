@@ -221,8 +221,11 @@ public:
                              const float* worldMatrix, const float* color);
     
     // Render original edges from GPU mesh (quad/ngon edges, not triangulated)
+    // GPU-side rendering: uses pre-built edge index buffer, zero CPU per-vertex work
+    // depthTest: false = always visible (X-Ray ON), true = depth-tested (X-Ray OFF, needs depth pre-pass)
     void renderOriginalEdges(const RHILoadedModel& model, int meshIndex,
-                             const float* worldMatrix, const float* color);
+                             const float* worldMatrix, const float* color,
+                             bool depthTest = false);
     
     // Render original edges with skinning (for animated models)
     // boneMatrices: array of MAX_BONES 4x4 matrices, boneIndices/weights from skinnedVertices
@@ -235,12 +238,32 @@ public:
     void buildEditMeshFromGPU(const RHILoadedModel& model, int meshIndex, EditMesh& outMesh);
     void buildEditMeshFromGPUTriangles(const RHILoadedModel& model, int meshIndex, EditMesh& outMesh);
     
+    // Update GPU mesh vertex positions from EditMesh (real-time mesh editing)
+    // EditMesh vertex[i] maps 1:1 to GPU vertex[i]
+    void updateMeshVerticesFromEditMesh(const RHILoadedModel& model, int meshIndex, const EditMesh& editMesh);
+    
+    // Rebuild GPU edge index buffer from EditMesh edges (after topology changes like extrusion)
+    // Call this after operations that add/remove edges (not needed for vertex-only moves)
+    void rebuildEdgeIndexBuffer(RHILoadedModel& model, int meshIndex, const EditMesh& editMesh);
+    
+    // Render model depth-only (fills depth buffer, no color output)
+    // Used for hidden line removal in wireframe mode when X-Ray is OFF
+    void renderModelDepthOnly(const RHILoadedModel& model, const float* worldMatrix);
+    
+    // Render model wireframe with back-face culling (hidden line removal, zero extra cost)
+    // Only draws front-facing edges — GPU handles culling natively
+    void renderModelWireframeCulled(const RHILoadedModel& model, const float* worldMatrix, const float* wireColor);
+    
     // Render model in solid (clay) mode - uniform gray shading
     void renderModelSolid(const RHILoadedModel& model, const float* worldMatrix, const float* solidColor);
     
     // Render line list for gizmos (pairs of points, RGBA color per line)
     // lines: array of {startX, startY, startZ, endX, endY, endZ, r, g, b, a} per line
     void renderGizmoLines(const float* lines, uint32_t lineCount);
+    
+    // Render line list with depth testing (hidden lines are occluded)
+    // Same format as renderGizmoLines but uses depth-tested pipeline
+    void renderGizmoLinesWithDepth(const float* lines, uint32_t lineCount);
     
     // === Shadow Mapping ===
     // Configure shadow settings

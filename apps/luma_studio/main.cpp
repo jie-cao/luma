@@ -54,7 +54,19 @@ using Microsoft::WRL::ComPtr;
 #include "engine/editor/material_edit/material_edit_module.h"
 #include "engine/editor/selection_system.h"
 
+// Mode Handler Architecture (Phase 5)
+#include "engine/editor/mode_handler.h"
+#include "engine/editor/edit_mode_handler.h"
+#include "engine/editor/scene_mode_handler.h"
+#include "engine/editor/input_system.h"
+
 extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam);
+
+// Forward declaration of helper function (defined after Application)
+luma::Ray getMouseRay(float mouseX, float mouseY);
+
+// Forward declaration of ImGui state (used in InputSystem init)
+static bool g_imguiInitialized = false;
 
 // ===== Application State =====
 struct Application {
@@ -96,6 +108,13 @@ struct Application {
     std::unique_ptr<luma::editor::MaterialEditModule> materialEditModule;  // 材质编辑模块
     luma::DrawManager drawManager;                     // 渲染调度器
     luma::EditModePipeline editPipeline;               // 编辑模式渲染管线
+    
+    // Mode Handler Architecture (Phase 5)
+    luma::editor::ModeHandlerManager modeHandlers;     // 模式处理器管理器
+    luma::editor::EditModeHandler* editModeHandler = nullptr;   // Edit 模式处理器指针
+    luma::editor::SceneModeHandler* sceneModeHandler = nullptr; // Scene 模式处理器指针
+    luma::editor::InputSystem inputSystem;             // 统一输入系统
+    bool inputSystemInitialized = false;               // InputSystem 初始化标志
     
     std::string projectName = "未命名场景";
     
@@ -197,7 +216,130 @@ struct Application {
         });
         
         std::cout << "[luma] Modular architecture initialized" << std::endl;
+        
+        // Initialize Mode Handler Architecture (Phase 5)
+        initModeHandlers();
     }
+    
+    // Initialize Mode Handlers (Phase 5)
+    void initModeHandlers() {
+        // Setup shared context
+        luma::editor::ModeHandlerContext ctx;
+        ctx.renderer = &renderer;
+        ctx.scene = &scene;
+        ctx.viewport = &viewport;
+        ctx.gizmo = &gizmo;
+        ctx.drawManager = &drawManager;
+        ctx.editPipeline = &editPipeline;
+        ctx.windowWidth = width;
+        ctx.windowHeight = height;
+        modeHandlers.setContext(ctx);
+        
+        // Create and register Scene Mode Handler
+        auto sceneHandler = std::make_unique<luma::editor::SceneModeHandler>();
+        sceneHandler->init(&modeHandlers.getContext());
+        
+        // Setup ray callback for Scene mode
+        sceneHandler->setRayCallback([](float sx, float sy) -> luma::Ray {
+            return ::getMouseRay(sx, sy);
+        });
+        
+        // Setup screen scale callback for gizmo
+        sceneHandler->setScreenScaleCallback([this](const luma::Vec3& pos) -> float {
+            float cameraEye[3], cameraTgt[3];
+            float sceneRadius = getSceneRadius();
+            float sceneCenter[3];
+            getSceneCenter(sceneCenter);
+            viewport.camera.getEyeAndTarget(sceneCenter, sceneRadius, cameraEye, cameraTgt);
+            luma::Vec3 cameraPos(cameraEye[0], cameraEye[1], cameraEye[2]);
+            return luma::TransformGizmo::calculateScreenScale(
+                pos, cameraPos, 100.0f, (float)height, 3.14159f / 4.0f);
+        });
+        
+        sceneModeHandler = sceneHandler.get();
+        modeHandlers.registerHandler(std::move(sceneHandler));
+        
+        // Create and register Edit Mode Handler
+        auto editHandler = std::make_unique<luma::editor::EditModeHandler>();
+        editHandler->init(&modeHandlers.getContext());
+        
+        // Setup projection callback for Edit mode
+        editHandler->setProjectionCallback([this](float wx, float wy, float wz, float& sx, float& sy) -> bool {
+            float viewMatrix[16], projMatrix[16];
+            renderer.getViewMatrix(viewMatrix);
+            renderer.getProjectionMatrix(projMatrix);
+            
+            float viewPos[4];
+            viewPos[0] = viewMatrix[0]*wx + viewMatrix[4]*wy + viewMatrix[8]*wz + viewMatrix[12];
+            viewPos[1] = viewMatrix[1]*wx + viewMatrix[5]*wy + viewMatrix[9]*wz + viewMatrix[13];
+            viewPos[2] = viewMatrix[2]*wx + viewMatrix[6]*wy + viewMatrix[10]*wz + viewMatrix[14];
+            viewPos[3] = viewMatrix[3]*wx + viewMatrix[7]*wy + viewMatrix[11]*wz + viewMatrix[15];
+            
+            float clipPos[4];
+            clipPos[0] = projMatrix[0]*viewPos[0] + projMatrix[4]*viewPos[1] + projMatrix[8]*viewPos[2] + projMatrix[12]*viewPos[3];
+            clipPos[1] = projMatrix[1]*viewPos[0] + projMatrix[5]*viewPos[1] + projMatrix[9]*viewPos[2] + projMatrix[13]*viewPos[3];
+            clipPos[2] = projMatrix[2]*viewPos[0] + projMatrix[6]*viewPos[1] + projMatrix[10]*viewPos[2] + projMatrix[14]*viewPos[3];
+            clipPos[3] = projMatrix[3]*viewPos[0] + projMatrix[7]*viewPos[1] + projMatrix[11]*viewPos[2] + projMatrix[15]*viewPos[3];
+            
+            if (clipPos[3] <= 0.0f) return false;
+            sx = (clipPos[0] / clipPos[3] + 1.0f) * 0.5f * width;
+            sy = (1.0f - clipPos[1] / clipPos[3]) * 0.5f * height;
+            return true;
+        });
+        
+        // Setup ray callback for Edit mode
+        editHandler->setRayCallback([](float sx, float sy) -> luma::Ray {
+            return ::getMouseRay(sx, sy);
+        });
+        
+        // Setup mesh changed callback for GPU mesh rebuild
+        editHandler->setMeshChangedCallback([this]() {
+            editMeshDirty = true;
+        });
+
+        editModeHandler = editHandler.get();
+        modeHandlers.registerHandler(std::move(editHandler));
+        
+        // Start in Scene mode (or Welcome if no scene)
+        modeHandlers.switchMode(luma::editor::EditorMode::Scene);
+        
+        // Initialize Input System
+        initInputSystem();
+        
+        std::cout << "[luma] Mode handlers initialized" << std::endl;
+    }
+    
+    // Initialize Input System (Phase 6 - centralized input handling)
+    void initInputSystem() {
+        luma::editor::InputSystemContext ctx;
+        ctx.modeHandlers = &modeHandlers;
+        ctx.scene = &scene;
+        ctx.gizmo = &gizmo;
+        ctx.viewport = &viewport;
+        ctx.hwnd = hwnd;
+        ctx.windowWidth = &width;
+        ctx.windowHeight = &height;
+        ctx.needResize = &needResize;
+        ctx.shouldQuit = &shouldQuit;
+        ctx.mouseDownX = &mouseDownX;
+        ctx.mouseDownY = &mouseDownY;
+        ctx.mouseWasDown = &mouseWasDown;
+        ctx.imguiInitialized = &g_imguiInitialized;
+        ctx.welcomeScreenVisible = &welcomeScreen.isVisible;
+        
+        // Setup callbacks
+        ctx.getMouseRay = [](float x, float y) { return ::getMouseRay(x, y); };
+        ctx.getSceneRadius = [this]() { return getSceneRadius(); };
+        ctx.openContextMenu = [this](float x, float y) { addObjectMenu.openAt(x, y); };
+        ctx.onModeSwitch = [this](luma::editor::EditorMode mode) {
+            modeManager.switchMode(mode);
+        };
+        
+        inputSystem.init(ctx);
+        inputSystemInitialized = true;
+    }
+    
+    // Note: getMouseRay is a global function, use it via ::getMouseRay()
     
     // Sync EditMesh to all modules
     void syncEditMeshToModules() {
@@ -206,6 +348,7 @@ struct Application {
         if (meshEditModule) meshEditModule->setEditMesh(currentEditMesh.get());
         if (uvEditModule) uvEditModule->setEditMesh(currentEditMesh.get());
         if (materialEditModule) materialEditModule->setEditMesh(currentEditMesh.get());
+        if (editModeHandler) editModeHandler->setEditMesh(currentEditMesh.get());
     }
     
     // Main scene rendering (replaces inline rendering code in main loop)
@@ -253,68 +396,11 @@ struct Application {
             });
         }
         
-        // === Edit Mode Overlays ===
-        if (isEditMode && selectedEntity && selectedEntity->hasModel) {
-            int highlightIdx = meshListPanel.selectedMeshIndex;
-            
-            // Wireframe overlay for selected mesh
-            if (highlightIdx >= 0 && highlightIdx < static_cast<int>(selectedEntity->model.meshes.size())) {
-                float wireColor[4] = {0.4f, 0.5f, 0.6f, 1.0f};
-                const auto& gpuMesh = selectedEntity->model.meshes[highlightIdx];
-                
-                if (gpuMesh.hasOriginalEdges && editToolbar.showOriginalEdges && !editToolbar.showAllEdges) {
-                    if (gpuMesh.hasSkinning && selectedEntity->hasSkeleton()) {
-                        luma::Mat4 boneMatrices[luma::MAX_BONES];
-                        selectedEntity->getSkinningMatrices(boneMatrices);
-                        renderer.renderOriginalEdgesSkinned(
-                            selectedEntity->model, highlightIdx,
-                            selectedEntity->worldMatrix.m, wireColor,
-                            reinterpret_cast<const float*>(boneMatrices),
-                            gpuMesh.skinnedVertices);
-                    } else {
-                        renderer.renderOriginalEdges(selectedEntity->model, highlightIdx,
-                                                    selectedEntity->worldMatrix.m, wireColor);
-                    }
-                } else {
-                    renderer.renderMeshWireframeOverlay(selectedEntity->model, selectedEntity->worldMatrix.m,
-                                                       highlightIdx, wireColor);
-                }
-            }
-            
-            // Selection highlights (vertices, edges, faces)
-            if (currentEditMesh) {
-                float selectedColor[4] = {1.0f, 0.6f, 0.0f, 1.0f};
-                editPipeline.renderSelectedVertices(currentEditMesh.get(), selectedEntity->worldMatrix.m, selectedColor);
-                editPipeline.renderSelectedEdges(currentEditMesh.get(), selectedEntity->worldMatrix.m, selectedColor);
-                editPipeline.renderSelectedFaces(currentEditMesh.get(), selectedEntity->worldMatrix.m, selectedColor);
-            }
-        }
-        
-        // === Selection Outline & Gizmo ===
-        if (auto* selected = scene.getSelectedEntity()) {
-            bool skipOutline = isEditMode && (currentViewMode == luma::editor::ViewMode::Wireframe);
-            
-            if (selected->hasModel && !skipOutline) {
-                float outlineColor[4] = {1.0f, 0.6f, 0.2f, 1.0f};
-                renderer.renderModelOutline(selected->model, selected->worldMatrix.m, outlineColor);
-            }
-            
-            // Gizmo
-            luma::Vec3 gizmoPos = selected->getWorldPosition();
-            float cameraEye[3], cameraTgt[3];
-            viewport.camera.getEyeAndTarget(sceneCenter, sceneRadius, cameraEye, cameraTgt);
-            luma::Vec3 cameraPos(cameraEye[0], cameraEye[1], cameraEye[2]);
-            float screenScale = luma::TransformGizmo::calculateScreenScale(
-                gizmoPos, cameraPos, 100.0f, (float)height, 3.14159f / 4.0f);
-            
-            gizmo.setTarget(selected);
-            auto gizmoData = gizmo.generateRenderData(screenScale);
-            if (!gizmoData.lines.empty()) {
-                renderer.renderGizmoLines(
-                    reinterpret_cast<const float*>(gizmoData.lines.data()),
-                    (uint32_t)gizmoData.lines.size());
-            }
-        }
+        // === Mode-specific rendering (Gizmos, overlays, etc.) ===
+        // Delegate to the current mode handler
+        luma::RenderContext renderCtx;
+        renderCtx.renderer = &renderer;
+        modeHandlers.render(renderCtx);
         
         // Finish 3D scene (applies post-processing)
         renderer.finishSceneRendering();
@@ -322,7 +408,6 @@ struct Application {
 };
 
 static Application g_app;
-static bool g_imguiInitialized = false;
 
 // Helper: Create ray from mouse position (using OrbitCamera)
 luma::Ray getMouseRay(float mouseX, float mouseY) {
@@ -381,13 +466,13 @@ luma::Ray getMouseRay(float mouseX, float mouseY) {
 }
 
 // ===== Window Procedure =====
+// Extremely minimal - only handles window events, all input goes to InputSystem
 LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
+    // ImGui gets first chance
     if (g_imguiInitialized && ImGui_ImplWin32_WndProcHandler(hwnd, msg, wParam, lParam))
         return true;
     
-    bool imguiWantsMouse = g_imguiInitialized && ImGui::GetIO().WantCaptureMouse;
-    bool altPressed = (GetKeyState(VK_MENU) & 0x8000) != 0;
-    
+    // Window-level events
     switch (msg) {
     case WM_SIZE:
         if (wParam != SIZE_MINIMIZED) {
@@ -396,480 +481,18 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             g_app.needResize = true;
         }
         return 0;
-        
-    case WM_KEYDOWN: {
-        bool ctrlPressed = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
-        bool shiftPressed = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
-        
-        // Undo/Redo shortcuts
-        if (ctrlPressed && wParam == 'Z') {
-            if (shiftPressed) {
-                luma::getCommandHistory().redo();
-            } else {
-                luma::getCommandHistory().undo();
-            }
-        }
-        // Redo with Ctrl+Y as alternative
-        else if (ctrlPressed && wParam == 'Y') {
-            luma::getCommandHistory().redo();
-        }
-        // Duplicate with Ctrl+D
-        else if (ctrlPressed && wParam == 'D') {
-            if (auto* selected = g_app.scene.getSelectedEntity()) {
-                auto cmd = std::make_unique<luma::DuplicateEntityCommand>(&g_app.scene, selected);
-                luma::getCommandHistory().execute(std::move(cmd));
-            }
-        }
-        // Gizmo tool shortcuts
-        else if (wParam == 'W') {
-            g_app.editorState.gizmoMode = luma::GizmoMode::Translate;
-            g_app.gizmo.setMode(luma::GizmoMode::Translate);
-        } else if (wParam == 'E') {
-            g_app.editorState.gizmoMode = luma::GizmoMode::Rotate;
-            g_app.gizmo.setMode(luma::GizmoMode::Rotate);
-        } else if (wParam == 'R') {
-            g_app.editorState.gizmoMode = luma::GizmoMode::Scale;
-            g_app.gizmo.setMode(luma::GizmoMode::Scale);
-        } else if (wParam == VK_DELETE) {
-            // Delete selected entity (with undo support)
-            if (auto* selected = g_app.scene.getSelectedEntity()) {
-                auto cmd = std::make_unique<luma::DeleteEntityCommand>(&g_app.scene, selected);
-                g_app.scene.clearSelection();
-                luma::getCommandHistory().execute(std::move(cmd));
-            }
-        } else if (wParam == VK_F1) {
-            g_app.editorState.showHelp = !g_app.editorState.showHelp;
-        } else if (wParam == VK_TAB) {
-            // Toggle Edit mode (like Blender's Tab key)
-            if (g_app.modeManager.currentMode == luma::editor::EditorMode::Edit) {
-                g_app.modeManager.switchMode(luma::editor::EditorMode::Scene);
-            } else if (g_app.scene.getSelectedEntity() && g_app.scene.getSelectedEntity()->hasModel) {
-                g_app.modeManager.switchMode(luma::editor::EditorMode::Edit);
-            }
-        } else if (wParam == VK_ESCAPE) {
-            // Escape returns to Scene mode or closes welcome screen
-            if (g_app.welcomeScreen.isVisible) {
-                g_app.welcomeScreen.isVisible = false;
-                g_app.modeManager.switchMode(luma::editor::EditorMode::Scene);
-            } else if (g_app.modeManager.currentMode != luma::editor::EditorMode::Scene) {
-                g_app.modeManager.switchMode(luma::editor::EditorMode::Scene);
-            }
-        } else if (wParam == VK_F5) {
-            // F5 enters Play mode
-            g_app.modeManager.switchMode(luma::editor::EditorMode::Play);
-        } else if (wParam == '1') {
-            // Number keys for mode shortcuts
-            g_app.modeManager.switchMode(luma::editor::EditorMode::Scene);
-        } else if (wParam == '2') {
-            auto* sel = g_app.scene.getSelectedEntity();
-            if (sel && sel->skeleton) {
-                g_app.modeManager.switchMode(luma::editor::EditorMode::Character);
-            }
-        } else if (wParam == '3') {
-            auto* sel = g_app.scene.getSelectedEntity();
-            if (sel && sel->skeleton) {
-                g_app.modeManager.switchMode(luma::editor::EditorMode::Animation);
-            }
-        }
-        g_app.viewport.onKeyDown((int)wParam);
-        return 0;
-    }
-        
-    case WM_LBUTTONDOWN:
-        if (!imguiWantsMouse) {
-            float mouseX = (float)GET_X_LPARAM(lParam);
-            float mouseY = (float)GET_Y_LPARAM(lParam);
-            
-            // Record mouse down position for click detection
-            g_app.mouseDownX = mouseX;
-            g_app.mouseDownY = mouseY;
-            g_app.mouseWasDown = true;
-            
-            // Try gizmo interaction first (if not holding Alt for camera control)
-            if (!altPressed && g_app.scene.getSelectedEntity()) {
-                luma::Ray ray = getMouseRay(mouseX, mouseY);
-                
-                // Calculate screen-space gizmo size (100 pixels on screen)
-                luma::Vec3 gizmoPos = g_app.scene.getSelectedEntity()->getWorldPosition();
-                luma::Vec3 cameraPos = ray.origin;  // Ray origin is camera position
-                float screenScale = luma::TransformGizmo::calculateScreenScale(
-                    gizmoPos, cameraPos, 100.0f, (float)g_app.height, 3.14159f / 4.0f);
-                
-                if (g_app.gizmo.beginDrag(ray, screenScale)) {
-                    g_app.mouseWasDown = false;  // Gizmo took it
-                    SetCapture(hwnd);
-                    return 0;  // Gizmo captured the click
-                }
-            }
-            
-            // 编辑模式下，框选/圆选/套索 - 开始选择
-            bool isEditMode = (g_app.modeManager.currentMode == luma::editor::EditorMode::Edit);
-            auto selectTool = g_app.editToolbar.selectTool;
-            if (isEditMode && !altPressed && 
-                (selectTool == luma::editor::EditModeToolbar::SelectTool::Box ||
-                 selectTool == luma::editor::EditModeToolbar::SelectTool::Circle ||
-                 selectTool == luma::editor::EditModeToolbar::SelectTool::Lasso)) {
-                g_app.selectionBox.beginSelection(mouseX, mouseY, selectTool);
-                SetCapture(hwnd);
-            }
-            
-            // Otherwise, handle camera or selection
-            g_app.viewport.onMouseDown(0, mouseX, mouseY, altPressed);
-            if (altPressed) {
-                g_app.mouseWasDown = false;  // Camera control took it
-                SetCapture(hwnd);
-            }
-        }
-        return 0;
-        
-    case WM_RBUTTONDOWN:
-        if (!imguiWantsMouse) {
-            float mouseX = (float)GET_X_LPARAM(lParam);
-            float mouseY = (float)GET_Y_LPARAM(lParam);
-            
-            if (altPressed) {
-                // Alt + Right click = Camera zoom
-                g_app.viewport.onMouseDown(1, mouseX, mouseY, altPressed);
-                SetCapture(hwnd);
-            } else {
-                // Right click without Alt = Context menu (in viewport area only)
-                // Check if in viewport area
-                float leftPanelWidth = 280.0f;
-                float rightPanelStart = (float)g_app.width - 320.0f;
-                float topOffset = 19.0f + 32.0f + 36.0f;  // Menu + Mode tabs + Toolbar
-                
-                if (mouseX > leftPanelWidth && mouseX < rightPanelStart && mouseY > topOffset) {
-                    g_app.addObjectMenu.openAt(mouseX, mouseY);
-                }
-            }
-        }
-        return 0;
-        
-    case WM_MBUTTONDOWN:
-        if (!imguiWantsMouse) {
-            g_app.viewport.onMouseDown(2, (float)GET_X_LPARAM(lParam), (float)GET_Y_LPARAM(lParam), altPressed);
-            if (altPressed) SetCapture(hwnd);
-        }
-        return 0;
-        
-    case WM_LBUTTONUP: {
-        // End gizmo drag
-        if (g_app.gizmo.isDragging()) {
-            g_app.gizmo.endDrag();
-            ReleaseCapture();
-            g_app.mouseWasDown = false;
-            return 0;
-        }
-        
-        // 结束框选/圆选/套索选择
-        if (g_app.selectionBox.isSelecting) {
-            // 保存选择区域信息
-            float selMinX, selMinY, selMaxX, selMaxY;
-            g_app.selectionBox.getSelectionRect(selMinX, selMinY, selMaxX, selMaxY);
-            auto selectTool = g_app.selectionBox.selectTool;
-            float circleRadius = g_app.selectionBox.circleRadius;
-            ImVec2 circleCenter = g_app.selectionBox.currentPos;
-            
-            g_app.selectionBox.endSelection();
-            ReleaseCapture();
-            
-            // 执行实际的框选/圆选逻辑
-            bool isEditMode = (g_app.modeManager.currentMode == luma::editor::EditorMode::Edit);
-            if (isEditMode && g_app.currentEditMesh) {
-                // 获取变换矩阵
-                float viewMatrix[16], projMatrix[16];
-                g_app.renderer.getViewMatrix(viewMatrix);
-                g_app.renderer.getProjectionMatrix(projMatrix);
-                
-                const float* worldMatrix = nullptr;
-                if (auto* sel = g_app.scene.getSelectedEntity()) {
-                    worldMatrix = sel->worldMatrix.m;
-                }
-                
-                // 是否按住Shift进行追加选择
-                bool additive = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
-                if (!additive) {
-                    // 清除之前的选择
-                    g_app.currentEditMesh->selectedVertices.clear();
-                    g_app.currentEditMesh->selectedEdges.clear();
-                    g_app.currentEditMesh->selectedFaces.clear();
-                }
-                
-                // 投影顶点到屏幕空间的辅助函数
-                auto projectToScreen = [&](const float* pos, float& screenX, float& screenY) -> bool {
-                    float worldPos[4] = {pos[0], pos[1], pos[2], 1.0f};
-                    
-                    // 应用世界矩阵
-                    if (worldMatrix) {
-                        float wp[4];
-                        wp[0] = worldMatrix[0]*pos[0] + worldMatrix[4]*pos[1] + worldMatrix[8]*pos[2] + worldMatrix[12];
-                        wp[1] = worldMatrix[1]*pos[0] + worldMatrix[5]*pos[1] + worldMatrix[9]*pos[2] + worldMatrix[13];
-                        wp[2] = worldMatrix[2]*pos[0] + worldMatrix[6]*pos[1] + worldMatrix[10]*pos[2] + worldMatrix[14];
-                        wp[3] = 1.0f;
-                        worldPos[0] = wp[0]; worldPos[1] = wp[1]; worldPos[2] = wp[2]; worldPos[3] = wp[3];
-                    }
-                    
-                    // 应用视图矩阵
-                    float viewPos[4];
-                    viewPos[0] = viewMatrix[0]*worldPos[0] + viewMatrix[4]*worldPos[1] + viewMatrix[8]*worldPos[2] + viewMatrix[12];
-                    viewPos[1] = viewMatrix[1]*worldPos[0] + viewMatrix[5]*worldPos[1] + viewMatrix[9]*worldPos[2] + viewMatrix[13];
-                    viewPos[2] = viewMatrix[2]*worldPos[0] + viewMatrix[6]*worldPos[1] + viewMatrix[10]*worldPos[2] + viewMatrix[14];
-                    viewPos[3] = viewMatrix[3]*worldPos[0] + viewMatrix[7]*worldPos[1] + viewMatrix[11]*worldPos[2] + viewMatrix[15];
-                    
-                    // 应用投影矩阵
-                    float clipPos[4];
-                    clipPos[0] = projMatrix[0]*viewPos[0] + projMatrix[4]*viewPos[1] + projMatrix[8]*viewPos[2] + projMatrix[12]*viewPos[3];
-                    clipPos[1] = projMatrix[1]*viewPos[0] + projMatrix[5]*viewPos[1] + projMatrix[9]*viewPos[2] + projMatrix[13]*viewPos[3];
-                    clipPos[2] = projMatrix[2]*viewPos[0] + projMatrix[6]*viewPos[1] + projMatrix[10]*viewPos[2] + projMatrix[14]*viewPos[3];
-                    clipPos[3] = projMatrix[3]*viewPos[0] + projMatrix[7]*viewPos[1] + projMatrix[11]*viewPos[2] + projMatrix[15]*viewPos[3];
-                    
-                    // 透视除法
-                    if (clipPos[3] <= 0.0f) return false;  // 在相机后面
-                    float ndcX = clipPos[0] / clipPos[3];
-                    float ndcY = clipPos[1] / clipPos[3];
-                    
-                    // NDC到屏幕坐标
-                    screenX = (ndcX + 1.0f) * 0.5f * g_app.width;
-                    screenY = (1.0f - ndcY) * 0.5f * g_app.height;  // Y翻转
-                    
-                    return true;
-                };
-                
-                // 检查点是否在选择区域内
-                auto isInSelection = [&](float sx, float sy) -> bool {
-                    if (selectTool == luma::editor::EditModeToolbar::SelectTool::Box) {
-                        return sx >= selMinX && sx <= selMaxX && sy >= selMinY && sy <= selMaxY;
-                    } else if (selectTool == luma::editor::EditModeToolbar::SelectTool::Circle) {
-                        float dx = sx - circleCenter.x;
-                        float dy = sy - circleCenter.y;
-                        return (dx*dx + dy*dy) <= (circleRadius * circleRadius);
-                    }
-                    // Lasso暂不实现精确判断，使用边界框
-                    return sx >= selMinX && sx <= selMaxX && sy >= selMinY && sy <= selMaxY;
-                };
-                
-                auto selectMode = g_app.editToolbar.selectMode;
-                int selectedCount = 0;
-                
-                // 根据选择模式进行选择
-                if (selectMode == luma::editor::EditModeToolbar::SelectMode::Vertex) {
-                    // 顶点选择
-                    for (size_t vi = 0; vi < g_app.currentEditMesh->vertices.size(); ++vi) {
-                        const auto& v = g_app.currentEditMesh->vertices[vi];
-                        float screenX, screenY;
-                        if (projectToScreen(v.position, screenX, screenY)) {
-                            if (isInSelection(screenX, screenY)) {
-                                g_app.currentEditMesh->selectedVertices.insert(static_cast<uint32_t>(vi));
-                                selectedCount++;
-                            }
-                        }
-                    }
-                    printf("[BOX SELECT] Selected %d vertices\n", selectedCount);
-                } 
-                else if (selectMode == luma::editor::EditModeToolbar::SelectMode::Edge) {
-                    // 边选择 - 检查边的中点
-                    for (size_t ei = 0; ei < g_app.currentEditMesh->edges.size(); ++ei) {
-                        const auto& edge = g_app.currentEditMesh->edges[ei];
-                        if (edge.v0 >= g_app.currentEditMesh->vertices.size() ||
-                            edge.v1 >= g_app.currentEditMesh->vertices.size()) continue;
-                        
-                        const auto& v0 = g_app.currentEditMesh->vertices[edge.v0];
-                        const auto& v1 = g_app.currentEditMesh->vertices[edge.v1];
-                        
-                        // 计算边的中点
-                        float midPos[3] = {
-                            (v0.position[0] + v1.position[0]) * 0.5f,
-                            (v0.position[1] + v1.position[1]) * 0.5f,
-                            (v0.position[2] + v1.position[2]) * 0.5f
-                        };
-                        
-                        float screenX, screenY;
-                        if (projectToScreen(midPos, screenX, screenY)) {
-                            if (isInSelection(screenX, screenY)) {
-                                g_app.currentEditMesh->selectedEdges.insert(static_cast<uint32_t>(ei));
-                                selectedCount++;
-                            }
-                        }
-                    }
-                    printf("[BOX SELECT] Selected %d edges\n", selectedCount);
-                }
-                else if (selectMode == luma::editor::EditModeToolbar::SelectMode::Face) {
-                    // 面选择 - 检查面的中心点
-                    for (size_t fi = 0; fi < g_app.currentEditMesh->faces.size(); ++fi) {
-                        const auto& face = g_app.currentEditMesh->faces[fi];
-                        if (face.loops.empty()) continue;
-                        
-                        // 计算面的中心
-                        float centerPos[3] = {0, 0, 0};
-                        int validVerts = 0;
-                        for (const auto& loop : face.loops) {
-                            if (loop.vertexIndex < g_app.currentEditMesh->vertices.size()) {
-                                const auto& v = g_app.currentEditMesh->vertices[loop.vertexIndex];
-                                centerPos[0] += v.position[0];
-                                centerPos[1] += v.position[1];
-                                centerPos[2] += v.position[2];
-                                validVerts++;
-                            }
-                        }
-                        if (validVerts > 0) {
-                            centerPos[0] /= validVerts;
-                            centerPos[1] /= validVerts;
-                            centerPos[2] /= validVerts;
-                            
-                            float screenX, screenY;
-                            if (projectToScreen(centerPos, screenX, screenY)) {
-                                if (isInSelection(screenX, screenY)) {
-                                    g_app.currentEditMesh->selectedFaces.insert(static_cast<uint32_t>(fi));
-                                    selectedCount++;
-                                }
-                            }
-                        }
-                    }
-                    printf("[BOX SELECT] Selected %d faces\n", selectedCount);
-                }
-            }
-            
-            g_app.mouseWasDown = false;
-            return 0;
-        }
-        
-        // Check if this was a click (not a drag) for selection
-        if (g_app.mouseWasDown && !imguiWantsMouse) {
-            float mouseX = (float)GET_X_LPARAM(lParam);
-            float mouseY = (float)GET_Y_LPARAM(lParam);
-            
-            // Consider it a click if mouse moved less than 5 pixels
-            float dx = mouseX - g_app.mouseDownX;
-            float dy = mouseY - g_app.mouseDownY;
-            float distSq = dx * dx + dy * dy;
-            
-            if (distSq < 25.0f) {
-                // Check if in Edit mode with EditMesh
-                bool isEditMode = (g_app.modeManager.currentMode == luma::editor::EditorMode::Edit);
-                
-                if (isEditMode && g_app.currentEditMesh) {
-                    // Edit mode: pick vertices/edges/faces (only for Click select tool)
-                    auto selectTool = g_app.editToolbar.selectTool;
-                    if (selectTool == luma::editor::EditModeToolbar::SelectTool::Click) {
-                        float viewMatrix[16], projMatrix[16];
-                        g_app.renderer.getViewMatrix(viewMatrix);
-                        g_app.renderer.getProjectionMatrix(projMatrix);
-                        
-                        luma::editor::Ray pickRay = luma::editor::MeshPicker::createRayFromScreen(
-                            mouseX, mouseY, g_app.width, g_app.height, viewMatrix, projMatrix);
-                        
-                        // Get world matrix for selected entity
-                        const float* worldMatrix = nullptr;
-                        if (auto* sel = g_app.scene.getSelectedEntity()) {
-                            worldMatrix = sel->worldMatrix.m;
-                        }
-                        
-                        // Determine selection mode from toolbar
-                        luma::editor::SelectionMode selMode = luma::editor::SelectionMode::Face;
-                        if (g_app.editToolbar.selectMode == luma::editor::EditModeToolbar::SelectMode::Vertex) {
-                            selMode = luma::editor::SelectionMode::Vertex;
-                        } else if (g_app.editToolbar.selectMode == luma::editor::EditModeToolbar::SelectMode::Edge) {
-                            selMode = luma::editor::SelectionMode::Edge;
-                        }
-                        
-                        luma::editor::PickResult pickResult = g_app.meshPicker.pick(
-                            pickRay, *g_app.currentEditMesh, selMode, worldMatrix);
-                        
-                        if (pickResult.hit()) {
-                            bool additive = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
-                            
-                            switch (pickResult.type) {
-                                case luma::editor::PickResult::Type::Vertex:
-                                    g_app.currentEditMesh->selectVertex(pickResult.index, additive);
-                                    printf("[PICK] Selected vertex %u\n", pickResult.index);
-                                    break;
-                                case luma::editor::PickResult::Type::Edge:
-                                    g_app.currentEditMesh->selectEdge(pickResult.index, additive);
-                                    printf("[PICK] Selected edge %u\n", pickResult.index);
-                                    break;
-                                case luma::editor::PickResult::Type::Face:
-                                    g_app.currentEditMesh->selectFace(pickResult.index, additive);
-                                    printf("[PICK] Selected face %u\n", pickResult.index);
-                                    break;
-                                default:
-                                    break;
-                            }
-                        } else if (!((GetKeyState(VK_SHIFT) & 0x8000) != 0)) {
-                            // Click on empty space without Shift = deselect
-                            g_app.currentEditMesh->selectNone();
-                        }
-                    }
-                } else {
-                    // Scene mode: pick entities
-                    luma::Ray ray = getMouseRay(mouseX, mouseY);
-                    luma::PickResult pick = luma::pickEntity(g_app.scene, ray);
-                    
-                    if (pick.hit()) {
-                        g_app.scene.setSelectedEntity(pick.entity);
-                    } else {
-                        g_app.scene.clearSelection();
-                    }
-                }
-            }
-        }
-        g_app.mouseWasDown = false;
-        
-        g_app.viewport.onMouseUp(0);
-        if (g_app.viewport.cameraMode == luma::CameraMode::None) ReleaseCapture();
-        return 0;
-    }
-        
-    case WM_RBUTTONUP:
-        g_app.viewport.onMouseUp(1);
-        if (g_app.viewport.cameraMode == luma::CameraMode::None) ReleaseCapture();
-        return 0;
-        
-    case WM_MBUTTONUP:
-        g_app.viewport.onMouseUp(2);
-        if (g_app.viewport.cameraMode == luma::CameraMode::None) ReleaseCapture();
-        return 0;
-        
-    case WM_MOUSEMOVE: {
-        float mouseX = (float)GET_X_LPARAM(lParam);
-        float mouseY = (float)GET_Y_LPARAM(lParam);
-        
-        // Handle gizmo drag
-        if (g_app.gizmo.isDragging()) {
-            luma::Ray ray = getMouseRay(mouseX, mouseY);
-            g_app.gizmo.updateDrag(ray);
-            
-            // Update the entity's world matrix after transform change
-            if (luma::Entity* target = g_app.scene.getSelectedEntity()) {
-                target->updateWorldMatrix();
-            }
-            return 0;
-        }
-        
-        // 更新框选/圆选
-        if (g_app.selectionBox.isSelecting) {
-            g_app.selectionBox.updateSelection(mouseX, mouseY);
-            return 0;
-        }
-        
-        // Handle camera movement
-        if (g_app.viewport.cameraMode != luma::CameraMode::None) {
-            g_app.viewport.onMouseMove(mouseX, mouseY, g_app.getSceneRadius());
-        }
-        return 0;
-    }
-        
-    case WM_MOUSEWHEEL:
-        if (!imguiWantsMouse) {
-            float delta = (float)GET_WHEEL_DELTA_WPARAM(wParam) / WHEEL_DELTA;
-            g_app.viewport.onMouseWheel(delta, g_app.getSceneRadius());
-        }
-        return 0;
-        
     case WM_DESTROY:
         g_app.shouldQuit = true;
         PostQuitMessage(0);
         return 0;
     }
+    
+    // InputSystem handles input only after initialization
+    // Before init, fall back to DefWindowProc (important for WM_CREATE etc.)
+    if (g_app.inputSystemInitialized) {
+        return g_app.inputSystem.handleWindowMessage(msg, wParam, lParam);
+    }
+    
     return DefWindowProcW(hwnd, msg, wParam, lParam);
 }
 
@@ -1069,6 +692,7 @@ static void SetupEditorCallbacks() {
     g_app.welcomeScreen.onNewScene = []() {
         g_app.scene.clear();
         g_app.modeManager.switchMode(luma::editor::EditorMode::Scene);
+        g_app.modeHandlers.switchMode(luma::editor::EditorMode::Scene);
         g_app.projectName = "未命名场景";
         g_app.currentScenePath.clear();
         g_app.editorState.consoleLogs.push_back("[INFO] 新建场景");
@@ -1079,6 +703,7 @@ static void SetupEditorCallbacks() {
         if (!loadPath.empty()) {
             g_app.editorState.onSceneLoad(loadPath);
             g_app.modeManager.switchMode(luma::editor::EditorMode::Scene);
+            g_app.modeHandlers.switchMode(luma::editor::EditorMode::Scene);
             g_app.welcomeScreen.isVisible = false;
             // Extract project name from path
             size_t lastSlash = loadPath.find_last_of("/\\");
@@ -1092,11 +717,13 @@ static void SetupEditorCallbacks() {
     g_app.welcomeScreen.onOpenRecent = [](const std::string& path) {
         g_app.editorState.onSceneLoad(path);
         g_app.modeManager.switchMode(luma::editor::EditorMode::Scene);
+        g_app.modeHandlers.switchMode(luma::editor::EditorMode::Scene);
     };
     
     g_app.welcomeScreen.onLoadPreset = [](const std::string& preset) {
         g_app.scene.clear();
         g_app.modeManager.switchMode(luma::editor::EditorMode::Scene);
+        g_app.modeHandlers.switchMode(luma::editor::EditorMode::Scene);
         g_app.projectName = preset;
         
         // Create default setup based on preset
@@ -1229,6 +856,9 @@ static void SetupEditorCallbacks() {
                     }
                     
                     g_app.editMeshDirty = false;
+                    
+                    // Sync to all modules including EditModeHandler
+                    g_app.syncEditMeshToModules();
                 }
             }
         }
@@ -1321,6 +951,7 @@ static void RenderUI() {
                 ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 4.0f);
                 if (ImGui::Button(loc(labelKey), ImVec2(55, 24)) && enabled) {
                     g_app.modeManager.switchMode(mode);
+                    g_app.modeHandlers.switchMode(mode);
                 }
                 ImGui::PopStyleVar();
                 ImGui::PopStyleColor(3);
@@ -1406,6 +1037,7 @@ static void RenderUI() {
                 g_app.currentEditMesh.reset();
                 g_app.editMeshDirty = false;
                 g_app.modeManager.switchMode(luma::editor::EditorMode::Scene);
+                g_app.modeHandlers.switchMode(luma::editor::EditorMode::Scene);
             }
             ImGui::Separator();
             
@@ -1413,6 +1045,7 @@ static void RenderUI() {
             if (ImGui::CollapsingHeader(loc("Edit Tools"), ImGuiTreeNodeFlags_DefaultOpen)) {
                 g_app.editToolbar.draw(300.0f);
             }
+            g_app.editToolbar.handleShortcuts();
             
             // ========== Undo/Redo ==========
             g_app.undoRedoBar.getUndoCount = [&]() { 
@@ -1506,12 +1139,14 @@ static void RenderUI() {
                 g_app.currentEditMesh.reset();
                 g_app.editMeshDirty = false;
                 g_app.modeManager.switchMode(luma::editor::EditorMode::Scene);
+                g_app.modeHandlers.switchMode(luma::editor::EditorMode::Scene);
             };
             g_app.saveBar.onCancel = [&]() {
                 // 放弃修改并退出
                 g_app.currentEditMesh.reset();
                 g_app.editMeshDirty = false;
                 g_app.modeManager.switchMode(luma::editor::EditorMode::Scene);
+                g_app.modeHandlers.switchMode(luma::editor::EditorMode::Scene);
             };
             g_app.saveBar.draw(g_app.editMeshDirty, 300.0f);
         }
@@ -1574,6 +1209,7 @@ static void RenderUI() {
         g_app.viewportHeader.selectMode = &g_app.editToolbar.selectMode;
         g_app.viewportHeader.selectTool = &g_app.editToolbar.selectTool;
         g_app.viewportHeader.viewMode = &g_app.viewToolbar.currentViewMode;
+        g_app.viewportHeader.xRayMode = &g_app.editToolbar.xRayMode;
         g_app.viewportHeader.onUndo = [&]() {
             if (g_app.currentEditMesh && g_app.currentEditMesh->undo()) {
                 g_app.editMeshDirty = true;
@@ -1594,243 +1230,10 @@ static void RenderUI() {
     // ========== Selection Box Overlay (框选/圆选) ==========
     g_app.selectionBox.draw();
     
-    // ========== Selected Faces Highlight (面模式选中高亮) ==========
-    bool isEditMode = (g_app.modeManager.currentMode == luma::editor::EditorMode::Edit);
-    auto selectMode = g_app.editToolbar.selectMode;
-    if (isEditMode && g_app.currentEditMesh && 
-        selectMode == luma::editor::EditModeToolbar::SelectMode::Face &&
-        !g_app.currentEditMesh->selectedFaces.empty()) {
-        
-        // 获取变换矩阵
-        float viewMatrix[16], projMatrix[16];
-        g_app.renderer.getViewMatrix(viewMatrix);
-        g_app.renderer.getProjectionMatrix(projMatrix);
-        
-        const float* worldMatrix = nullptr;
-        if (auto* sel = g_app.scene.getSelectedEntity()) {
-            worldMatrix = sel->worldMatrix.m;
-        }
-        
-        // 投影顶点到屏幕空间
-        auto projectToScreen = [&](const float* pos, float& screenX, float& screenY) -> bool {
-            float worldPos[4] = {pos[0], pos[1], pos[2], 1.0f};
-            
-            if (worldMatrix) {
-                float wp[4];
-                wp[0] = worldMatrix[0]*pos[0] + worldMatrix[4]*pos[1] + worldMatrix[8]*pos[2] + worldMatrix[12];
-                wp[1] = worldMatrix[1]*pos[0] + worldMatrix[5]*pos[1] + worldMatrix[9]*pos[2] + worldMatrix[13];
-                wp[2] = worldMatrix[2]*pos[0] + worldMatrix[6]*pos[1] + worldMatrix[10]*pos[2] + worldMatrix[14];
-                worldPos[0] = wp[0]; worldPos[1] = wp[1]; worldPos[2] = wp[2]; worldPos[3] = 1.0f;
-            }
-            
-            float viewPos[4];
-            viewPos[0] = viewMatrix[0]*worldPos[0] + viewMatrix[4]*worldPos[1] + viewMatrix[8]*worldPos[2] + viewMatrix[12];
-            viewPos[1] = viewMatrix[1]*worldPos[0] + viewMatrix[5]*worldPos[1] + viewMatrix[9]*worldPos[2] + viewMatrix[13];
-            viewPos[2] = viewMatrix[2]*worldPos[0] + viewMatrix[6]*worldPos[1] + viewMatrix[10]*worldPos[2] + viewMatrix[14];
-            viewPos[3] = viewMatrix[3]*worldPos[0] + viewMatrix[7]*worldPos[1] + viewMatrix[11]*worldPos[2] + viewMatrix[15];
-            
-            float clipPos[4];
-            clipPos[0] = projMatrix[0]*viewPos[0] + projMatrix[4]*viewPos[1] + projMatrix[8]*viewPos[2] + projMatrix[12]*viewPos[3];
-            clipPos[1] = projMatrix[1]*viewPos[0] + projMatrix[5]*viewPos[1] + projMatrix[9]*viewPos[2] + projMatrix[13]*viewPos[3];
-            clipPos[2] = projMatrix[2]*viewPos[0] + projMatrix[6]*viewPos[1] + projMatrix[10]*viewPos[2] + projMatrix[14]*viewPos[3];
-            clipPos[3] = projMatrix[3]*viewPos[0] + projMatrix[7]*viewPos[1] + projMatrix[11]*viewPos[2] + projMatrix[15]*viewPos[3];
-            
-            if (clipPos[3] <= 0.0f) return false;
-            float ndcX = clipPos[0] / clipPos[3];
-            float ndcY = clipPos[1] / clipPos[3];
-            
-            screenX = (ndcX + 1.0f) * 0.5f * g_app.width;
-            screenY = (1.0f - ndcY) * 0.5f * g_app.height;
-            return true;
-        };
-        
-        ImDrawList* drawList = ImGui::GetBackgroundDrawList();
-        ImU32 faceColor = IM_COL32(255, 140, 0, 80);  // 橙色半透明填充
-        ImU32 edgeColor = IM_COL32(255, 160, 0, 200);  // 橙色边框
-        
-        for (uint32_t fi : g_app.currentEditMesh->selectedFaces) {
-            if (fi >= g_app.currentEditMesh->faces.size()) continue;
-            const auto& face = g_app.currentEditMesh->faces[fi];
-            if (face.loops.size() < 3) continue;
-            
-            // 收集面的屏幕坐标
-            std::vector<ImVec2> screenPoints;
-            bool allVisible = true;
-            
-            for (const auto& loop : face.loops) {
-                if (loop.vertexIndex >= g_app.currentEditMesh->vertices.size()) {
-                    allVisible = false;
-                    break;
-                }
-                const auto& v = g_app.currentEditMesh->vertices[loop.vertexIndex];
-                float sx, sy;
-                if (projectToScreen(v.position, sx, sy)) {
-                    screenPoints.push_back(ImVec2(sx, sy));
-                } else {
-                    allVisible = false;
-                    break;
-                }
-            }
-            
-            if (allVisible && screenPoints.size() >= 3) {
-                // 三角化面并绘制填充（简单扇形三角化）
-                for (size_t i = 1; i < screenPoints.size() - 1; ++i) {
-                    drawList->AddTriangleFilled(
-                        screenPoints[0], 
-                        screenPoints[i], 
-                        screenPoints[i + 1], 
-                        faceColor);
-                }
-                // 绘制面的边框
-                for (size_t i = 0; i < screenPoints.size(); ++i) {
-                    size_t nextI = (i + 1) % screenPoints.size();
-                    drawList->AddLine(screenPoints[i], screenPoints[nextI], edgeColor, 2.0f);
-                }
-            }
-        }
-    }
-    
-    // ========== Selected Edges Highlight (线模式选中高亮) ==========
-    if (isEditMode && g_app.currentEditMesh && 
-        selectMode == luma::editor::EditModeToolbar::SelectMode::Edge &&
-        !g_app.currentEditMesh->selectedEdges.empty()) {
-        
-        float viewMatrix[16], projMatrix[16];
-        g_app.renderer.getViewMatrix(viewMatrix);
-        g_app.renderer.getProjectionMatrix(projMatrix);
-        
-        const float* worldMatrix = nullptr;
-        if (auto* sel = g_app.scene.getSelectedEntity()) {
-            worldMatrix = sel->worldMatrix.m;
-        }
-        
-        auto projectToScreen = [&](const float* pos, float& screenX, float& screenY) -> bool {
-            float worldPos[4] = {pos[0], pos[1], pos[2], 1.0f};
-            
-            if (worldMatrix) {
-                float wp[4];
-                wp[0] = worldMatrix[0]*pos[0] + worldMatrix[4]*pos[1] + worldMatrix[8]*pos[2] + worldMatrix[12];
-                wp[1] = worldMatrix[1]*pos[0] + worldMatrix[5]*pos[1] + worldMatrix[9]*pos[2] + worldMatrix[13];
-                wp[2] = worldMatrix[2]*pos[0] + worldMatrix[6]*pos[1] + worldMatrix[10]*pos[2] + worldMatrix[14];
-                worldPos[0] = wp[0]; worldPos[1] = wp[1]; worldPos[2] = wp[2]; worldPos[3] = 1.0f;
-            }
-            
-            float viewPos[4];
-            viewPos[0] = viewMatrix[0]*worldPos[0] + viewMatrix[4]*worldPos[1] + viewMatrix[8]*worldPos[2] + viewMatrix[12];
-            viewPos[1] = viewMatrix[1]*worldPos[0] + viewMatrix[5]*worldPos[1] + viewMatrix[9]*worldPos[2] + viewMatrix[13];
-            viewPos[2] = viewMatrix[2]*worldPos[0] + viewMatrix[6]*worldPos[1] + viewMatrix[10]*worldPos[2] + viewMatrix[14];
-            viewPos[3] = viewMatrix[3]*worldPos[0] + viewMatrix[7]*worldPos[1] + viewMatrix[11]*worldPos[2] + viewMatrix[15];
-            
-            float clipPos[4];
-            clipPos[0] = projMatrix[0]*viewPos[0] + projMatrix[4]*viewPos[1] + projMatrix[8]*viewPos[2] + projMatrix[12]*viewPos[3];
-            clipPos[1] = projMatrix[1]*viewPos[0] + projMatrix[5]*viewPos[1] + projMatrix[9]*viewPos[2] + projMatrix[13]*viewPos[3];
-            clipPos[2] = projMatrix[2]*viewPos[0] + projMatrix[6]*viewPos[1] + projMatrix[10]*viewPos[2] + projMatrix[14]*viewPos[3];
-            clipPos[3] = projMatrix[3]*viewPos[0] + projMatrix[7]*viewPos[1] + projMatrix[11]*viewPos[2] + projMatrix[15]*viewPos[3];
-            
-            if (clipPos[3] <= 0.0f) return false;
-            float ndcX = clipPos[0] / clipPos[3];
-            float ndcY = clipPos[1] / clipPos[3];
-            
-            screenX = (ndcX + 1.0f) * 0.5f * g_app.width;
-            screenY = (1.0f - ndcY) * 0.5f * g_app.height;
-            return true;
-        };
-        
-        ImDrawList* drawList = ImGui::GetBackgroundDrawList();
-        ImU32 edgeColor = IM_COL32(255, 140, 0, 255);  // 橙色
-        
-        for (uint32_t ei : g_app.currentEditMesh->selectedEdges) {
-            if (ei >= g_app.currentEditMesh->edges.size()) continue;
-            const auto& edge = g_app.currentEditMesh->edges[ei];
-            
-            if (edge.v0 >= g_app.currentEditMesh->vertices.size() ||
-                edge.v1 >= g_app.currentEditMesh->vertices.size()) continue;
-            
-            const auto& v0 = g_app.currentEditMesh->vertices[edge.v0];
-            const auto& v1 = g_app.currentEditMesh->vertices[edge.v1];
-            
-            float sx0, sy0, sx1, sy1;
-            if (projectToScreen(v0.position, sx0, sy0) && projectToScreen(v1.position, sx1, sy1)) {
-                // 画粗线表示选中的边
-                drawList->AddLine(ImVec2(sx0, sy0), ImVec2(sx1, sy1), edgeColor, 4.0f);
-            }
-        }
-    }
-    
-    // ========== 点模式：显示所有顶点，选中的高亮 (ImGui覆盖层) ==========
-    if (isEditMode && g_app.currentEditMesh && 
-        selectMode == luma::editor::EditModeToolbar::SelectMode::Vertex &&
-        g_app.editToolbar.showVertices) {
-        
-        float viewMatrix[16], projMatrix[16];
-        g_app.renderer.getViewMatrix(viewMatrix);
-        g_app.renderer.getProjectionMatrix(projMatrix);
-        
-        const float* worldMatrix = nullptr;
-        if (auto* sel = g_app.scene.getSelectedEntity()) {
-            worldMatrix = sel->worldMatrix.m;
-        }
-        
-        auto projectToScreen = [&](const float* pos, float& screenX, float& screenY) -> bool {
-            float worldPos[4] = {pos[0], pos[1], pos[2], 1.0f};
-            
-            if (worldMatrix) {
-                float wp[4];
-                wp[0] = worldMatrix[0]*pos[0] + worldMatrix[4]*pos[1] + worldMatrix[8]*pos[2] + worldMatrix[12];
-                wp[1] = worldMatrix[1]*pos[0] + worldMatrix[5]*pos[1] + worldMatrix[9]*pos[2] + worldMatrix[13];
-                wp[2] = worldMatrix[2]*pos[0] + worldMatrix[6]*pos[1] + worldMatrix[10]*pos[2] + worldMatrix[14];
-                worldPos[0] = wp[0]; worldPos[1] = wp[1]; worldPos[2] = wp[2]; worldPos[3] = 1.0f;
-            }
-            
-            float viewPos[4];
-            viewPos[0] = viewMatrix[0]*worldPos[0] + viewMatrix[4]*worldPos[1] + viewMatrix[8]*worldPos[2] + viewMatrix[12];
-            viewPos[1] = viewMatrix[1]*worldPos[0] + viewMatrix[5]*worldPos[1] + viewMatrix[9]*worldPos[2] + viewMatrix[13];
-            viewPos[2] = viewMatrix[2]*worldPos[0] + viewMatrix[6]*worldPos[1] + viewMatrix[10]*worldPos[2] + viewMatrix[14];
-            viewPos[3] = viewMatrix[3]*worldPos[0] + viewMatrix[7]*worldPos[1] + viewMatrix[11]*worldPos[2] + viewMatrix[15];
-            
-            float clipPos[4];
-            clipPos[0] = projMatrix[0]*viewPos[0] + projMatrix[4]*viewPos[1] + projMatrix[8]*viewPos[2] + projMatrix[12]*viewPos[3];
-            clipPos[1] = projMatrix[1]*viewPos[0] + projMatrix[5]*viewPos[1] + projMatrix[9]*viewPos[2] + projMatrix[13]*viewPos[3];
-            clipPos[2] = projMatrix[2]*viewPos[0] + projMatrix[6]*viewPos[1] + projMatrix[10]*viewPos[2] + projMatrix[14]*viewPos[3];
-            clipPos[3] = projMatrix[3]*viewPos[0] + projMatrix[7]*viewPos[1] + projMatrix[11]*viewPos[2] + projMatrix[15]*viewPos[3];
-            
-            if (clipPos[3] <= 0.0f) return false;
-            float ndcX = clipPos[0] / clipPos[3];
-            float ndcY = clipPos[1] / clipPos[3];
-            
-            screenX = (ndcX + 1.0f) * 0.5f * g_app.width;
-            screenY = (1.0f - ndcY) * 0.5f * g_app.height;
-            return true;
-        };
-        
-        ImDrawList* drawList = ImGui::GetBackgroundDrawList();
-        
-        // 先画所有未选中的顶点（小黑点）
-        ImU32 normalColor = IM_COL32(30, 30, 30, 255);  // 深灰/黑色
-        for (size_t vi = 0; vi < g_app.currentEditMesh->vertices.size(); ++vi) {
-            bool isSelected = g_app.currentEditMesh->selectedVertices.count(static_cast<uint32_t>(vi)) > 0;
-            if (isSelected) continue;  // 选中的后面画
-            
-            const auto& v = g_app.currentEditMesh->vertices[vi];
-            float sx, sy;
-            if (projectToScreen(v.position, sx, sy)) {
-                drawList->AddCircleFilled(ImVec2(sx, sy), 2.0f, normalColor, 6);
-            }
-        }
-        
-        // 再画选中的顶点（橙色，稍大）
-        ImU32 selectedColor = IM_COL32(255, 140, 0, 255);  // 橙色
-        ImU32 selectedFill = IM_COL32(255, 180, 50, 220);  // 浅橙色填充
-        for (uint32_t vi : g_app.currentEditMesh->selectedVertices) {
-            if (vi >= g_app.currentEditMesh->vertices.size()) continue;
-            const auto& v = g_app.currentEditMesh->vertices[vi];
-            
-            float sx, sy;
-            if (projectToScreen(v.position, sx, sy)) {
-                drawList->AddCircleFilled(ImVec2(sx, sy), 4.0f, selectedFill, 8);
-                drawList->AddCircle(ImVec2(sx, sy), 4.0f, selectedColor, 8, 1.5f);
-            }
-        }
+    // ========== Mode-specific UI (selection highlights, etc.) ==========
+    // Delegated to EditModeHandler::renderUI() which handles face/edge/vertex highlighting
+    if (g_app.editModeHandler) {
+        g_app.editModeHandler->renderUI();
     }
     
     // Overlays
@@ -1963,6 +1366,15 @@ int main() {
     auto lastTime = std::chrono::high_resolution_clock::now();
     
     while (!g_app.shouldQuit) {
+        // Sync toolbar → handler (all logic lives in syncFromToolbar)
+        if (g_app.editModeHandler && g_app.modeManager.currentMode == luma::editor::EditorMode::Edit) {
+            g_app.editModeHandler->syncFromToolbar(
+                g_app.editToolbar,
+                g_app.viewToolbar.currentViewMode,
+                g_app.meshListPanel.selectedMeshIndex
+            );
+        }
+        
         MSG msg;
         while (PeekMessageW(&msg, nullptr, 0, 0, PM_REMOVE)) {
             if (msg.message == WM_QUIT) g_app.shouldQuit = true;
@@ -2050,6 +1462,43 @@ int main() {
         lastTime = now;
         g_app.totalTime += dt;
         g_app.viewport.update(dt);
+        
+        // Update mode handler context and state
+        {
+            auto& ctx = g_app.modeHandlers.getContext();
+            ctx.windowWidth = g_app.width;
+            ctx.windowHeight = g_app.height;
+            g_app.renderer.getViewMatrix(ctx.viewMatrix);
+            g_app.renderer.getProjectionMatrix(ctx.projMatrix);
+            g_app.getSceneCenter(ctx.sceneCenter);
+            ctx.sceneRadius = g_app.getSceneRadius();
+            
+            // Update camera position and FOV for gizmo rendering
+            float cameraEye[3], cameraTgt[3];
+            g_app.viewport.camera.getEyeAndTarget(ctx.sceneCenter, ctx.sceneRadius, cameraEye, cameraTgt);
+            ctx.cameraPos[0] = cameraEye[0];
+            ctx.cameraPos[1] = cameraEye[1];
+            ctx.cameraPos[2] = cameraEye[2];
+            ctx.fovY = 3.14159f / 4.0f;  // 45 degrees
+            
+            // Update mode handlers
+            g_app.modeHandlers.update(dt);
+            
+            // Sync selection box state to overlay for UI rendering
+            // Note: MeshEditModule handles selection, not EditModeHandler directly
+            if (g_app.editModeHandler && g_app.modeManager.currentMode == luma::editor::EditorMode::Edit) {
+                if (auto* meshEdit = g_app.editModeHandler->getMeshEditModule()) {
+                    g_app.selectionBox.isSelecting = meshEdit->isSelecting();
+                    if (meshEdit->isSelecting()) {
+                        float x1, y1, x2, y2;
+                        meshEdit->getSelectionBounds(x1, y1, x2, y2);
+                        g_app.selectionBox.startPos = ImVec2(x1, y1);
+                        g_app.selectionBox.currentPos = ImVec2(x2, y2);
+                        g_app.selectionBox.selectTool = g_app.editToolbar.selectTool;
+                    }
+                }
+            }
+        }
         
         // Update animation
         if (g_app.animation.playing) {

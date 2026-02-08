@@ -901,10 +901,25 @@ public:
     bool showOriginalEdges = true;  // 显示四边面原始边
     bool showAllEdges = false;      // 显示所有边（包括三角化边）
     bool showVertices = true;       // 点模式时显示顶点
+    bool xRayMode = false;         // 透视模式（默认关闭：隐藏背面线框；开启：可看到背面线框/选中背面元素）
     
     // 回调
     std::function<void(SelectMode)> onSelectModeChanged;
     std::function<void(EditTool)> onToolChanged;
+    
+    // Check if a tool is available for the current selection mode
+    // Vertex: Move only (no Rotate/Scale)
+    // Edge: Move + Rotate (no Scale)
+    // Face: Move + Rotate + Scale (all)
+    bool isToolAvailable(EditTool tool) const {
+        if (tool == EditTool::Select || tool == EditTool::Extrude || tool == EditTool::Move)
+            return true;  // Always available
+        if (tool == EditTool::Rotate)
+            return selectMode != SelectMode::Vertex;  // Not for vertices
+        if (tool == EditTool::Scale)
+            return selectMode == SelectMode::Face;     // Only for faces
+        return true;
+    }
     
     bool draw(float panelWidth) {
         bool changed = false;
@@ -990,24 +1005,37 @@ public:
         
         auto drawToolBtn = [&](EditTool tool, const char* icon, const char* label, const char* shortcut) {
             bool selected = (currentTool == tool);
-            if (selected) {
+            bool available = isToolAvailable(tool);
+            
+            if (selected && available) {
                 ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.96f, 0.53f, 0.26f, 1.0f));
+            } else if (!available) {
+                ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.15f, 0.15f, 0.15f, 0.5f));
+                ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.4f, 0.4f, 0.4f, 0.6f));
             }
             
             char fullLabel[64];
             snprintf(fullLabel, sizeof(fullLabel), "%s %s", icon, label);
             
-            if (ImGui::Button(fullLabel, ImVec2(editBtnWidth, 32))) {
+            if (ImGui::Button(fullLabel, ImVec2(editBtnWidth, 32)) && available) {
                 currentTool = tool;
                 changed = true;
                 if (onToolChanged) onToolChanged(tool);
             }
             
             if (ImGui::IsItemHovered()) {
-                ImGui::SetTooltip("%s (%s)", label, shortcut);
+                if (available) {
+                    ImGui::SetTooltip("%s (%s)", label, shortcut);
+                } else {
+                    const char* reason = (selectMode == SelectMode::Vertex) 
+                        ? loc("Not available in Vertex mode") 
+                        : loc("Only available in Face mode");
+                    ImGui::SetTooltip("%s - %s", label, reason);
+                }
             }
             
-            if (selected) ImGui::PopStyleColor();
+            if (selected && available) ImGui::PopStyleColor();
+            else if (!available) ImGui::PopStyleColor(2);
         };
         
         // 第一行工具
@@ -1022,6 +1050,13 @@ public:
         
         // 第三行工具（特殊操作）
         drawToolBtn(EditTool::Extrude, "[E]", loc("Extrude"), "E");
+        
+        // Auto-switch to valid tool when current tool becomes unavailable
+        if (!isToolAvailable(currentTool)) {
+            currentTool = EditTool::Move;  // Fallback to Move (always available)
+            changed = true;
+            if (onToolChanged) onToolChanged(currentTool);
+        }
         
         ImGui::PopStyleVar();
         
@@ -1055,6 +1090,16 @@ public:
         }
         
         ImGui::Spacing();
+        
+        // X-Ray toggle (Blender Alt+Z style)
+        if (ImGui::Checkbox(loc("X-Ray"), &xRayMode)) {
+            changed = true;
+        }
+        if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip("%s", loc("Toggle X-Ray mode (Alt+Z)\nON: See through surfaces, select all elements\nOFF: Occluded elements hidden, only select visible"));
+        }
+        
+        ImGui::Spacing();
         ImGui::Separator();
         
         return changed;
@@ -1064,21 +1109,26 @@ public:
     bool handleShortcuts() {
         bool changed = false;
         
-        // 选择模式切换
-        if (ImGui::IsKeyPressed(ImGuiKey_1, false)) {
-            selectMode = SelectMode::Vertex;
+        // 选择模式切换 (auto-fix tool if it becomes unavailable)
+        auto switchSelectMode = [&](SelectMode mode) {
+            selectMode = mode;
             if (onSelectModeChanged) onSelectModeChanged(selectMode);
+            // Auto-switch to valid tool if current becomes unavailable
+            if (!isToolAvailable(currentTool)) {
+                currentTool = EditTool::Move;
+                if (onToolChanged) onToolChanged(currentTool);
+            }
             changed = true;
+        };
+        
+        if (ImGui::IsKeyPressed(ImGuiKey_1, false)) {
+            switchSelectMode(SelectMode::Vertex);
         }
         if (ImGui::IsKeyPressed(ImGuiKey_2, false)) {
-            selectMode = SelectMode::Edge;
-            if (onSelectModeChanged) onSelectModeChanged(selectMode);
-            changed = true;
+            switchSelectMode(SelectMode::Edge);
         }
         if (ImGui::IsKeyPressed(ImGuiKey_3, false)) {
-            selectMode = SelectMode::Face;
-            if (onSelectModeChanged) onSelectModeChanged(selectMode);
-            changed = true;
+            switchSelectMode(SelectMode::Face);
         }
         
         // 选择工具快捷键
@@ -1099,7 +1149,7 @@ public:
             changed = true;
         }
         
-        // 工具切换
+        // 工具切换 (respect availability based on selection mode)
         if (ImGui::IsKeyPressed(ImGuiKey_Q, false)) {
             currentTool = EditTool::Select;
             if (onToolChanged) onToolChanged(currentTool);
@@ -1110,12 +1160,12 @@ public:
             if (onToolChanged) onToolChanged(currentTool);
             changed = true;
         }
-        if (ImGui::IsKeyPressed(ImGuiKey_R, false)) {
+        if (ImGui::IsKeyPressed(ImGuiKey_R, false) && isToolAvailable(EditTool::Rotate)) {
             currentTool = EditTool::Rotate;
             if (onToolChanged) onToolChanged(currentTool);
             changed = true;
         }
-        if (ImGui::IsKeyPressed(ImGuiKey_S, false) && !ImGui::GetIO().KeyCtrl) {
+        if (ImGui::IsKeyPressed(ImGuiKey_S, false) && !ImGui::GetIO().KeyCtrl && isToolAvailable(EditTool::Scale)) {
             currentTool = EditTool::Scale;
             if (onToolChanged) onToolChanged(currentTool);
             changed = true;
@@ -1123,6 +1173,12 @@ public:
         if (ImGui::IsKeyPressed(ImGuiKey_E, false)) {
             currentTool = EditTool::Extrude;
             if (onToolChanged) onToolChanged(currentTool);
+            changed = true;
+        }
+        
+        // X-Ray toggle (Alt+Z, like Blender)
+        if (ImGui::IsKeyPressed(ImGuiKey_Z, false) && ImGui::GetIO().KeyAlt) {
+            xRayMode = !xRayMode;
             changed = true;
         }
         
@@ -1137,6 +1193,7 @@ public:
     EditModeToolbar::SelectMode* selectMode = nullptr;
     EditModeToolbar::SelectTool* selectTool = nullptr;
     ViewMode* viewMode = nullptr;
+    bool* xRayMode = nullptr;
     
     std::function<void()> onUndo;
     std::function<void()> onRedo;
@@ -1248,6 +1305,30 @@ public:
                 ImGui::SameLine();
                 drawViewBtn(ViewMode::Wireframe, loc("Wire"));
                 
+                ImGui::PopStyleVar();
+            }
+            
+            // === X-Ray 切换按钮 ===
+            if (xRayMode) {
+                ImGui::SameLine(0, 15);
+                ImGui::TextColored(ImVec4(0.4f, 0.4f, 0.4f, 1.0f), "|");
+                ImGui::SameLine(0, 15);
+                
+                ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 3.0f);
+                bool xray = *xRayMode;
+                if (xray) {
+                    ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.2f, 0.5f, 0.8f, 1.0f));
+                    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 1.0f, 1.0f, 1.0f));
+                }
+                if (ImGui::Button(xray ? "X-Ray ON" : "X-Ray", ImVec2(70, 22))) {
+                    *xRayMode = !(*xRayMode);
+                }
+                if (ImGui::IsItemHovered()) {
+                    ImGui::SetTooltip("%s", loc("Toggle X-Ray mode (Alt+Z)\nON: See through mesh, select all elements\nOFF: Hide occluded, select visible only"));
+                }
+                if (xray) {
+                    ImGui::PopStyleColor(2);
+                }
                 ImGui::PopStyleVar();
             }
             

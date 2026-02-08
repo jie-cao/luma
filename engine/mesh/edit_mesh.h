@@ -6,6 +6,7 @@
 
 #include <vector>
 #include <set>
+#include <map>
 #include <deque>
 #include <cstdint>
 #include <cstring>
@@ -424,57 +425,124 @@ public:
     // 建模操作
     // =========================================================================
     
-    // 挤出选中的面
+    // 挤出选中的面（带位移）
     void extrudeSelectedFaces(float dx, float dy, float dz) {
         if (selectedFaces.empty()) return;
         pushUndo();
+        extrudeSelectedFacesInternal(dx, dy, dz);
+    }
+    
+    // 挤出选中的面（零位移，用于 gizmo 交互式挤出）
+    // 返回挤出后新顶点的索引集合（用于后续移动）
+    std::set<uint32_t> extrudeSelectedFacesInPlace() {
+        if (selectedFaces.empty()) return {};
+        pushUndo();
+        return extrudeSelectedFacesInternal(0, 0, 0);
+    }
+    
+    // 计算选中面的平均法线（本地空间）
+    void getSelectedFacesNormal(float* outNormal) const {
+        outNormal[0] = outNormal[1] = outNormal[2] = 0;
+        if (selectedFaces.empty()) return;
         
-        std::vector<uint32_t> facesToExtrude(selectedFaces.begin(), selectedFaces.end());
-        
-        for (uint32_t fi : facesToExtrude) {
-            EditFace& face = faces[fi];
+        for (uint32_t fi : selectedFaces) {
+            if (fi >= faces.size()) continue;
+            const EditFace& face = faces[fi];
+            if (face.loops.size() < 3) continue;
             
-            // 1. 为每个顶点创建新顶点
-            std::vector<uint32_t> newVertexIndices;
-            for (const Loop& loop : face.loops) {
-                const EditVertex& oldV = vertices[loop.vertexIndex];
-                uint32_t newVi = addVertex(
-                    oldV.position[0] + dx,
-                    oldV.position[1] + dy,
-                    oldV.position[2] + dz
-                );
-                newVertexIndices.push_back(newVi);
-            }
+            const float* p0 = vertices[face.loops[0].vertexIndex].position;
+            const float* p1 = vertices[face.loops[1].vertexIndex].position;
+            const float* p2 = vertices[face.loops[2].vertexIndex].position;
             
-            // 2. 创建侧面
-            for (size_t i = 0; i < face.loops.size(); i++) {
-                size_t next = (i + 1) % face.loops.size();
-                
-                std::vector<uint32_t> sideVerts = {
-                    face.loops[i].vertexIndex,
-                    face.loops[next].vertexIndex,
-                    newVertexIndices[next],
-                    newVertexIndices[i]
-                };
-                
-                addFace(sideVerts, face.materialIndex);
-                
-                // 侧面的 UV 需要生成（标记为需要修复）
-                faces.back().loops[0].uv[0] = 0; faces.back().loops[0].uv[1] = 0;
-                faces.back().loops[1].uv[0] = 1; faces.back().loops[1].uv[1] = 0;
-                faces.back().loops[2].uv[0] = 1; faces.back().loops[2].uv[1] = 1;
-                faces.back().loops[3].uv[0] = 0; faces.back().loops[3].uv[1] = 1;
-            }
+            float e1[3] = { p1[0]-p0[0], p1[1]-p0[1], p1[2]-p0[2] };
+            float e2[3] = { p2[0]-p0[0], p2[1]-p0[1], p2[2]-p0[2] };
             
-            // 3. 更新原面的顶点引用（移动到新位置）
-            for (size_t i = 0; i < face.loops.size(); i++) {
-                face.loops[i].vertexIndex = newVertexIndices[i];
-            }
-            face.calculateNormal(vertices);
+            float n[3];
+            math::cross3(n, e1, e2);
+            math::normalize3(n);
+            
+            outNormal[0] += n[0];
+            outNormal[1] += n[1];
+            outNormal[2] += n[2];
         }
+        math::normalize3(outNormal);
+    }
+    
+    // 挤出选中的边（零位移，用于 gizmo 交互式挤出）
+    std::set<uint32_t> extrudeSelectedEdgesInPlace() {
+        if (selectedEdges.empty()) return {};
+        pushUndo();
+        
+        std::set<uint32_t> newVertIndices;
+        std::vector<uint32_t> edgesToExtrude(selectedEdges.begin(), selectedEdges.end());
+        
+        // Map from old vertex to new vertex
+        std::map<uint32_t, uint32_t> vertexMap;
+        
+        for (uint32_t ei : edgesToExtrude) {
+            if (ei >= edges.size()) continue;
+            const EditEdge& edge = edges[ei];
+            
+            // Create new vertices for endpoints (if not already created)
+            for (uint32_t vi : {edge.v0, edge.v1}) {
+                if (vertexMap.find(vi) == vertexMap.end()) {
+                    const EditVertex& oldV = vertices[vi];
+                    uint32_t newVi = addVertex(oldV.position[0], oldV.position[1], oldV.position[2]);
+                    vertexMap[vi] = newVi;
+                    newVertIndices.insert(newVi);
+                }
+            }
+            
+            // Create a quad face connecting old edge to new edge
+            uint32_t nv0 = vertexMap[edge.v0];
+            uint32_t nv1 = vertexMap[edge.v1];
+            std::vector<uint32_t> faceVerts = { edge.v0, edge.v1, nv1, nv0 };
+            addFace(faceVerts);
+        }
+        
+        // Update selection to new vertices
+        selectedVertices.clear();
+        selectedVertices = newVertIndices;
+        
+        // Update selected edges to the new edges
+        selectedEdges.clear();
+        
+        rebuildEdges();
+        
+        // Find the new edges that connect the new vertices
+        for (uint32_t ei = 0; ei < edges.size(); ei++) {
+            if (newVertIndices.count(edges[ei].v0) && newVertIndices.count(edges[ei].v1)) {
+                selectedEdges.insert(ei);
+            }
+        }
+        
+        markDirty();
+        return newVertIndices;
+    }
+    
+    // 挤出选中的顶点（零位移）
+    std::set<uint32_t> extrudeSelectedVerticesInPlace() {
+        if (selectedVertices.empty()) return {};
+        pushUndo();
+        
+        std::set<uint32_t> newVertIndices;
+        
+        for (uint32_t vi : selectedVertices) {
+            if (vi >= vertices.size()) continue;
+            const EditVertex& oldV = vertices[vi];
+            uint32_t newVi = addVertex(oldV.position[0], oldV.position[1], oldV.position[2]);
+            newVertIndices.insert(newVi);
+            
+            // Create an edge connecting old vertex to new vertex
+            addEdgeIfNotExists(vi, newVi, true);
+        }
+        
+        // Update selection to new vertices
+        selectedVertices = newVertIndices;
         
         rebuildEdges();
         markDirty();
+        return newVertIndices;
     }
     
     // 细分选中的面
@@ -1034,6 +1102,96 @@ private:
     bool isDirty_ = false;
     
     void markDirty() { isDirty_ = true; }
+    
+    // 挤出选中面的内部实现（返回新顶点索引集合）
+    std::set<uint32_t> extrudeSelectedFacesInternal(float dx, float dy, float dz) {
+        std::set<uint32_t> newVertIndices;
+        std::vector<uint32_t> facesToExtrude(selectedFaces.begin(), selectedFaces.end());
+        
+        // Map from old vertex index to new vertex index (shared across faces for connected geometry)
+        std::map<uint32_t, uint32_t> vertexMap;
+        
+        // Collect all unique vertices used by selected faces
+        for (uint32_t fi : facesToExtrude) {
+            if (fi >= faces.size()) continue;
+            const EditFace& face = faces[fi];
+            for (const Loop& loop : face.loops) {
+                if (vertexMap.find(loop.vertexIndex) == vertexMap.end()) {
+                    const EditVertex& oldV = vertices[loop.vertexIndex];
+                    uint32_t newVi = addVertex(
+                        oldV.position[0] + dx,
+                        oldV.position[1] + dy,
+                        oldV.position[2] + dz
+                    );
+                    vertexMap[loop.vertexIndex] = newVi;
+                    newVertIndices.insert(newVi);
+                }
+            }
+        }
+        
+        // For each face, create side faces and update the face to use new vertices
+        for (uint32_t fi : facesToExtrude) {
+            if (fi >= faces.size()) continue;
+            EditFace& face = faces[fi];
+            
+            // Check if edge is shared with another selected face
+            // (shared internal edges should NOT get side faces)
+            auto isEdgeInternal = [&](uint32_t va, uint32_t vb) -> bool {
+                int sharedCount = 0;
+                for (uint32_t otherFi : facesToExtrude) {
+                    if (otherFi >= faces.size()) continue;
+                    const EditFace& otherFace = faces[otherFi];
+                    for (size_t i = 0; i < otherFace.loops.size(); i++) {
+                        size_t next = (i + 1) % otherFace.loops.size();
+                        uint32_t ev0 = otherFace.loops[i].vertexIndex;
+                        uint32_t ev1 = otherFace.loops[next].vertexIndex;
+                        if ((ev0 == va && ev1 == vb) || (ev0 == vb && ev1 == va)) {
+                            sharedCount++;
+                            if (sharedCount >= 2) return true;
+                        }
+                    }
+                }
+                return false;
+            };
+            
+            // Create side faces for boundary edges only
+            for (size_t i = 0; i < face.loops.size(); i++) {
+                size_t next = (i + 1) % face.loops.size();
+                uint32_t oldV0 = face.loops[i].vertexIndex;
+                uint32_t oldV1 = face.loops[next].vertexIndex;
+                
+                if (!isEdgeInternal(oldV0, oldV1)) {
+                    std::vector<uint32_t> sideVerts = {
+                        oldV0, oldV1,
+                        vertexMap[oldV1], vertexMap[oldV0]
+                    };
+                    addFace(sideVerts, face.materialIndex);
+                    
+                    // Generate simple UVs for side faces
+                    if (faces.back().loops.size() == 4) {
+                        faces.back().loops[0].uv[0] = 0; faces.back().loops[0].uv[1] = 0;
+                        faces.back().loops[1].uv[0] = 1; faces.back().loops[1].uv[1] = 0;
+                        faces.back().loops[2].uv[0] = 1; faces.back().loops[2].uv[1] = 1;
+                        faces.back().loops[3].uv[0] = 0; faces.back().loops[3].uv[1] = 1;
+                    }
+                }
+            }
+            
+            // Update original face to use new vertices
+            for (size_t i = 0; i < face.loops.size(); i++) {
+                face.loops[i].vertexIndex = vertexMap[face.loops[i].vertexIndex];
+            }
+            face.calculateNormal(vertices);
+        }
+        
+        // Update selection to point at new vertices
+        selectedVertices.clear();
+        selectedVertices = newVertIndices;
+        
+        rebuildEdges();
+        markDirty();
+        return newVertIndices;
+    }
     
     // 从面重建边数据
     void rebuildEdges() {

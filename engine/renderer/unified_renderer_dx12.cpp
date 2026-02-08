@@ -622,6 +622,12 @@ struct DX12MeshData {
     float baseColor[3] = {1, 1, 1};
     float metallic = 0.0f;
     float roughness = 0.5f;
+    
+    // GPU-side edge index buffer for original edges (LINE topology)
+    // Pre-built during model loading — enables zero-CPU wireframe rendering
+    ComPtr<ID3D12Resource> edgeIndexBuffer;
+    D3D12_INDEX_BUFFER_VIEW edgeIbv{};
+    uint32_t edgeIndexCount = 0;
 };
 
 // ===== Renderer Implementation =====
@@ -642,10 +648,15 @@ struct UnifiedRenderer::Impl {
     ComPtr<ID3D12PipelineState> pipelineState;
     ComPtr<ID3D12PipelineState> linePipelineState;
     ComPtr<ID3D12PipelineState> gizmoPipelineState;  // Gizmo pipeline with always-visible depth test
+    ComPtr<ID3D12PipelineState> gizmoDepthPipelineState;  // Gizmo lines with depth test + bias (for non-xray)
     ComPtr<ID3D12PipelineState> wireframePipelineState;  // Wireframe rendering pipeline
     ComPtr<ID3D12PipelineState> highlightPipelineState;  // Mesh highlight pipeline (always visible, no depth test)
     ComPtr<ID3D12PipelineState> unlitWireframePipelineState;  // Unlit wireframe - solid color, no lighting
     ComPtr<ID3D12PipelineState> overlayWireframePipelineState;  // Overlay wireframe - normal depth test, depth bias
+    ComPtr<ID3D12PipelineState> culledWireframePipelineState;  // Wireframe with back-face culling (hidden line removal)
+    ComPtr<ID3D12PipelineState> depthOnlyPipelineState;  // Depth pre-pass (no color writes)
+    ComPtr<ID3D12PipelineState> edgeLinePipelineState;         // GPU edge rendering: LINE topology, no depth test (X-Ray ON)
+    ComPtr<ID3D12PipelineState> edgeLineDepthPipelineState;    // GPU edge rendering: LINE topology, depth test (X-Ray OFF)
     ComPtr<ID3D12PipelineState> solidModePipelineState;  // Solid mode - simple lighting, no textures
     ComPtr<ID3D12Resource> constantBuffer;
     ComPtr<ID3D12Resource> defaultTexture;
@@ -689,6 +700,33 @@ struct UnifiedRenderer::Impl {
     
     // Mesh Storage
     std::vector<DX12MeshData> meshStorage;
+    
+    // Build GPU edge index buffer for a mesh's original edges
+    void buildEdgeIndexBuffer(DX12MeshData& dx12Mesh, const std::vector<OriginalEdge>& edges) {
+        if (edges.empty()) return;
+        std::vector<uint32_t> indices;
+        indices.reserve(edges.size() * 2);
+        for (const auto& e : edges) {
+            indices.push_back(e.v0);
+            indices.push_back(e.v1);
+        }
+        const UINT size = static_cast<UINT>(indices.size() * sizeof(uint32_t));
+        D3D12_HEAP_PROPERTIES hp{}; hp.Type = D3D12_HEAP_TYPE_UPLOAD;
+        D3D12_RESOURCE_DESC bd{}; bd.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+        bd.Width = size; bd.Height = 1; bd.DepthOrArraySize = 1;
+        bd.MipLevels = 1; bd.SampleDesc.Count = 1; bd.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+        HRESULT hr = device->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &bd,
+            D3D12_RESOURCE_STATE_GENERIC_READ, nullptr, IID_PPV_ARGS(&dx12Mesh.edgeIndexBuffer));
+        if (FAILED(hr)) return;
+        void* mapped;
+        dx12Mesh.edgeIndexBuffer->Map(0, nullptr, &mapped);
+        memcpy(mapped, indices.data(), size);
+        dx12Mesh.edgeIndexBuffer->Unmap(0, nullptr);
+        dx12Mesh.edgeIbv.BufferLocation = dx12Mesh.edgeIndexBuffer->GetGPUVirtualAddress();
+        dx12Mesh.edgeIbv.SizeInBytes = size;
+        dx12Mesh.edgeIbv.Format = DXGI_FORMAT_R32_UINT;
+        dx12Mesh.edgeIndexCount = static_cast<uint32_t>(indices.size());
+    }
     
     // Async Texture Loading
     // Maps async request ID to (meshIndex, textureSlot: 0=diffuse, 1=normal, 2=specular)
@@ -1006,6 +1044,43 @@ struct UnifiedRenderer::Impl {
         psoDesc.SampleDesc.Count = 1;
         device->CreateGraphicsPipelineState(&psoDesc, IID_PPV_ARGS(&pipelineState));
         
+        // Depth-only pre-pass pipeline (writes depth, no color, no pixel shader)
+        // Used for hidden line removal in wireframe mode when X-Ray is OFF
+        // CullMode=NONE: render both front and back faces to ensure complete depth coverage
+        // (needed for non-manifold/single-sided geometry like clothing, hair, etc.)
+        {
+            // Compile a minimal depth-only VS (uses worldViewProj, not lightViewProj)
+            static const char* kDepthOnlyVS = R"(
+cbuffer CB : register(b0) { float4x4 worldViewProj; };
+struct VSIn { float3 pos : POSITION; float3 n : NORMAL; float4 t : TANGENT; float2 uv : TEXCOORD; float3 c : COLOR; };
+float4 VSMain(VSIn i) : SV_POSITION { return mul(worldViewProj, float4(i.pos, 1.0)); }
+)";
+            ComPtr<ID3DBlob> depthVs, depthErr;
+            HRESULT hr = D3DCompile(kDepthOnlyVS, strlen(kDepthOnlyVS), "depthonly.hlsl", nullptr, nullptr,
+                                    "VSMain", "vs_5_0", flags, 0, &depthVs, &depthErr);
+            if (SUCCEEDED(hr) && depthVs) {
+                D3D12_GRAPHICS_PIPELINE_STATE_DESC depthPso{};
+                depthPso.InputLayout = {inputLayout, _countof(inputLayout)};
+                depthPso.pRootSignature = rootSignature.Get();
+                depthPso.VS = {depthVs->GetBufferPointer(), depthVs->GetBufferSize()};
+                // No pixel shader — depth only
+                depthPso.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID;
+                depthPso.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;  // No culling — complete depth coverage
+                depthPso.RasterizerState.DepthClipEnable = TRUE;
+                depthPso.BlendState.RenderTarget[0].RenderTargetWriteMask = 0;  // No color writes
+                depthPso.DepthStencilState.DepthEnable = TRUE;
+                depthPso.DepthStencilState.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ALL;
+                depthPso.DepthStencilState.DepthFunc = D3D12_COMPARISON_FUNC_LESS;
+                depthPso.SampleMask = UINT_MAX;
+                depthPso.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+                depthPso.NumRenderTargets = 1;
+                depthPso.RTVFormats[0] = DXGI_FORMAT_R8G8B8A8_UNORM;
+                depthPso.DSVFormat = DXGI_FORMAT_D32_FLOAT;
+                depthPso.SampleDesc.Count = 1;
+                device->CreateGraphicsPipelineState(&depthPso, IID_PPV_ARGS(&depthOnlyPipelineState));
+            }
+        }
+        
         // Shadow pass pipeline (depth-only, no pixel shader)
         ComPtr<ID3DBlob> shadowVs;
         std::string shadowSource = loadShaderWithFallback("shadow.hlsl", kShadowShaderSource);
@@ -1109,6 +1184,19 @@ struct UnifiedRenderer::Impl {
         psoDesc.RasterizerState.SlopeScaledDepthBias = 0.0f;
         device->CreateGraphicsPipelineState(&psoDesc, IID_PPV_ARGS(&gizmoPipelineState));
         
+        // Create depth-tested gizmo pipeline (for non-xray wireframe/selection)
+        // Same as line pipeline but with LESS_EQUAL + depth bias to prevent z-fighting
+        {
+            D3D12_GRAPHICS_PIPELINE_STATE_DESC depthGizmoPso = psoDesc;
+            depthGizmoPso.DepthStencilState.DepthEnable = TRUE;
+            depthGizmoPso.DepthStencilState.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ZERO;
+            depthGizmoPso.DepthStencilState.DepthFunc = D3D12_COMPARISON_FUNC_LESS_EQUAL;
+            depthGizmoPso.RasterizerState.DepthBias = -100;
+            depthGizmoPso.RasterizerState.DepthBiasClamp = 0.0f;
+            depthGizmoPso.RasterizerState.SlopeScaledDepthBias = -1.0f;
+            device->CreateGraphicsPipelineState(&depthGizmoPso, IID_PPV_ARGS(&gizmoDepthPipelineState));
+        }
+        
         // Create wireframe pipeline (same as main pipeline but with D3D12_FILL_MODE_WIREFRAME)
         D3D12_GRAPHICS_PIPELINE_STATE_DESC wirePsoDesc = psoDesc;  // Copy from current psoDesc
         wirePsoDesc.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;  // 必须是三角形！
@@ -1198,12 +1286,51 @@ struct UnifiedRenderer::Impl {
                 HRESULT hr1 = device->CreateGraphicsPipelineState(&unlitPsoDesc, IID_PPV_ARGS(&unlitWireframePipelineState));
                 printf("[INIT] unlitWireframePipelineState: hr=%08X, ptr=%p\n", (unsigned)hr1, (void*)unlitWireframePipelineState.Get());
                 
-                // Create overlay wireframe pipeline - normal depth test with bias
+                // Create overlay wireframe pipeline - depth test + depth write + bias
                 D3D12_GRAPHICS_PIPELINE_STATE_DESC overlayPsoDesc = unlitPsoDesc;
+                overlayPsoDesc.DepthStencilState.DepthEnable = TRUE;
+                overlayPsoDesc.DepthStencilState.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ZERO;  // Don't overwrite depth pre-pass
                 overlayPsoDesc.DepthStencilState.DepthFunc = D3D12_COMPARISON_FUNC_LESS_EQUAL;
                 overlayPsoDesc.RasterizerState.DepthBias = -1000;  // Bring wireframe forward
                 HRESULT hr2 = device->CreateGraphicsPipelineState(&overlayPsoDesc, IID_PPV_ARGS(&overlayWireframePipelineState));
                 printf("[INIT] overlayWireframePipelineState: hr=%08X, ptr=%p\n", (unsigned)hr2, (void*)overlayWireframePipelineState.Get());
+                
+                // Create culled wireframe pipeline (hidden line removal via back-face culling)
+                // CullMode=BACK means only front-facing edges are drawn — zero extra cost
+                D3D12_GRAPHICS_PIPELINE_STATE_DESC culledPsoDesc = overlayPsoDesc;
+                culledPsoDesc.RasterizerState.CullMode = D3D12_CULL_MODE_BACK;
+                culledPsoDesc.DepthStencilState.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ALL;  // Write depth for self-occlusion
+                device->CreateGraphicsPipelineState(&culledPsoDesc, IID_PPV_ARGS(&culledWireframePipelineState));
+                
+                // ===== GPU Edge Line Pipelines (LINE topology, full Vertex layout) =====
+                // These use the unlit wireframe shader but with LINE topology for edge index buffers
+                // X-Ray ON: no depth test (always visible, maximum performance)
+                {
+                    D3D12_GRAPHICS_PIPELINE_STATE_DESC edgePso = unlitPsoDesc;
+                    edgePso.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_LINE;
+                    edgePso.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID;
+                    edgePso.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
+                    edgePso.RasterizerState.AntialiasedLineEnable = TRUE;
+                    edgePso.DepthStencilState.DepthEnable = FALSE;
+                    edgePso.DepthStencilState.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ZERO;
+                    edgePso.RasterizerState.DepthBias = 0;
+                    edgePso.RasterizerState.DepthBiasClamp = 0.0f;
+                    edgePso.RasterizerState.SlopeScaledDepthBias = 0.0f;
+                    HRESULT hr3 = device->CreateGraphicsPipelineState(&edgePso, IID_PPV_ARGS(&edgeLinePipelineState));
+                    printf("[INIT] edgeLinePipelineState: hr=%08X, ptr=%p\n", (unsigned)hr3, (void*)edgeLinePipelineState.Get());
+                    
+                    // X-Ray OFF: depth test enabled (hidden line removal via depth pre-pass)
+                    // Negative bias pushes edges slightly closer to camera so they reliably
+                    // appear on the surface they belong to (prevents z-fighting flicker)
+                    edgePso.DepthStencilState.DepthEnable = TRUE;
+                    edgePso.DepthStencilState.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ZERO;
+                    edgePso.DepthStencilState.DepthFunc = D3D12_COMPARISON_FUNC_LESS_EQUAL;
+                    edgePso.RasterizerState.DepthBias = -1000;
+                    edgePso.RasterizerState.DepthBiasClamp = 0.0f;
+                    edgePso.RasterizerState.SlopeScaledDepthBias = -2.0f;
+                    HRESULT hr4 = device->CreateGraphicsPipelineState(&edgePso, IID_PPV_ARGS(&edgeLineDepthPipelineState));
+                    printf("[INIT] edgeLineDepthPipelineState: hr=%08X, ptr=%p\n", (unsigned)hr4, (void*)edgeLineDepthPipelineState.Get());
+                }
             } else {
                 printf("[ERROR] Unlit shader compilation failed - unlitVs=%p, unlitPs=%p\n", (void*)unlitVs.Get(), (void*)unlitPs.Get());
             }
@@ -2404,6 +2531,11 @@ RHIGPUMesh UnifiedRenderer::uploadMesh(const Mesh& mesh) {
     dx12Mesh.ibv.SizeInBytes = ibSize;
     dx12Mesh.ibv.Format = DXGI_FORMAT_R32_UINT;
     
+    // Build GPU edge index buffer for original edges (enables zero-CPU wireframe rendering)
+    if (gpu.hasOriginalEdges) {
+        impl_->buildEdgeIndexBuffer(dx12Mesh, gpu.originalEdges);
+    }
+    
     dx12Mesh.diffuseTexture = impl_->uploadTexture(mesh.diffuseTexture, dx12Mesh.diffuseSrvIndex);
     gpu.hasDiffuseTexture = !mesh.diffuseTexture.pixels.empty();
     dx12Mesh.normalTexture = impl_->uploadTexture(mesh.normalTexture, dx12Mesh.normalSrvIndex);
@@ -2566,6 +2698,11 @@ bool UnifiedRenderer::loadModelAsync(const std::string& path, RHILoadedModel& ou
         
         uint32_t meshIdx = static_cast<uint32_t>(impl_->meshStorage.size());
         
+        // Build GPU edge index buffer for original edges
+        if (gpu.hasOriginalEdges) {
+            impl_->buildEdgeIndexBuffer(dx12Mesh, gpu.originalEdges);
+        }
+        
         // Queue textures for progressive upload (will be uploaded in processAsyncTextures)
         if (!mesh.diffuseTexture.pixels.empty()) {
             impl_->textureUploadQueue.push({meshIdx, 0, mesh.diffuseTexture});
@@ -2706,6 +2843,11 @@ bool UnifiedRenderer::loadModelAsync(const std::string& path, RHILoadedModel& ou
         dx12Mesh.specularSrvIndex = impl_->defaultTextureSrvIndex;
         
         uint32_t meshIdx = static_cast<uint32_t>(impl_->meshStorage.size());
+        
+        // Build GPU edge index buffer for original edges
+        if (gpu.hasOriginalEdges) {
+            impl_->buildEdgeIndexBuffer(dx12Mesh, gpu.originalEdges);
+        }
         
         // Queue textures for progressive upload
         if (!mesh.diffuseTexture.pixels.empty()) {
@@ -3120,6 +3262,50 @@ void UnifiedRenderer::renderModel(const RHILoadedModel& model, const float* worl
         impl_->cmdList->SetGraphicsRootDescriptorTable(6, srv);
         srv = srvGpuStart; srv.ptr += impl_->brdfLutSrvIndex * impl_->srvDescSize;
         impl_->cmdList->SetGraphicsRootDescriptorTable(7, srv);
+        
+        impl_->cmdList->IASetVertexBuffers(0, 1, &dx12Mesh.vbv);
+        impl_->cmdList->IASetIndexBuffer(&dx12Mesh.ibv);
+        impl_->cmdList->DrawIndexedInstanced(dx12Mesh.indexCount, 1, 0, 0, 0);
+    }
+}
+
+void UnifiedRenderer::renderModelDepthOnly(const RHILoadedModel& model, const float* worldMatrix) {
+    if (!impl_->ready || model.meshes.empty() || !impl_->cameraSet) return;
+    if (!impl_->depthOnlyPipelineState) return;
+    
+    impl_->cmdList->SetGraphicsRootSignature(impl_->rootSignature.Get());
+    impl_->cmdList->SetPipelineState(impl_->depthOnlyPipelineState.Get());
+    
+    ID3D12DescriptorHeap* heaps[] = { impl_->srvHeap.Get() };
+    impl_->cmdList->SetDescriptorHeaps(1, heaps);
+    
+    // WVP — same for ALL meshes, set once
+    float wvp[16];
+    math::multiply(wvp, worldMatrix, impl_->viewMatrix);
+    math::multiply(wvp, wvp, impl_->projMatrix);
+    memcpy(impl_->constants.worldViewProj, wvp, sizeof(wvp));
+    
+    UINT drawOffset = impl_->currentDrawIndex * Impl::kAlignedConstantSize;
+    memcpy(impl_->constantBufferMapped + drawOffset, &impl_->constants, sizeof(impl_->constants));
+    D3D12_GPU_VIRTUAL_ADDRESS cbAddr = impl_->constantBuffer->GetGPUVirtualAddress() + drawOffset;
+    impl_->cmdList->SetGraphicsRootConstantBufferView(0, cbAddr);
+    impl_->currentDrawIndex++;
+    
+    // Bind dummy textures ONCE (root signature requires them even without PS)
+    D3D12_GPU_DESCRIPTOR_HANDLE srvGpuStart = impl_->srvHeap->GetGPUDescriptorHandleForHeapStart();
+    D3D12_GPU_DESCRIPTOR_HANDLE defaultSrv = srvGpuStart;
+    defaultSrv.ptr += impl_->defaultTextureSrvIndex * impl_->srvDescSize;
+    for (int slot = 1; slot <= 7; ++slot) {
+        impl_->cmdList->SetGraphicsRootDescriptorTable(slot, defaultSrv);
+    }
+    
+    impl_->cmdList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    
+    // Draw each mesh — only VB/IB changes per mesh, everything else is shared
+    for (size_t i = 0; i < model.meshes.size(); i++) {
+        const auto& gpu = model.meshes[i];
+        if (gpu.meshIndex >= impl_->meshStorage.size()) continue;
+        const auto& dx12Mesh = impl_->meshStorage[gpu.meshIndex];
         
         impl_->cmdList->IASetVertexBuffers(0, 1, &dx12Mesh.vbv);
         impl_->cmdList->IASetIndexBuffer(&dx12Mesh.ibv);
@@ -3626,13 +3812,10 @@ void UnifiedRenderer::renderMeshWireframeOverlay(const RHILoadedModel& model, co
     ID3D12PipelineState* pipelineToUse = nullptr;
     if (impl_->overlayWireframePipelineState) {
         pipelineToUse = impl_->overlayWireframePipelineState.Get();
-        printf("[OVERLAY] Using overlayWireframePipelineState (UNLIT)\n");
     } else if (impl_->unlitWireframePipelineState) {
         pipelineToUse = impl_->unlitWireframePipelineState.Get();
-        printf("[OVERLAY] Using unlitWireframePipelineState\n");
     } else {
         pipelineToUse = impl_->wireframePipelineState.Get();
-        printf("[OVERLAY] WARNING: Using wireframePipelineState (PBR fallback)\n");
     }
     impl_->cmdList->SetPipelineState(pipelineToUse);
     
@@ -3691,9 +3874,72 @@ void UnifiedRenderer::renderMeshWireframeOverlay(const RHILoadedModel& model, co
     impl_->cmdList->IASetVertexBuffers(0, 1, &dx12Mesh.vbv);
     impl_->cmdList->IASetIndexBuffer(&dx12Mesh.ibv);
     impl_->cmdList->DrawIndexedInstanced(dx12Mesh.indexCount, 1, 0, 0, 0);
+}
+
+void UnifiedRenderer::renderModelWireframeCulled(const RHILoadedModel& model, const float* worldMatrix, const float* wireColor) {
+    // Hidden line removal via GPU back-face culling — only front-facing edges are drawn
+    // This is much faster than a depth pre-pass (zero extra geometry passes)
+    if (!impl_->ready || model.meshes.empty() || !impl_->cameraSet) return;
     
-    printf("[OVERLAY] Drew %u indices for mesh %d (color: %.1f,%.1f,%.1f)\n", 
-           dx12Mesh.indexCount, meshIndex, wireColor[0], wireColor[1], wireColor[2]);
+    ID3D12PipelineState* pso = impl_->culledWireframePipelineState ? 
+        impl_->culledWireframePipelineState.Get() :
+        (impl_->overlayWireframePipelineState ? impl_->overlayWireframePipelineState.Get() : nullptr);
+    if (!pso) return;
+    
+    impl_->cmdList->SetGraphicsRootSignature(impl_->rootSignature.Get());
+    impl_->cmdList->SetPipelineState(pso);
+    
+    ID3D12DescriptorHeap* heaps[] = { impl_->srvHeap.Get() };
+    impl_->cmdList->SetDescriptorHeaps(1, heaps);
+    
+    float wvp[16];
+    math::multiply(wvp, worldMatrix, impl_->viewMatrix);
+    math::multiply(wvp, wvp, impl_->projMatrix);
+    
+    memcpy(impl_->constants.worldViewProj, wvp, sizeof(wvp));
+    memcpy(impl_->constants.world, worldMatrix, 64);
+    memcpy(impl_->constants.lightViewProj, impl_->lightViewProj, 64);
+    
+    // Set wireframe color
+    impl_->constants.baseColorAndRough[0] = wireColor[0];
+    impl_->constants.baseColorAndRough[1] = wireColor[1];
+    impl_->constants.baseColorAndRough[2] = wireColor[2];
+    impl_->constants.baseColorAndRough[3] = -1.0f;  // UNLIT mode
+    impl_->constants.cameraPosAndMetal[0] = impl_->cameraPos[0];
+    impl_->constants.cameraPosAndMetal[1] = impl_->cameraPos[1];
+    impl_->constants.cameraPosAndMetal[2] = impl_->cameraPos[2];
+    impl_->constants.cameraPosAndMetal[3] = 0.0f;
+    impl_->constants.lightDirAndFlags[3] = 0;
+    impl_->constants.shadowParams[3] = 0;
+    impl_->constants.iblParams[3] = 0;
+    
+    // Single constant buffer update for all meshes
+    UINT drawOffset = impl_->currentDrawIndex * Impl::kAlignedConstantSize;
+    memcpy(impl_->constantBufferMapped + drawOffset, &impl_->constants, sizeof(impl_->constants));
+    D3D12_GPU_VIRTUAL_ADDRESS cbAddr = impl_->constantBuffer->GetGPUVirtualAddress() + drawOffset;
+    impl_->cmdList->SetGraphicsRootConstantBufferView(0, cbAddr);
+    impl_->currentDrawIndex++;
+    
+    // Bind dummy textures once
+    D3D12_GPU_DESCRIPTOR_HANDLE srvGpuStart = impl_->srvHeap->GetGPUDescriptorHandleForHeapStart();
+    D3D12_GPU_DESCRIPTOR_HANDLE srv = srvGpuStart;
+    srv.ptr += impl_->defaultTextureSrvIndex * impl_->srvDescSize;
+    for (int slot = 1; slot <= 7; ++slot) {
+        impl_->cmdList->SetGraphicsRootDescriptorTable(slot, srv);
+    }
+    
+    impl_->cmdList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    
+    // Draw all meshes — only VB/IB changes per mesh
+    for (size_t i = 0; i < model.meshes.size(); i++) {
+        const auto& gpu = model.meshes[i];
+        if (gpu.meshIndex >= impl_->meshStorage.size()) continue;
+        const auto& dx12Mesh = impl_->meshStorage[gpu.meshIndex];
+        
+        impl_->cmdList->IASetVertexBuffers(0, 1, &dx12Mesh.vbv);
+        impl_->cmdList->IASetIndexBuffer(&dx12Mesh.ibv);
+        impl_->cmdList->DrawIndexedInstanced(dx12Mesh.indexCount, 1, 0, 0, 0);
+    }
 }
 
 void UnifiedRenderer::renderModelWireframe(const RHILoadedModel& model, const float* worldMatrix, const float* wireColor) {
@@ -3942,15 +4188,82 @@ void UnifiedRenderer::renderGizmoLines(const float* lines, uint32_t lineCount) {
     impl_->cmdList->SetDescriptorHeaps(1, heaps);
 }
 
+void UnifiedRenderer::renderGizmoLinesWithDepth(const float* lines, uint32_t lineCount) {
+    if (!impl_->ready || lineCount == 0 || !impl_->cameraSet) return;
+    if (!impl_->gizmoDepthPipelineState && !impl_->linePipelineState) return;
+    
+    struct LineVertex { float pos[3]; float color[4]; };
+    UINT vertexCount = lineCount * 2;
+    
+    if (vertexCount > Impl::kMaxGizmoVertices) {
+        vertexCount = Impl::kMaxGizmoVertices;
+        lineCount = vertexCount / 2;
+    }
+    
+    // Create/reuse gizmo vertex buffer
+    if (!impl_->gizmoVertexBuffer) {
+        D3D12_HEAP_PROPERTIES heapProps{}; heapProps.Type = D3D12_HEAP_TYPE_UPLOAD;
+        D3D12_RESOURCE_DESC bufDesc{}; 
+        bufDesc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+        bufDesc.Width = Impl::kMaxGizmoVertices * sizeof(LineVertex);
+        bufDesc.Height = 1; bufDesc.DepthOrArraySize = 1;
+        bufDesc.MipLevels = 1; bufDesc.SampleDesc.Count = 1;
+        bufDesc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+        
+        HRESULT hr = impl_->device->CreateCommittedResource(&heapProps, D3D12_HEAP_FLAG_NONE, &bufDesc,
+            D3D12_RESOURCE_STATE_GENERIC_READ, nullptr, IID_PPV_ARGS(&impl_->gizmoVertexBuffer));
+        if (FAILED(hr)) return;
+        
+        impl_->gizmoVertexBuffer->Map(0, nullptr, &impl_->gizmoVbMapped);
+        impl_->gizmoVbv.BufferLocation = impl_->gizmoVertexBuffer->GetGPUVirtualAddress();
+        impl_->gizmoVbv.SizeInBytes = Impl::kMaxGizmoVertices * sizeof(LineVertex);
+        impl_->gizmoVbv.StrideInBytes = sizeof(LineVertex);
+    }
+    
+    LineVertex* vertices = static_cast<LineVertex*>(impl_->gizmoVbMapped);
+    for (uint32_t i = 0; i < lineCount; i++) {
+        const float* line = lines + i * 10;
+        vertices[i*2] = {{line[0], line[1], line[2]}, {line[6], line[7], line[8], line[9]}};
+        vertices[i*2+1] = {{line[3], line[4], line[5]}, {line[6], line[7], line[8], line[9]}};
+    }
+    
+    // Use depth-tested gizmo pipeline (LESS_EQUAL + depth bias to show lines on surfaces)
+    ID3D12PipelineState* pso = impl_->gizmoDepthPipelineState ? 
+        impl_->gizmoDepthPipelineState.Get() : impl_->linePipelineState.Get();
+    impl_->cmdList->SetPipelineState(pso);
+    impl_->cmdList->SetGraphicsRootSignature(impl_->rootSignature.Get());
+    
+    float world[16]; math::identity(world);
+    float wvp[16];
+    math::multiply(wvp, world, impl_->viewMatrix);
+    math::multiply(wvp, wvp, impl_->projMatrix);
+    
+    memcpy(impl_->constants.worldViewProj, wvp, sizeof(wvp));
+    memcpy(impl_->constants.world, world, sizeof(world));
+    
+    UINT drawOffset = impl_->currentDrawIndex * Impl::kAlignedConstantSize;
+    memcpy(impl_->constantBufferMapped + drawOffset, &impl_->constants, sizeof(impl_->constants));
+    D3D12_GPU_VIRTUAL_ADDRESS cbAddr = impl_->constantBuffer->GetGPUVirtualAddress() + drawOffset;
+    impl_->cmdList->SetGraphicsRootConstantBufferView(0, cbAddr);
+    impl_->currentDrawIndex++;
+    
+    impl_->cmdList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_LINELIST);
+    impl_->cmdList->IASetVertexBuffers(0, 1, &impl_->gizmoVbv);
+    impl_->cmdList->DrawInstanced(vertexCount, 1, 0, 0);
+    
+    ID3D12DescriptorHeap* heaps[] = {impl_->srvHeap.Get()};
+    impl_->cmdList->SetDescriptorHeaps(1, heaps);
+}
+
 void UnifiedRenderer::renderEditModeEdges(const float* vertices, uint32_t vertexCount,
                                           const uint32_t* indices, uint32_t indexCount,
                                           const float* worldMatrix, const float* color) {
     if (!impl_->ready || vertexCount == 0 || indexCount == 0 || !impl_->cameraSet) return;
     if (!impl_->linePipelineState) return;
     
-    // Use overlay wireframe pipeline for depth-tested lines
-    ID3D12PipelineState* pipelineToUse = impl_->overlayWireframePipelineState ?
-        impl_->overlayWireframePipelineState.Get() : impl_->linePipelineState.Get();
+    // Use gizmo pipeline (no depth test) — always visible, fast
+    ID3D12PipelineState* pipelineToUse = impl_->gizmoPipelineState ?
+        impl_->gizmoPipelineState.Get() : impl_->linePipelineState.Get();
     
     struct LineVertex { float pos[3]; float col[4]; };
     
@@ -4041,124 +4354,101 @@ void UnifiedRenderer::renderEditModeEdges(const float* vertices, uint32_t vertex
 }
 
 void UnifiedRenderer::renderOriginalEdges(const RHILoadedModel& model, int meshIndex,
-                                          const float* worldMatrix, const float* color) {
+                                          const float* worldMatrix, const float* color,
+                                          bool depthTest) {
     if (!impl_->ready || !impl_->cameraSet) return;
     if (meshIndex < 0 || meshIndex >= static_cast<int>(model.meshes.size())) return;
     
     const auto& gpuMesh = model.meshes[meshIndex];
+    
+    size_t storageIdx = model.meshStorageStartIndex + meshIndex;
+    if (storageIdx >= impl_->meshStorage.size()) return;
+    const auto& dx12Mesh = impl_->meshStorage[storageIdx];
+    
+    // ===== GPU-side edge rendering (fast path) =====
+    // Uses pre-built edge index buffer + model's vertex buffer
+    // Zero CPU per-vertex work — GPU vertex shader does all transformation
+    if (dx12Mesh.edgeIndexCount > 0 && dx12Mesh.edgeIndexBuffer) {
+        // Choose pipeline based on depth test mode
+        ID3D12PipelineState* pso = depthTest ?
+            (impl_->edgeLineDepthPipelineState ? impl_->edgeLineDepthPipelineState.Get() : nullptr) :
+            (impl_->edgeLinePipelineState ? impl_->edgeLinePipelineState.Get() : nullptr);
+        if (!pso) {
+            // Fallback to triangle wireframe if edge line pipelines not available
+            renderMeshWireframeOverlay(model, worldMatrix, meshIndex, color);
+            return;
+        }
+        
+        impl_->cmdList->SetGraphicsRootSignature(impl_->rootSignature.Get());
+        impl_->cmdList->SetPipelineState(pso);
+        
+        ID3D12DescriptorHeap* heaps[] = {impl_->srvHeap.Get()};
+        impl_->cmdList->SetDescriptorHeaps(1, heaps);
+        
+        // WVP with world matrix (GPU transforms vertices)
+        float wvp[16];
+        if (worldMatrix) {
+            math::multiply(wvp, worldMatrix, impl_->viewMatrix);
+            math::multiply(wvp, wvp, impl_->projMatrix);
+        } else {
+            math::multiply(wvp, impl_->viewMatrix, impl_->projMatrix);
+        }
+        
+        memcpy(impl_->constants.worldViewProj, wvp, sizeof(wvp));
+        if (worldMatrix) {
+            memcpy(impl_->constants.world, worldMatrix, 64);
+        } else {
+            float identity[16]; math::identity(identity);
+            memcpy(impl_->constants.world, identity, 64);
+        }
+        
+        // Set wireframe color via baseColorAndRough (used by unlit wireframe shader)
+        impl_->constants.baseColorAndRough[0] = color[0];
+        impl_->constants.baseColorAndRough[1] = color[1];
+        impl_->constants.baseColorAndRough[2] = color[2];
+        impl_->constants.baseColorAndRough[3] = -1.0f;  // UNLIT mode flag
+        impl_->constants.lightDirAndFlags[3] = 0;  // No textures
+        impl_->constants.shadowParams[3] = 0;
+        impl_->constants.iblParams[3] = 0;
+        
+        UINT drawOffset = impl_->currentDrawIndex * Impl::kAlignedConstantSize;
+        memcpy(impl_->constantBufferMapped + drawOffset, &impl_->constants, sizeof(impl_->constants));
+        D3D12_GPU_VIRTUAL_ADDRESS cbAddr = impl_->constantBuffer->GetGPUVirtualAddress() + drawOffset;
+        impl_->cmdList->SetGraphicsRootConstantBufferView(0, cbAddr);
+        impl_->currentDrawIndex++;
+        
+        // Bind dummy textures (required by root signature)
+        D3D12_GPU_DESCRIPTOR_HANDLE srvGpuStart = impl_->srvHeap->GetGPUDescriptorHandleForHeapStart();
+        D3D12_GPU_DESCRIPTOR_HANDLE srv = srvGpuStart;
+        srv.ptr += impl_->defaultTextureSrvIndex * impl_->srvDescSize;
+        impl_->cmdList->SetGraphicsRootDescriptorTable(1, srv);
+        impl_->cmdList->SetGraphicsRootDescriptorTable(2, srv);
+        impl_->cmdList->SetGraphicsRootDescriptorTable(3, srv);
+        srv = srvGpuStart; srv.ptr += impl_->shadowMapSrvIndex * impl_->srvDescSize;
+        impl_->cmdList->SetGraphicsRootDescriptorTable(4, srv);
+        srv = srvGpuStart; srv.ptr += impl_->irradianceSrvIndex * impl_->srvDescSize;
+        impl_->cmdList->SetGraphicsRootDescriptorTable(5, srv);
+        srv = srvGpuStart; srv.ptr += impl_->prefilteredSrvIndex * impl_->srvDescSize;
+        impl_->cmdList->SetGraphicsRootDescriptorTable(6, srv);
+        srv = srvGpuStart; srv.ptr += impl_->brdfLutSrvIndex * impl_->srvDescSize;
+        impl_->cmdList->SetGraphicsRootDescriptorTable(7, srv);
+        
+        // Draw: model vertex buffer + edge index buffer, LINE topology
+        impl_->cmdList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_LINELIST);
+        impl_->cmdList->IASetVertexBuffers(0, 1, &dx12Mesh.vbv);
+        impl_->cmdList->IASetIndexBuffer(&dx12Mesh.edgeIbv);
+        impl_->cmdList->DrawIndexedInstanced(dx12Mesh.edgeIndexCount, 1, 0, 0, 0);
+        return;
+    }
+    
+    // Fallback: no edge index buffer, use triangle wireframe overlay
     if (!gpuMesh.hasOriginalEdges || gpuMesh.originalEdges.empty()) {
-        // Fallback to triangulated wireframe if no original edges
         renderMeshWireframeOverlay(model, worldMatrix, meshIndex, color);
         return;
     }
     
-    // Get the DX12 mesh data to access vertex positions
-    size_t storageIdx = model.meshStorageStartIndex + meshIndex;
-    if (storageIdx >= impl_->meshStorage.size()) return;
-    
-    const auto& dx12Mesh = impl_->meshStorage[storageIdx];
-    
-    // We need to read vertex positions from the GPU buffer
-    // For now, we'll map and read (not ideal for performance, but works)
-    
-    // Use overlay wireframe pipeline
-    ID3D12PipelineState* pipelineToUse = impl_->overlayWireframePipelineState ?
-        impl_->overlayWireframePipelineState.Get() : impl_->linePipelineState.Get();
-    if (!pipelineToUse) return;
-    
-    struct LineVertex { float pos[3]; float col[4]; };
-    uint32_t maxVerts = Impl::kMaxGizmoVertices;
-    
-    // Use dedicated edit wireframe buffer (shared with renderOriginalEdgesSkinned, mutually exclusive)
-    if (!impl_->editWireframeBuffer) {
-        D3D12_HEAP_PROPERTIES heapProps{}; heapProps.Type = D3D12_HEAP_TYPE_UPLOAD;
-        D3D12_RESOURCE_DESC bufDesc{}; 
-        bufDesc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
-        bufDesc.Width = maxVerts * sizeof(LineVertex);
-        bufDesc.Height = 1; bufDesc.DepthOrArraySize = 1;
-        bufDesc.MipLevels = 1; bufDesc.SampleDesc.Count = 1;
-        bufDesc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
-        
-        HRESULT hr = impl_->device->CreateCommittedResource(&heapProps, D3D12_HEAP_FLAG_NONE, &bufDesc,
-            D3D12_RESOURCE_STATE_GENERIC_READ, nullptr, IID_PPV_ARGS(&impl_->editWireframeBuffer));
-        if (FAILED(hr)) return;
-        
-        impl_->editWireframeBuffer->Map(0, nullptr, &impl_->editWireframeMapped);
-        impl_->editWireframeVbv.BufferLocation = impl_->editWireframeBuffer->GetGPUVirtualAddress();
-        impl_->editWireframeVbv.SizeInBytes = maxVerts * sizeof(LineVertex);
-        impl_->editWireframeVbv.StrideInBytes = sizeof(LineVertex);
-    }
-    
-    // Read vertex positions from the upload buffer
-    // (The vertex buffer is UPLOAD type, so we can read it)
-    void* mappedVB = nullptr;
-    D3D12_RANGE readRange = {0, dx12Mesh.vbv.SizeInBytes};
-    HRESULT hr = dx12Mesh.vertexBuffer->Map(0, &readRange, &mappedVB);
-    if (FAILED(hr) || !mappedVB) return;
-    
-    const Vertex* srcVerts = static_cast<const Vertex*>(mappedVB);
-    uint32_t vertexCount = dx12Mesh.vbv.SizeInBytes / sizeof(Vertex);
-    
-    // Fill line vertex buffer with edge data
-    LineVertex* outVerts = static_cast<LineVertex*>(impl_->editWireframeMapped);
-    uint32_t outVertCount = 0;
-    
-    for (const auto& edge : gpuMesh.originalEdges) {
-        if (outVertCount + 2 > maxVerts) break;
-        if (edge.v0 >= vertexCount || edge.v1 >= vertexCount) continue;
-        
-        const float* p0 = srcVerts[edge.v0].position;
-        const float* p1 = srcVerts[edge.v1].position;
-        
-        // Transform by world matrix
-        float t0[3], t1[3];
-        if (worldMatrix) {
-            t0[0] = worldMatrix[0]*p0[0] + worldMatrix[4]*p0[1] + worldMatrix[8]*p0[2] + worldMatrix[12];
-            t0[1] = worldMatrix[1]*p0[0] + worldMatrix[5]*p0[1] + worldMatrix[9]*p0[2] + worldMatrix[13];
-            t0[2] = worldMatrix[2]*p0[0] + worldMatrix[6]*p0[1] + worldMatrix[10]*p0[2] + worldMatrix[14];
-            
-            t1[0] = worldMatrix[0]*p1[0] + worldMatrix[4]*p1[1] + worldMatrix[8]*p1[2] + worldMatrix[12];
-            t1[1] = worldMatrix[1]*p1[0] + worldMatrix[5]*p1[1] + worldMatrix[9]*p1[2] + worldMatrix[13];
-            t1[2] = worldMatrix[2]*p1[0] + worldMatrix[6]*p1[1] + worldMatrix[10]*p1[2] + worldMatrix[14];
-        } else {
-            memcpy(t0, p0, sizeof(t0));
-            memcpy(t1, p1, sizeof(t1));
-        }
-        
-        outVerts[outVertCount++] = {{t0[0], t0[1], t0[2]}, {color[0], color[1], color[2], color[3]}};
-        outVerts[outVertCount++] = {{t1[0], t1[1], t1[2]}, {color[0], color[1], color[2], color[3]}};
-    }
-    
-    dx12Mesh.vertexBuffer->Unmap(0, nullptr);
-    
-    if (outVertCount == 0) return;
-    
-    // Render
-    impl_->cmdList->SetPipelineState(pipelineToUse);
-    impl_->cmdList->SetGraphicsRootSignature(impl_->rootSignature.Get());
-    
-    // Set up constants
-    float identity[16]; math::identity(identity);
-    float wvp[16];
-    math::multiply(wvp, identity, impl_->viewMatrix);
-    math::multiply(wvp, wvp, impl_->projMatrix);
-    
-    memcpy(impl_->constants.worldViewProj, wvp, sizeof(wvp));
-    memcpy(impl_->constants.world, identity, sizeof(identity));
-    
-    UINT drawOffset = impl_->currentDrawIndex * Impl::kAlignedConstantSize;
-    memcpy(impl_->constantBufferMapped + drawOffset, &impl_->constants, sizeof(impl_->constants));
-    D3D12_GPU_VIRTUAL_ADDRESS cbAddr = impl_->constantBuffer->GetGPUVirtualAddress() + drawOffset;
-    impl_->cmdList->SetGraphicsRootConstantBufferView(0, cbAddr);
-    impl_->currentDrawIndex++;
-    
-    impl_->cmdList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_LINELIST);
-    impl_->cmdList->IASetVertexBuffers(0, 1, &impl_->editWireframeVbv);  // Use dedicated wireframe buffer
-    impl_->cmdList->DrawInstanced(outVertCount, 1, 0, 0);
-    
-    // Restore heap
-    ID3D12DescriptorHeap* heaps[] = {impl_->srvHeap.Get()};
-    impl_->cmdList->SetDescriptorHeaps(1, heaps);
+    // Legacy fallback: should not normally be reached (edge index buffer should exist)
+    renderMeshWireframeOverlay(model, worldMatrix, meshIndex, color);
 }
 
 void UnifiedRenderer::renderOriginalEdgesSkinned(const RHILoadedModel& model, int meshIndex,
@@ -4179,11 +4469,9 @@ void UnifiedRenderer::renderOriginalEdgesSkinned(const RHILoadedModel& model, in
         return;
     }
     
-    // Use gizmo pipeline (no depth test) so wireframe is always visible through the model
-    // This matches Blender/Maya behavior where edit mode wireframe shows through surfaces
+    // Use gizmo pipeline (no depth test) — always visible, fast
     ID3D12PipelineState* pipelineToUse = impl_->gizmoPipelineState ?
-        impl_->gizmoPipelineState.Get() : 
-        (impl_->overlayWireframePipelineState ? impl_->overlayWireframePipelineState.Get() : impl_->linePipelineState.Get());
+        impl_->gizmoPipelineState.Get() : impl_->linePipelineState.Get();
     if (!pipelineToUse) return;
     
     struct LineVertex { float pos[3]; float col[4]; };
@@ -4432,6 +4720,63 @@ void UnifiedRenderer::buildEditMeshFromGPUTriangles(const RHILoadedModel& model,
     
     std::cout << "[buildEditMeshFromGPUTriangles] Created " << outMesh.vertices.size() 
               << " verts, " << outMesh.faces.size() << " faces" << std::endl;
+}
+
+void UnifiedRenderer::updateMeshVerticesFromEditMesh(const RHILoadedModel& model, int meshIndex, const EditMesh& editMesh) {
+    if (meshIndex < 0 || meshIndex >= static_cast<int>(model.meshes.size())) return;
+    
+    size_t storageIdx = model.meshStorageStartIndex + meshIndex;
+    if (storageIdx >= impl_->meshStorage.size()) return;
+    
+    auto& dx12Mesh = impl_->meshStorage[storageIdx];
+    if (!dx12Mesh.vertexBuffer) return;
+    
+    // Map vertex buffer (UPLOAD heap allows CPU write)
+    void* mappedVB = nullptr;
+    D3D12_RANGE readRange = {0, 0};  // We're writing, not reading
+    HRESULT hr = dx12Mesh.vertexBuffer->Map(0, &readRange, &mappedVB);
+    if (FAILED(hr) || !mappedVB) return;
+    
+    Vertex* dstVerts = static_cast<Vertex*>(mappedVB);
+    uint32_t gpuVertexCount = dx12Mesh.vbv.SizeInBytes / sizeof(Vertex);
+    uint32_t editVertexCount = static_cast<uint32_t>(editMesh.vertices.size());
+    uint32_t count = std::min(gpuVertexCount, editVertexCount);
+    
+    // Update only positions (preserve normals, UVs, tangents, etc.)
+    for (uint32_t i = 0; i < count; i++) {
+        dstVerts[i].position[0] = editMesh.vertices[i].position[0];
+        dstVerts[i].position[1] = editMesh.vertices[i].position[1];
+        dstVerts[i].position[2] = editMesh.vertices[i].position[2];
+    }
+    
+    // Unmap with write range
+    D3D12_RANGE writeRange = {0, count * sizeof(Vertex)};
+    dx12Mesh.vertexBuffer->Unmap(0, &writeRange);
+}
+
+void UnifiedRenderer::rebuildEdgeIndexBuffer(RHILoadedModel& model, int meshIndex, const EditMesh& editMesh) {
+    if (meshIndex < 0 || meshIndex >= static_cast<int>(model.meshes.size())) return;
+    
+    size_t storageIdx = model.meshStorageStartIndex + meshIndex;
+    if (storageIdx >= impl_->meshStorage.size()) return;
+    
+    auto& dx12Mesh = impl_->meshStorage[storageIdx];
+    auto& gpuMesh = model.meshes[meshIndex];
+    
+    // Rebuild originalEdges from EditMesh edges
+    gpuMesh.originalEdges.clear();
+    gpuMesh.originalEdges.reserve(editMesh.edges.size());
+    for (const auto& edge : editMesh.edges) {
+        gpuMesh.originalEdges.push_back({edge.v0, edge.v1});
+    }
+    gpuMesh.hasOriginalEdges = !gpuMesh.originalEdges.empty();
+    
+    // Release old edge index buffer
+    dx12Mesh.edgeIndexBuffer.Reset();
+    dx12Mesh.edgeIndexCount = 0;
+    
+    // Build new GPU edge index buffer
+    impl_->buildEdgeIndexBuffer(dx12Mesh, gpuMesh.originalEdges);
 }
 
 bool UnifiedRenderer::getViewProjectionInverse(float* outMatrix16) const {

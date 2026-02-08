@@ -5,6 +5,7 @@
 #include "unit_tests.h"
 #include "mesh_edit_tests.h"
 #include "selection_tests.h"
+#include "shader_tests.h"
 
 int main(int argc, char* argv[]) {
     bool showManual = false;
