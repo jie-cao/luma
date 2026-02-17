@@ -153,6 +153,8 @@ struct EditorState {
     bool showBuildSettings = false;
     bool showVisualScript = false;
     bool showCharacterCreator = false;
+    bool showMaterialNodeEditor = false;
+    bool showMaterialPreview = false;
     
     // Gizmo
     GizmoMode gizmoMode = GizmoMode::Translate;
@@ -490,6 +492,12 @@ inline void drawMainMenuBar(EditorState& state, Viewport& viewport, bool& should
             ImGui::Text("%s", loc("Tools"));
             ImGui::Separator();
             ImGui::MenuItem(loc("Character Creator"), nullptr, &state.showCharacterCreator);
+            
+            ImGui::Separator();
+            ImGui::Text("%s", loc("Material"));
+            ImGui::Separator();
+            ImGui::MenuItem(loc("Material Node Editor"), nullptr, &state.showMaterialNodeEditor);
+            ImGui::MenuItem(loc("Material Preview"), nullptr, &state.showMaterialPreview);
             
             ImGui::Separator();
             ImGui::Text("%s", loc("Scripting"));

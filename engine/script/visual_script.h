@@ -22,7 +22,16 @@ enum class PinType {
     Vec2,       // Vector2 (yellow)
     Vec3,       // Vector3 (yellow)
     Object,     // Game object reference (blue)
-    Any         // Wildcard
+    Any,        // Wildcard
+    
+    // Material node types
+    Vec4,           // Vector4 / RGBA (orange)
+    Color,          // Color value (yellow-gold)
+    Texture2D,      // 2D texture handle (red-brown)
+    Sampler,        // Sampler state (dark gray)
+    UV,             // UV coordinates (purple)
+    Normal,         // Normal vector (light blue)
+    MaterialOutput  // Material output (green)
 };
 
 // ===== Pin Direction =====
@@ -40,7 +49,8 @@ using PinValue = std::variant<
     std::string,        // String
     Vec2,               // Vec2
     Vec3,               // Vec3
-    uint64_t            // Object ID
+    uint64_t,           // Object ID
+    Vec4                // Vec4 / Color
 >;
 
 // ===== Pin =====
@@ -49,7 +59,7 @@ struct Pin {
     std::string name;
     PinType type = PinType::Flow;
     PinDirection direction = PinDirection::Input;
-    PinValue defaultValue;
+    PinValue defaultValue = PinValue{std::monostate{}};
     bool connected = false;
     
     // Visual position (relative to node)
@@ -69,7 +79,18 @@ enum class NodeCategory {
     Animation,      // PlayAnimation, SetParameter
     Input,          // GetKey, GetAxis, GetMousePosition
     Debug,          // Print, DrawLine
-    Custom          // User-defined
+    Custom,         // User-defined
+    
+    // Material node categories
+    Mat_Input,      // Texture Coord, Vertex Color, Camera Data, Time
+    Mat_Texture,    // Image Texture, Environment Texture
+    Mat_Math,       // Material-specific math operations
+    Mat_Color,      // Color operations (Mix, HSV, Ramp)
+    Mat_Vector,     // Vector operations (Combine, Separate, Normal Map)
+    Mat_Procedural, // Noise, Voronoi, Checker, Gradient, Wave
+    Mat_UV,         // UV Mapping, UV Transform, UV Projection
+    Mat_Output,     // PBR Material Output
+    Mat_Utility     // Utility nodes (Fresnel, etc.)
 };
 
 // ===== Link =====
@@ -114,6 +135,16 @@ public:
         return nullptr;
     }
     
+    const Pin* findPin(uint32_t pinId) const {
+        for (const auto& pin : inputs) {
+            if (pin.id == pinId) return &pin;
+        }
+        for (const auto& pin : outputs) {
+            if (pin.id == pinId) return &pin;
+        }
+        return nullptr;
+    }
+    
     Pin* findInputByName(const std::string& name) {
         for (auto& pin : inputs) {
             if (pin.name == name) return &pin;
@@ -121,8 +152,22 @@ public:
         return nullptr;
     }
     
+    const Pin* findInputByName(const std::string& name) const {
+        for (const auto& pin : inputs) {
+            if (pin.name == name) return &pin;
+        }
+        return nullptr;
+    }
+    
     Pin* findOutputByName(const std::string& name) {
         for (auto& pin : outputs) {
+            if (pin.name == name) return &pin;
+        }
+        return nullptr;
+    }
+    
+    const Pin* findOutputByName(const std::string& name) const {
+        for (const auto& pin : outputs) {
             if (pin.name == name) return &pin;
         }
         return nullptr;
@@ -141,8 +186,8 @@ public:
     // Variables
     struct Variable {
         std::string name;
-        PinType type;
-        PinValue defaultValue;
+        PinType type = PinType::Any;
+        PinValue defaultValue = PinValue{std::monostate{}};
         bool isPublic = false;
     };
     std::vector<Variable> variables;
@@ -471,7 +516,7 @@ private:
             node.category = NodeCategory::Variables;
             node.headerColor = 0xFF9933CC; // Purple
             addOutput(node, "Value", PinType::Any);
-            node.properties["VariableName"] = std::string("");
+            node.properties["VariableName"] = PinValue(std::string(""));
         }
         else if (type == "SetVariable") {
             node.displayName = "Set";
@@ -481,7 +526,7 @@ private:
             addInput(node, "Value", PinType::Any);
             addFlowOutput(node, "Exec");
             addOutput(node, "Value", PinType::Any);
-            node.properties["VariableName"] = std::string("");
+            node.properties["VariableName"] = PinValue(std::string(""));
         }
         // === Transform Nodes ===
         else if (type == "GetPosition") {
@@ -724,12 +769,32 @@ private:
         node.outputs.push_back(pin);
     }
     
+public:
     static bool canConnect(PinType from, PinType to) {
         if (from == to) return true;
         if (from == PinType::Any || to == PinType::Any) return true;
         
         // Allow int -> float
         if (from == PinType::Int && to == PinType::Float) return true;
+        
+        // Material type promotions
+        // Float <-> Vec2 <-> Vec3 <-> Vec4 <-> Color (implicit broadcast/truncate)
+        if (from == PinType::Float && (to == PinType::Vec2 || to == PinType::Vec3 || to == PinType::Vec4 || to == PinType::Color)) return true;
+        if (to == PinType::Float && (from == PinType::Vec2 || from == PinType::Vec3 || from == PinType::Vec4 || from == PinType::Color)) return true;
+        // Vec3 <-> Color (RGB)
+        if ((from == PinType::Vec3 && to == PinType::Color) || (from == PinType::Color && to == PinType::Vec3)) return true;
+        // Vec4 <-> Color (RGBA)
+        if ((from == PinType::Vec4 && to == PinType::Color) || (from == PinType::Color && to == PinType::Vec4)) return true;
+        // Vec3 <-> Vec4 (truncate/extend with w=1)
+        if ((from == PinType::Vec3 && to == PinType::Vec4) || (from == PinType::Vec4 && to == PinType::Vec3)) return true;
+        // Vec2 <-> UV
+        if ((from == PinType::Vec2 && to == PinType::UV) || (from == PinType::UV && to == PinType::Vec2)) return true;
+        // Vec3 <-> Normal
+        if ((from == PinType::Vec3 && to == PinType::Normal) || (from == PinType::Normal && to == PinType::Vec3)) return true;
+        // Vec2 <-> Vec3 (extend/truncate)
+        if ((from == PinType::Vec2 && to == PinType::Vec3) || (from == PinType::Vec3 && to == PinType::Vec2)) return true;
+        // UV <-> Normal (both are vector-like)
+        if ((from == PinType::UV && to == PinType::Normal) || (from == PinType::Normal && to == PinType::UV)) return true;
         
         return false;
     }
@@ -742,6 +807,10 @@ private:
             case PinType::String: return "\"\"";
             case PinType::Vec2:   return "{x=0, y=0}";
             case PinType::Vec3:   return "{x=0, y=0, z=0}";
+            case PinType::Vec4:   return "{x=0, y=0, z=0, w=0}";
+            case PinType::Color:  return "{r=0, g=0, b=0, a=1}";
+            case PinType::UV:     return "{u=0, v=0}";
+            case PinType::Normal: return "{x=0, y=0, z=1}";
             case PinType::Object: return "nil";
             default:              return "nil";
         }
@@ -912,33 +981,51 @@ private:
 // ===== Helper Functions =====
 inline const char* getCategoryName(NodeCategory category) {
     switch (category) {
-        case NodeCategory::Events:    return "Events";
-        case NodeCategory::Flow:      return "Flow Control";
-        case NodeCategory::Math:      return "Math";
-        case NodeCategory::Logic:     return "Logic";
-        case NodeCategory::Variables: return "Variables";
-        case NodeCategory::Transform: return "Transform";
-        case NodeCategory::Physics:   return "Physics";
-        case NodeCategory::Audio:     return "Audio";
-        case NodeCategory::Animation: return "Animation";
-        case NodeCategory::Input:     return "Input";
-        case NodeCategory::Debug:     return "Debug";
-        default:                      return "Custom";
+        case NodeCategory::Events:        return "Events";
+        case NodeCategory::Flow:          return "Flow Control";
+        case NodeCategory::Math:          return "Math";
+        case NodeCategory::Logic:         return "Logic";
+        case NodeCategory::Variables:     return "Variables";
+        case NodeCategory::Transform:     return "Transform";
+        case NodeCategory::Physics:       return "Physics";
+        case NodeCategory::Audio:         return "Audio";
+        case NodeCategory::Animation:     return "Animation";
+        case NodeCategory::Input:         return "Input";
+        case NodeCategory::Debug:         return "Debug";
+        case NodeCategory::Custom:        return "Custom";
+        case NodeCategory::Mat_Input:     return "Input";
+        case NodeCategory::Mat_Texture:   return "Texture";
+        case NodeCategory::Mat_Math:      return "Math";
+        case NodeCategory::Mat_Color:     return "Color";
+        case NodeCategory::Mat_Vector:    return "Vector";
+        case NodeCategory::Mat_Procedural:return "Procedural";
+        case NodeCategory::Mat_UV:        return "UV";
+        case NodeCategory::Mat_Output:    return "Output";
+        case NodeCategory::Mat_Utility:   return "Utility";
+        default:                          return "Custom";
     }
 }
 
 inline uint32_t getPinColor(PinType type) {
     switch (type) {
-        case PinType::Flow:   return 0xFFFFFFFF; // White
-        case PinType::Bool:   return 0xFF3333CC; // Red
-        case PinType::Int:    return 0xFFCCCC33; // Cyan
-        case PinType::Float:  return 0xFF33CC33; // Green
-        case PinType::String: return 0xFFCC33CC; // Magenta
-        case PinType::Vec2:   return 0xFF33CCCC; // Yellow
-        case PinType::Vec3:   return 0xFF33CCCC; // Yellow
-        case PinType::Object: return 0xFFCC9933; // Blue
-        case PinType::Any:    return 0xFF888888; // Gray
-        default:              return 0xFFFFFFFF;
+        case PinType::Flow:           return 0xFFFFFFFF; // White
+        case PinType::Bool:           return 0xFF3333CC; // Red
+        case PinType::Int:            return 0xFFCCCC33; // Cyan
+        case PinType::Float:          return 0xFF999999; // Gray
+        case PinType::String:         return 0xFFCC33CC; // Magenta
+        case PinType::Vec2:           return 0xFF33CCCC; // Yellow
+        case PinType::Vec3:           return 0xFF6666FF; // Blue
+        case PinType::Object:         return 0xFFCC9933; // Blue
+        case PinType::Any:            return 0xFF888888; // Gray
+        // Material pin colors
+        case PinType::Vec4:           return 0xFF33AACC; // Orange
+        case PinType::Color:          return 0xFF00CCFF; // Yellow-Gold
+        case PinType::Texture2D:      return 0xFF3366CC; // Red-Brown
+        case PinType::Sampler:        return 0xFF666666; // Dark Gray
+        case PinType::UV:             return 0xFFCC66CC; // Purple
+        case PinType::Normal:         return 0xFFFFAA66; // Light Blue
+        case PinType::MaterialOutput: return 0xFF33CC66; // Green
+        default:                      return 0xFFFFFFFF;
     }
 }
 

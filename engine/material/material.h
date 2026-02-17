@@ -1,5 +1,6 @@
 // PBR Material System
 // Supports standard PBR workflow with metallic-roughness model
+// Extended with node-based material graph support
 #pragma once
 
 #include "engine/foundation/math_types.h"
@@ -7,11 +8,14 @@
 #include <unordered_map>
 #include <memory>
 #include <functional>
+#include <vector>
+#include <cstdint>
 
 namespace luma {
 
-// Forward declaration
+// Forward declarations
 struct RHITexture;
+class MaterialGraph;
 
 // ===== Material Texture Slots =====
 enum class TextureSlot : uint8_t {
@@ -59,6 +63,27 @@ struct Material {
     bool alphaBlend = false;
     bool alphaCutoff = false;
     float alphaCutoffValue = 0.5f;
+    
+    // ===== Node-based material graph =====
+    bool useNodeGraph = false;                    // If true, use node graph instead of simple params
+    std::shared_ptr<MaterialGraph> nodeGraph;      // The material node graph
+    uint64_t compiledShaderHash = 0;              // Hash of compiled shader for caching
+    void* compiledPSO = nullptr;                   // Cached Pipeline State Object (platform-specific)
+    std::vector<uint8_t> materialCBData;           // Custom constant buffer data
+    
+    // Node material texture bindings
+    struct NodeTextureBinding {
+        int registerSlot = 0;          // HLSL register (t10+)
+        std::string texturePath;       // Source path
+        void* gpuHandle = nullptr;     // GPU texture handle
+    };
+    std::vector<NodeTextureBinding> nodeTextures;
+    
+    // Generated HLSL source (for debugging/hot-reload)
+    std::string generatedHLSL;
+    
+    // Check if this material uses a node graph
+    bool isNodeMaterial() const { return useNodeGraph && nodeGraph != nullptr; }
     
     // Check if material has specific texture
     bool hasTexture(TextureSlot slot) const {

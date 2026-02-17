@@ -60,6 +60,10 @@ using Microsoft::WRL::ComPtr;
 #include "engine/editor/scene_mode_handler.h"
 #include "engine/editor/input_system.h"
 
+// Material Node Editor (Phase 6)
+#include "engine/editor/material_edit/material_node_editor.h"
+#include "engine/editor/material_edit/material_preview.h"
+
 extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam);
 
 // Forward declaration of helper function (defined after Application)
@@ -116,6 +120,10 @@ struct Application {
     luma::editor::InputSystem inputSystem;             // 统一输入系统
     bool inputSystemInitialized = false;               // InputSystem 初始化标志
     
+    // Material Node Editor (Phase 6)
+    luma::MaterialNodeEditorState materialNodeEditorState;
+    luma::MaterialPreviewState materialPreviewState;
+    
     std::string projectName = "未命名场景";
     
     // UI State
@@ -136,6 +144,8 @@ struct Application {
     std::string pendingModelPath;
     std::string currentScenePath;
     float totalTime = 0.0f;
+    
+    // (Deferred edit mode actions are managed by EditModeHandler::processPendingActions)
     
     // Mouse click tracking for selection
     float mouseDownX = 0.0f;
@@ -859,6 +869,12 @@ static void SetupEditorCallbacks() {
                     
                     // Sync to all modules including EditModeHandler
                     g_app.syncEditMeshToModules();
+                    
+                    // Save baseline (for Cancel to restore original state)
+                    if (g_app.editModeHandler) {
+                        g_app.editModeHandler->setSelectedMeshIndex(meshIdx);
+                        g_app.editModeHandler->saveBaseline();
+                    }
                 }
             }
         }
@@ -1030,14 +1046,7 @@ static void RenderUI() {
             
             ImGui::SameLine();
             if (ImGui::SmallButton(loc("Exit"))) {
-                // 退出编辑模式前保存
-                if (g_app.editMeshDirty) {
-                    // TODO: 提示保存
-                }
-                g_app.currentEditMesh.reset();
-                g_app.editMeshDirty = false;
-                g_app.modeManager.switchMode(luma::editor::EditorMode::Scene);
-                g_app.modeHandlers.switchMode(luma::editor::EditorMode::Scene);
+                if (g_app.editModeHandler) g_app.editModeHandler->requestSaveAndExit();
             }
             ImGui::Separator();
             
@@ -1055,13 +1064,13 @@ static void RenderUI() {
                 return g_app.currentEditMesh ? g_app.currentEditMesh->getRedoCount() : 0; 
             };
             g_app.undoRedoBar.onUndo = [&]() {
-                if (g_app.currentEditMesh && g_app.currentEditMesh->undo()) {
-                    g_app.editMeshDirty = true;
+                if (g_app.editModeHandler) {
+                    g_app.editModeHandler->undoMeshEdit();
                 }
             };
             g_app.undoRedoBar.onRedo = [&]() {
-                if (g_app.currentEditMesh && g_app.currentEditMesh->redo()) {
-                    g_app.editMeshDirty = true;
+                if (g_app.editModeHandler) {
+                    g_app.editModeHandler->redoMeshEdit();
                 }
             };
             g_app.undoRedoBar.draw(300.0f);
@@ -1117,6 +1126,12 @@ static void RenderUI() {
                     }
                     g_app.editMeshDirty = false;
                     g_app.syncEditMeshToModules();
+                    
+                    // Save baseline for the newly selected mesh
+                    if (g_app.editModeHandler) {
+                        g_app.editModeHandler->setSelectedMeshIndex(meshIdx);
+                        g_app.editModeHandler->saveBaseline();
+                    }
                 };
                 
                 g_app.meshListPanel.draw(selectedEntity, 300.0f);
@@ -1127,28 +1142,47 @@ static void RenderUI() {
             // ========== Material editor ==========
             if (ImGui::CollapsingHeader(loc("Material Properties"))) {
                 g_app.materialEditor.draw(selectedEntity, g_app.meshListPanel.selectedMeshIndex, 300.0f);
+                
+                // Handle "Open Node Editor" button from material editor
+                if (g_app.materialEditor.showNodeEditor) {
+                    g_app.editorState.showMaterialNodeEditor = true;
+                    g_app.materialEditor.showNodeEditor = false;
+                    
+                    // Import current mesh material into node editor
+                    int meshIdx = g_app.meshListPanel.selectedMeshIndex;
+                    if (selectedEntity && selectedEntity->hasModel && 
+                        meshIdx >= 0 && meshIdx < static_cast<int>(selectedEntity->model.meshes.size())) {
+                        auto& mesh = selectedEntity->model.meshes[meshIdx];
+                        if (!g_app.materialNodeEditorState.graph) {
+                            g_app.materialNodeEditorState.init();
+                        }
+                        luma::importMeshMaterialToGraph(
+                            *g_app.materialNodeEditorState.graph,
+                            mesh.baseColor, mesh.metallic, mesh.roughness,
+                            mesh.hasDiffuseTexture, mesh.diffuseTexturePath,
+                            mesh.hasNormalTexture, mesh.normalTexturePath,
+                            mesh.hasSpecularTexture, mesh.specularTexturePath
+                        );
+                        g_app.materialNodeEditorState.reset();
+                    }
+                }
             }
             
-            // ========== Save/Cancel bar at bottom ==========
+            // ========== Save/Commit/Cancel bar at bottom ==========
             g_app.saveBar.onSave = [&]() {
-                // 保存修改并退出
-                if (g_app.currentEditMesh && selectedEntity && selectedEntity->hasModel) {
-                    // TODO: 将 EditMesh 转换回 RenderMesh
-                    printf("[EDIT] Saving changes...\n");
-                }
-                g_app.currentEditMesh.reset();
-                g_app.editMeshDirty = false;
-                g_app.modeManager.switchMode(luma::editor::EditorMode::Scene);
-                g_app.modeHandlers.switchMode(luma::editor::EditorMode::Scene);
+                if (g_app.editModeHandler) g_app.editModeHandler->requestSaveAndExit();
             };
             g_app.saveBar.onCancel = [&]() {
-                // 放弃修改并退出
-                g_app.currentEditMesh.reset();
-                g_app.editMeshDirty = false;
-                g_app.modeManager.switchMode(luma::editor::EditorMode::Scene);
-                g_app.modeHandlers.switchMode(luma::editor::EditorMode::Scene);
+                if (g_app.editModeHandler) g_app.editModeHandler->requestCancel();
             };
-            g_app.saveBar.draw(g_app.editMeshDirty, 300.0f);
+            g_app.saveBar.onCommit = [&]() {
+                if (g_app.editModeHandler) g_app.editModeHandler->commitChanges();
+            };
+            {
+                bool hasChanges = g_app.editMeshDirty;
+                bool hasUncommitted = g_app.editModeHandler ? g_app.editModeHandler->hasUncommittedChanges() : false;
+                g_app.saveBar.draw(hasChanges, hasUncommitted, 300.0f);
+            }
         }
         ImGui::End();
         
@@ -1181,6 +1215,10 @@ static void RenderUI() {
     luma::ui::drawConsole(g_app.editorState);
     luma::ui::drawHistoryPanel(g_app.editorState);
     
+    // ========== Material Node Editor ==========
+    luma::drawMaterialNodeEditor(g_app.materialNodeEditorState, g_app.editorState.showMaterialNodeEditor);
+    luma::drawMaterialPreviewPanel(g_app.materialPreviewState, g_app.materialNodeEditorState, g_app.editorState.showMaterialPreview);
+    
     // Handle viewport drag-drop
     std::string droppedAsset;
     if (luma::ui::handleViewportDragDrop(droppedAsset)) {
@@ -1211,13 +1249,13 @@ static void RenderUI() {
         g_app.viewportHeader.viewMode = &g_app.viewToolbar.currentViewMode;
         g_app.viewportHeader.xRayMode = &g_app.editToolbar.xRayMode;
         g_app.viewportHeader.onUndo = [&]() {
-            if (g_app.currentEditMesh && g_app.currentEditMesh->undo()) {
-                g_app.editMeshDirty = true;
+            if (g_app.editModeHandler) {
+                g_app.editModeHandler->undoMeshEdit();
             }
         };
         g_app.viewportHeader.onRedo = [&]() {
-            if (g_app.currentEditMesh && g_app.currentEditMesh->redo()) {
-                g_app.editMeshDirty = true;
+            if (g_app.editModeHandler) {
+                g_app.editModeHandler->redoMeshEdit();
             }
         };
         
@@ -1388,6 +1426,20 @@ int main() {
         if (g_app.needResize && g_app.width > 0 && g_app.height > 0) {
             g_app.renderer.resize(g_app.width, g_app.height);
             g_app.needResize = false;
+        }
+        
+        // ===== Deferred edit mode actions =====
+        // EditModeHandler owns the pending action state. We just call processPendingActions()
+        // at the start of each frame (before draw commands) and handle mode switching if needed.
+        if (g_app.editModeHandler && g_app.modeManager.currentMode == luma::editor::EditorMode::Edit) {
+            auto action = g_app.editModeHandler->processPendingActions();
+            if (action != luma::editor::EditModeAction::None) {
+                // GPU is safe now (no in-flight draw calls referencing old buffers)
+                g_app.modeManager.switchMode(luma::editor::EditorMode::Scene);
+                g_app.modeHandlers.switchMode(luma::editor::EditorMode::Scene);
+                g_app.currentEditMesh.reset();
+                g_app.editMeshDirty = false;
+            }
         }
         
         // Handle pending model load

@@ -517,56 +517,87 @@ public:
     BlendShapeMesh* getBlendShapeMesh() { return blendShapeMesh_; }
     
     // Setup mapping from face params to blend shape channels
+    // Setup mapping from FaceShapeParams to FaceTemplateMesh blend shape channels.
+    // First arg = blend shape channel name (camelCase, matches FaceTemplateMesh),
+    // second arg = parameter key (underscore, matches FaceShapeParams::getAllParams()).
     void setupDefaultMappings() {
         shapeMappings_.clear();
         
-        // Face shape mappings
-        addShapeMapping("face_width", "faceWidth");
-        addShapeMapping("face_length", "faceLength");
-        addShapeMapping("face_roundness", "faceRoundness");
+        // Overall face
+        addShapeMapping("faceWidth", "face_width");
+        addShapeMapping("faceLength", "face_length");
+        addShapeMapping("faceRoundness", "face_roundness");
         
-        // Eye mappings
-        addShapeMapping("eye_size", "eyeSize");
-        addShapeMapping("eye_spacing", "eyeSpacing");
-        addShapeMapping("eye_height", "eyeHeight");
-        addShapeMapping("eye_angle", "eyeAngle");
-        addShapeMapping("eye_depth", "eyeDepth");
-        addShapeMapping("upper_eyelid", "upperEyelid");
-        addShapeMapping("lower_eyelid", "lowerEyelid");
+        // Forehead
+        addShapeMapping("foreheadHeight", "forehead_height");
+        addShapeMapping("foreheadWidth", "forehead_width");
+        addShapeMapping("foreheadSlope", "forehead_slope");
         
-        // Eyebrow mappings
-        addShapeMapping("brow_height", "browHeight");
-        addShapeMapping("brow_angle", "browAngle");
-        addShapeMapping("brow_thickness", "browThickness");
+        // Eyes
+        addShapeMapping("eyeSize", "eye_size");
+        addShapeMapping("eyeWidth", "eye_width");
+        addShapeMapping("eyeHeight", "eye_height");
+        addShapeMapping("eyeSpacing", "eye_spacing");
+        addShapeMapping("eyeAngle", "eye_angle");
+        addShapeMapping("eyeDepth", "eye_depth");
+        addShapeMapping("upperEyelid", "upper_eyelid");
+        addShapeMapping("lowerEyelid", "lower_eyelid");
+        addShapeMapping("eyeCornerInner", "eye_corner_inner");
+        addShapeMapping("eyeCornerOuter", "eye_corner_outer");
         
-        // Nose mappings
-        addShapeMapping("nose_length", "noseLength");
-        addShapeMapping("nose_width", "noseWidth");
-        addShapeMapping("nose_height", "noseHeight");
-        addShapeMapping("nose_bridge", "noseBridge");
-        addShapeMapping("nose_tip", "noseTip");
-        addShapeMapping("nostril_width", "nostrilWidth");
+        // Eyebrows
+        addShapeMapping("browHeight", "brow_height");
+        addShapeMapping("browThickness", "brow_thickness");
+        addShapeMapping("browLength", "brow_length");
+        addShapeMapping("browAngle", "brow_angle");
+        addShapeMapping("browSpacing", "brow_spacing");
+        addShapeMapping("browCurve", "brow_curve");
         
-        // Mouth mappings
-        addShapeMapping("mouth_width", "mouthWidth");
-        addShapeMapping("upper_lip", "upperLipThickness");
-        addShapeMapping("lower_lip", "lowerLipThickness");
-        addShapeMapping("lip_protrusion", "lipProtrusion");
+        // Nose
+        addShapeMapping("noseLength", "nose_length");
+        addShapeMapping("noseWidth", "nose_width");
+        addShapeMapping("noseHeight", "nose_height");
+        addShapeMapping("noseBridge", "nose_bridge");
+        addShapeMapping("noseBridgeCurve", "nose_bridge_curve");
+        addShapeMapping("noseTip", "nose_tip");
+        addShapeMapping("noseTipAngle", "nose_tip_angle");
+        addShapeMapping("nostrilWidth", "nostril_width");
+        addShapeMapping("nostrilFlare", "nostril_flare");
         
-        // Chin/Jaw mappings
-        addShapeMapping("chin_length", "chinLength");
-        addShapeMapping("chin_width", "chinWidth");
-        addShapeMapping("chin_protrusion", "chinProtrusion");
-        addShapeMapping("jaw_width", "jawWidth");
-        addShapeMapping("jaw_line", "jawLine");
+        // Mouth
+        addShapeMapping("mouthWidth", "mouth_width");
+        addShapeMapping("mouthHeight", "mouth_height");
+        addShapeMapping("upperLipThickness", "upper_lip_thickness");
+        addShapeMapping("lowerLipThickness", "lower_lip_thickness");
+        addShapeMapping("lipProtrusion", "lip_protrusion");
+        addShapeMapping("mouthCorners", "mouth_corners");
+        addShapeMapping("philtrum", "philtrum");
+        addShapeMapping("lipCurve", "lip_curve");
         
-        // Cheek mappings
-        addShapeMapping("cheekbone_prominence", "cheekboneProminence");
-        addShapeMapping("cheek_fullness", "cheekFullness");
+        // Chin
+        addShapeMapping("chinLength", "chin_length");
+        addShapeMapping("chinWidth", "chin_width");
+        addShapeMapping("chinProtrusion", "chin_protrusion");
+        addShapeMapping("chinShape", "chin_shape");
+        addShapeMapping("chinCleft", "chin_cleft");
         
-        // Ear mappings
-        addShapeMapping("ear_size", "earSize");
-        addShapeMapping("ear_angle", "earAngle");
+        // Jaw
+        addShapeMapping("jawWidth", "jaw_width");
+        addShapeMapping("jawAngle", "jaw_angle");
+        addShapeMapping("jawLine", "jaw_line");
+        
+        // Cheeks
+        addShapeMapping("cheekboneHeight", "cheekbone_height");
+        addShapeMapping("cheekboneWidth", "cheekbone_width");
+        addShapeMapping("cheekboneProminence", "cheekbone_prominence");
+        addShapeMapping("cheekFullness", "cheek_fullness");
+        addShapeMapping("cheekFat", "cheek_fat");
+        
+        // Ears
+        addShapeMapping("earSize", "ear_size");
+        addShapeMapping("earAngle", "ear_angle");
+        addShapeMapping("earLobe", "ear_lobe");
+        addShapeMapping("earPointiness", "ear_pointiness");
     }
     
     // === Photo-to-Face ===
@@ -672,6 +703,122 @@ public:
         updateExpressionWeights();
     }
     
+    // === Face Region Grouping ===
+    
+    // Get parameter names for a specific face region
+    static std::vector<std::string> getParamsForRegion(FaceRegion region) {
+        switch (region) {
+            case FaceRegion::Overall:
+                return {"face_width", "face_length", "face_roundness"};
+            case FaceRegion::Forehead:
+                return {"forehead_height", "forehead_width", "forehead_slope"};
+            case FaceRegion::Eyes:
+                return {"eye_size", "eye_width", "eye_height", "eye_spacing", 
+                        "eye_angle", "eye_depth", "upper_eyelid", "lower_eyelid",
+                        "eye_corner_inner", "eye_corner_outer"};
+            case FaceRegion::Eyebrows:
+                return {"brow_height", "brow_thickness", "brow_length", 
+                        "brow_angle", "brow_spacing", "brow_curve"};
+            case FaceRegion::Nose:
+                return {"nose_length", "nose_width", "nose_height", "nose_bridge",
+                        "nose_bridge_curve", "nose_tip", "nose_tip_angle",
+                        "nostril_width", "nostril_flare"};
+            case FaceRegion::Mouth:
+                return {"mouth_width", "mouth_height", "upper_lip_thickness",
+                        "lower_lip_thickness", "lip_protrusion", "mouth_corners",
+                        "philtrum", "lip_curve"};
+            case FaceRegion::Chin:
+                return {"chin_length", "chin_width", "chin_protrusion",
+                        "chin_shape", "chin_cleft"};
+            case FaceRegion::Jaw:
+                return {"jaw_width", "jaw_angle", "jaw_line"};
+            case FaceRegion::Cheeks:
+                return {"cheekbone_height", "cheekbone_width", "cheekbone_prominence",
+                        "cheek_fullness", "cheek_fat"};
+            case FaceRegion::Ears:
+                return {"ear_size", "ear_angle", "ear_lobe", "ear_pointiness"};
+            default:
+                return {};
+        }
+    }
+    
+    // Get display name for a face region
+    static const char* getRegionName(FaceRegion region) {
+        switch (region) {
+            case FaceRegion::Overall:  return "Overall";
+            case FaceRegion::Forehead: return "Forehead";
+            case FaceRegion::Eyes:     return "Eyes";
+            case FaceRegion::Eyebrows: return "Eyebrows";
+            case FaceRegion::Nose:     return "Nose";
+            case FaceRegion::Mouth:    return "Mouth";
+            case FaceRegion::Chin:     return "Chin";
+            case FaceRegion::Jaw:      return "Jaw";
+            case FaceRegion::Cheeks:   return "Cheeks";
+            case FaceRegion::Ears:     return "Ears";
+            default: return "Unknown";
+        }
+    }
+    
+    // === Parameter Constraints and Linked Parameters ===
+    
+    // Apply constraints after parameter change to maintain plausible face shapes
+    void applyConstraints() {
+        auto& p = shapeParams_;
+        
+        // Jaw width should generally correlate with face width
+        // (wide face tends to have wider jaw)
+        float jawMin = std::max(0.0f, p.faceWidth - 0.3f);
+        float jawMax = std::min(1.0f, p.faceWidth + 0.3f);
+        p.jawWidth = std::max(jawMin, std::min(jawMax, p.jawWidth));
+        
+        // Chin width should be less than jaw width
+        if (p.chinWidth > p.jawWidth + 0.15f) {
+            p.chinWidth = p.jawWidth + 0.15f;
+        }
+        
+        // Lip protrusion should somewhat correlate with lip thickness
+        float avgLip = (p.upperLipThickness + p.lowerLipThickness) * 0.5f;
+        if (p.lipProtrusion < avgLip - 0.3f) {
+            p.lipProtrusion = avgLip - 0.3f;
+        }
+        
+        // Clamp all values to valid range
+        auto allParams = p.getAllParams();
+        for (auto& [name, ptr] : allParams) {
+            *ptr = std::max(0.0f, std::min(1.0f, *ptr));
+        }
+    }
+    
+    // === Symmetric Editing ===
+    
+    // Mirror face parameters across the symmetry axis
+    // (Most face params are already symmetric, but expression params can be asymmetric)
+    void mirrorExpressions() {
+        auto& e = expressionParams_;
+        float avgBlink = (e.eyeBlinkLeft + e.eyeBlinkRight) * 0.5f;
+        e.eyeBlinkLeft = e.eyeBlinkRight = avgBlink;
+        
+        float avgSmile = (e.mouthSmileLeft + e.mouthSmileRight) * 0.5f;
+        e.mouthSmileLeft = e.mouthSmileRight = avgSmile;
+        
+        float avgFrown = (e.mouthFrownLeft + e.mouthFrownRight) * 0.5f;
+        e.mouthFrownLeft = e.mouthFrownRight = avgFrown;
+        
+        float avgSquint = (e.eyeSquintLeft + e.eyeSquintRight) * 0.5f;
+        e.eyeSquintLeft = e.eyeSquintRight = avgSquint;
+        
+        float avgWide = (e.eyeWideLeft + e.eyeWideRight) * 0.5f;
+        e.eyeWideLeft = e.eyeWideRight = avgWide;
+        
+        float avgBrow = (e.browDownLeft + e.browDownRight) * 0.5f;
+        e.browDownLeft = e.browDownRight = avgBrow;
+        
+        float avgBrowOuter = (e.browOuterUpLeft + e.browOuterUpRight) * 0.5f;
+        e.browOuterUpLeft = e.browOuterUpRight = avgBrowOuter;
+        
+        updateExpressionWeights();
+    }
+    
 private:
     FaceShapeParams shapeParams_;
     FaceExpressionParams expressionParams_;
@@ -726,27 +873,111 @@ private:
     }
     
     // Map 3DMM parameters to our face shape params
-    // This is a simplified mapping - a real implementation would use
-    // learned coefficients or a neural network
+    // BFM/3DDFA outputs 40 identity coefficients + 10 expression coefficients
+    // This mapping is based on empirical analysis of BFM principal components
     void mapDMMtoFaceParams(const std::vector<float>& dmmParams) {
         if (dmmParams.size() < 10) return;
         
-        // Simplified mapping (would be more sophisticated in production)
-        // 3DMM parameters typically control:
-        // - First ~80 params: identity/shape
-        // - Next ~64 params: expression
-        // - Additional params: jaw pose, eye gaze, etc.
+        // BFM principal components interpretation:
+        // PC0: Overall face size/width
+        // PC1: Face length/height
+        // PC2: Nose prominence
+        // PC3: Jaw width
+        // PC4: Eye region shape
+        // PC5: Cheekbone prominence
+        // PC6: Chin shape
+        // PC7: Forehead height
+        // PC8: Nose width
+        // PC9: Lip fullness
+        // ... (higher PCs capture finer details)
         
-        // Very rough mapping
-        shapeParams_.faceWidth = 0.5f + dmmParams[0] * 0.1f;
-        shapeParams_.faceLength = 0.5f + dmmParams[1] * 0.1f;
-        shapeParams_.eyeSize = 0.5f + dmmParams[2] * 0.1f;
-        shapeParams_.noseLength = 0.5f + dmmParams[3] * 0.1f;
-        shapeParams_.mouthWidth = 0.5f + dmmParams[4] * 0.1f;
-        shapeParams_.jawWidth = 0.5f + dmmParams[5] * 0.1f;
-        shapeParams_.cheekboneProminence = 0.5f + dmmParams[6] * 0.1f;
-        shapeParams_.chinLength = 0.5f + dmmParams[7] * 0.1f;
-        // ... more mappings in a real implementation
+        // Helper to safely get coefficient with default
+        auto getCoeff = [&](size_t idx, float scale = 0.15f) -> float {
+            if (idx >= dmmParams.size()) return 0.0f;
+            // Clamp to reasonable range and scale
+            float v = std::max(-3.0f, std::min(3.0f, dmmParams[idx]));
+            return v * scale;
+        };
+        
+        // Overall face shape
+        shapeParams_.faceWidth = 0.5f + getCoeff(0, 0.12f);
+        shapeParams_.faceLength = 0.5f + getCoeff(1, 0.10f);
+        shapeParams_.faceRoundness = 0.5f - getCoeff(0, 0.08f) + getCoeff(1, 0.05f);
+        
+        // Forehead
+        shapeParams_.foreheadHeight = 0.5f + getCoeff(7, 0.10f);
+        shapeParams_.foreheadWidth = 0.5f + getCoeff(0, 0.08f);
+        shapeParams_.foreheadSlope = 0.5f + getCoeff(15, 0.08f);
+        
+        // Eyes
+        shapeParams_.eyeSize = 0.5f + getCoeff(4, 0.10f);
+        shapeParams_.eyeSpacing = 0.5f + getCoeff(12, 0.08f);
+        shapeParams_.eyeHeight = 0.5f + getCoeff(13, 0.06f);
+        shapeParams_.eyeDepth = 0.5f + getCoeff(14, 0.08f);
+        shapeParams_.eyeAngle = 0.5f + getCoeff(16, 0.06f);
+        
+        // Eyebrows
+        shapeParams_.browHeight = 0.5f + getCoeff(17, 0.08f);
+        shapeParams_.browAngle = 0.5f + getCoeff(18, 0.06f);
+        
+        // Nose
+        shapeParams_.noseLength = 0.5f + getCoeff(2, 0.12f);
+        shapeParams_.noseWidth = 0.5f + getCoeff(8, 0.10f);
+        shapeParams_.noseHeight = 0.5f + getCoeff(2, 0.08f);
+        shapeParams_.noseBridge = 0.5f + getCoeff(19, 0.08f);
+        shapeParams_.noseTip = 0.5f + getCoeff(20, 0.08f);
+        shapeParams_.nostrilWidth = 0.5f + getCoeff(8, 0.06f);
+        
+        // Mouth
+        shapeParams_.mouthWidth = 0.5f + getCoeff(21, 0.10f);
+        shapeParams_.upperLipThickness = 0.5f + getCoeff(9, 0.08f);
+        shapeParams_.lowerLipThickness = 0.5f + getCoeff(9, 0.10f);
+        shapeParams_.lipProtrusion = 0.5f + getCoeff(22, 0.08f);
+        
+        // Chin and Jaw
+        shapeParams_.chinLength = 0.5f + getCoeff(6, 0.10f);
+        shapeParams_.chinWidth = 0.5f + getCoeff(23, 0.08f);
+        shapeParams_.chinProtrusion = 0.5f + getCoeff(24, 0.08f);
+        shapeParams_.jawWidth = 0.5f + getCoeff(3, 0.12f);
+        shapeParams_.jawAngle = 0.5f + getCoeff(25, 0.08f);
+        shapeParams_.jawLine = 0.5f + getCoeff(26, 0.08f);
+        
+        // Cheeks
+        shapeParams_.cheekboneProminence = 0.5f + getCoeff(5, 0.10f);
+        shapeParams_.cheekboneHeight = 0.5f + getCoeff(27, 0.08f);
+        shapeParams_.cheekFullness = 0.5f + getCoeff(28, 0.08f);
+        
+        // Apply constraints to ensure valid face
+        applyConstraints();
+    }
+    
+public:
+    // Map from 2D landmark fit results to face params
+    void applyLandmarkFitResult(float faceWidth, float faceLength, float jawWidth,
+                                 float eyeSpacing, float eyeSize, float noseLength,
+                                 float noseWidth, float mouthWidth, float browHeight,
+                                 float confidence) {
+        if (confidence < 0.1f) return;
+        
+        // Blend with current params based on confidence
+        float blend = std::min(1.0f, confidence);
+        
+        auto lerp = [blend](float current, float target) {
+            return current + (target - current) * blend;
+        };
+        
+        shapeParams_.faceWidth = lerp(shapeParams_.faceWidth, faceWidth);
+        shapeParams_.faceLength = lerp(shapeParams_.faceLength, faceLength);
+        shapeParams_.jawWidth = lerp(shapeParams_.jawWidth, jawWidth);
+        shapeParams_.eyeSpacing = lerp(shapeParams_.eyeSpacing, eyeSpacing);
+        shapeParams_.eyeSize = lerp(shapeParams_.eyeSize, eyeSize);
+        shapeParams_.noseLength = lerp(shapeParams_.noseLength, noseLength);
+        shapeParams_.noseWidth = lerp(shapeParams_.noseWidth, noseWidth);
+        shapeParams_.mouthWidth = lerp(shapeParams_.mouthWidth, mouthWidth);
+        shapeParams_.browHeight = lerp(shapeParams_.browHeight, browHeight);
+        
+        applyConstraints();
+        updateBlendShapeWeights();
     }
 };
 

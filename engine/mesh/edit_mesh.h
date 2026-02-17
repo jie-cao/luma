@@ -643,6 +643,892 @@ public:
         markDirty();
     }
     
+    // =========================================================================
+    // 裁剪/分割面 — Split a face by connecting two non-adjacent vertices
+    // Like Maya's Multi-Cut: creates a new edge within a face
+    // =========================================================================
+    bool splitFace(uint32_t faceIndex, uint32_t vertA, uint32_t vertB) {
+        if (faceIndex >= faces.size()) return false;
+        const EditFace& face = faces[faceIndex];
+        if (face.loops.size() < 4) return false; // Can't split a triangle meaningfully
+        
+        // Find positions of vertA and vertB in the face's loops
+        int posA = -1, posB = -1;
+        for (size_t i = 0; i < face.loops.size(); i++) {
+            if (face.loops[i].vertexIndex == vertA) posA = static_cast<int>(i);
+            if (face.loops[i].vertexIndex == vertB) posB = static_cast<int>(i);
+        }
+        if (posA < 0 || posB < 0) return false; // Vertices not on this face
+        
+        // Ensure posA < posB for simpler logic
+        if (posA > posB) std::swap(posA, posB);
+        
+        // Check they're not adjacent (splitting between adjacent verts creates degenerate face)
+        int diff = posB - posA;
+        int n = static_cast<int>(face.loops.size());
+        if (diff <= 1 || diff >= n - 1) return false;
+        
+        pushUndo();
+        
+        // Build two new faces from the loops
+        // Face 1: loops[posA .. posB] inclusive
+        EditFace f1;
+        f1.materialIndex = face.materialIndex;
+        f1.id = nextFaceId();
+        for (int i = posA; i <= posB; i++) {
+            f1.loops.push_back(face.loops[i]);
+        }
+        
+        // Face 2: loops[posB .. end, 0 .. posA] inclusive (wrapping)
+        EditFace f2;
+        f2.materialIndex = face.materialIndex;
+        f2.id = nextFaceId();
+        for (int i = posB; i < n; i++) {
+            f2.loops.push_back(face.loops[i]);
+        }
+        for (int i = 0; i <= posA; i++) {
+            f2.loops.push_back(face.loops[i]);
+        }
+        
+        f1.calculateNormal(vertices);
+        f2.calculateNormal(vertices);
+        
+        // Replace old face with f1, append f2
+        faces[faceIndex] = std::move(f1);
+        faces.push_back(std::move(f2));
+        
+        selectedFaces.clear();
+        rebuildEdges();
+        markDirty();
+        return true;
+    }
+    
+    // Cut a face by placing new vertices on two of its edges
+    // loopIdx1/loopIdx2: indices within the face's loop array (the edge starts at that loop index)
+    // t1/t2: interpolation factor along each edge (0.0 = start vertex, 1.0 = end vertex)
+    bool cutFaceOnEdges(uint32_t faceIndex, int loopIdx1, float t1, int loopIdx2, float t2) {
+        if (faceIndex >= faces.size()) return false;
+        EditFace& face = faces[faceIndex];
+        int n = static_cast<int>(face.loops.size());
+        if (n < 3) return false;
+        if (loopIdx1 < 0 || loopIdx1 >= n || loopIdx2 < 0 || loopIdx2 >= n) return false;
+        if (loopIdx1 == loopIdx2) return false;
+        
+        // Clamp t values
+        t1 = std::max(0.01f, std::min(0.99f, t1));
+        t2 = std::max(0.01f, std::min(0.99f, t2));
+        
+        pushUndo();
+        
+        // Create new vertex on edge 1 (between loop[loopIdx1] and loop[(loopIdx1+1)%n])
+        int next1 = (loopIdx1 + 1) % n;
+        const Loop& lA = face.loops[loopIdx1];
+        const Loop& lB = face.loops[next1];
+        float pos1[3], uv1[2];
+        math::lerp3(pos1, vertices[lA.vertexIndex].position, vertices[lB.vertexIndex].position, t1);
+        math::lerp2(uv1, lA.uv, lB.uv, t1);
+        uint32_t newV1 = addVertex(pos1[0], pos1[1], pos1[2]);
+        
+        // Create new vertex on edge 2
+        int next2 = (loopIdx2 + 1) % n;
+        const Loop& lC = face.loops[loopIdx2];
+        const Loop& lD = face.loops[next2];
+        float pos2[3], uv2[2];
+        math::lerp3(pos2, vertices[lC.vertexIndex].position, vertices[lD.vertexIndex].position, t2);
+        math::lerp2(uv2, lC.uv, lD.uv, t2);
+        uint32_t newV2 = addVertex(pos2[0], pos2[1], pos2[2]);
+        
+        // Insert the new vertices into the face's loops, then split
+        // After insertion, the face has n+2 loops
+        // We insert newV1 after loopIdx1 and newV2 after loopIdx2
+        // Then split between the two new vertices
+        
+        // Build new loop array with both insertions
+        std::vector<Loop> newLoops;
+        int insertedPos1 = -1, insertedPos2 = -1;
+        
+        // Handle insertion order (insert later index first to avoid shifting)
+        int firstInsert = std::min(loopIdx1, loopIdx2);
+        int secondInsert = std::max(loopIdx1, loopIdx2);
+        uint32_t firstV = (firstInsert == loopIdx1) ? newV1 : newV2;
+        float* firstUV = (firstInsert == loopIdx1) ? uv1 : uv2;
+        uint32_t secondV = (firstInsert == loopIdx1) ? newV2 : newV1;
+        float* secondUV = (firstInsert == loopIdx1) ? uv2 : uv1;
+        
+        for (int i = 0; i < n; i++) {
+            newLoops.push_back(face.loops[i]);
+            if (i == firstInsert) {
+                Loop nl(firstV);
+                nl.uv[0] = firstUV[0]; nl.uv[1] = firstUV[1];
+                // Interpolate normal
+                int ni = (i + 1) % n;
+                math::lerp3(nl.normal, face.loops[i].normal, face.loops[ni].normal,
+                           (firstInsert == loopIdx1) ? t1 : t2);
+                insertedPos1 = static_cast<int>(newLoops.size());
+                newLoops.push_back(nl);
+            }
+            if (i == secondInsert) {
+                Loop nl(secondV);
+                nl.uv[0] = secondUV[0]; nl.uv[1] = secondUV[1];
+                int ni = (i + 1) % n;
+                math::lerp3(nl.normal, face.loops[i].normal, face.loops[ni].normal,
+                           (secondInsert == loopIdx2) ? t2 : t1);
+                insertedPos2 = static_cast<int>(newLoops.size());
+                newLoops.push_back(nl);
+            }
+        }
+        
+        // Now split the face at the two inserted positions
+        // Map insertedPos to actual new vertex positions
+        int splitA = insertedPos1, splitB = insertedPos2;
+        if (firstInsert != loopIdx1) std::swap(splitA, splitB);
+        
+        // Ensure splitA < splitB
+        if (splitA > splitB) std::swap(splitA, splitB);
+        
+        int nn = static_cast<int>(newLoops.size());
+        EditFace f1, f2;
+        f1.materialIndex = face.materialIndex;
+        f1.id = nextFaceId();
+        f2.materialIndex = face.materialIndex;
+        f2.id = nextFaceId();
+        
+        for (int i = splitA; i <= splitB; i++) {
+            f1.loops.push_back(newLoops[i]);
+        }
+        for (int i = splitB; i < nn; i++) {
+            f2.loops.push_back(newLoops[i]);
+        }
+        for (int i = 0; i <= splitA; i++) {
+            f2.loops.push_back(newLoops[i]);
+        }
+        
+        f1.calculateNormal(vertices);
+        f2.calculateNormal(vertices);
+        
+        faces[faceIndex] = std::move(f1);
+        faces.push_back(std::move(f2));
+        
+        selectedFaces.clear();
+        rebuildEdges();
+        markDirty();
+        return true;
+    }
+    
+    // =========================================================================
+    // Preview edge loop path (for interactive display, no mesh modification)
+    // Returns pairs of (position_on_perp_edge1, position_on_perp_edge2) as 3D points
+    // that form the loop cut line segments across each quad face.
+    // =========================================================================
+    struct LoopCutSegment {
+        float p0[3], p1[3]; // Two endpoints of a cut line segment across one face
+        uint32_t faceIdx;   // Face this segment belongs to (for depth culling)
+    };
+    
+    std::vector<LoopCutSegment> previewEdgeLoop(uint32_t edgeIndex, float factor = 0.5f) const {
+        std::vector<LoopCutSegment> result;
+        if (edgeIndex >= edges.size()) return result;
+        factor = std::max(0.01f, std::min(0.99f, factor));
+        
+        const EditEdge& startEdge = edges[edgeIndex];
+        uint32_t ev0 = startEdge.v0, ev1 = startEdge.v1;
+        auto startKey = std::make_pair(std::min(ev0,ev1), std::max(ev0,ev1));
+        
+        // Build edge-to-faces adjacency
+        std::map<std::pair<uint32_t,uint32_t>, std::vector<uint32_t>> edgeFaceMap;
+        for (uint32_t fi = 0; fi < static_cast<uint32_t>(faces.size()); fi++) {
+            const EditFace& face = faces[fi];
+            for (size_t i = 0; i < face.loops.size(); i++) {
+                size_t next = (i + 1) % face.loops.size();
+                uint32_t a = face.loops[i].vertexIndex;
+                uint32_t b = face.loops[next].vertexIndex;
+                auto key = std::make_pair(std::min(a,b), std::max(a,b));
+                edgeFaceMap[key].push_back(fi);
+            }
+        }
+        
+        // Lambda: walk in one direction from a starting edge, collecting cut segments
+        // Returns true if it looped back to the start edge
+        std::set<uint32_t> visitedFaces;
+        
+        auto walkDirection = [&](std::pair<uint32_t,uint32_t> firstEdgeKey, 
+                                  std::vector<LoopCutSegment>& segs) -> bool {
+            auto currentEdgeKey = firstEdgeKey;
+            
+            for (int iteration = 0; iteration < 10000; iteration++) {
+                auto it = edgeFaceMap.find(currentEdgeKey);
+                if (it == edgeFaceMap.end()) break;
+                
+                uint32_t nextFaceIdx = UINT32_MAX;
+                for (uint32_t fi : it->second) {
+                    if (visitedFaces.count(fi) == 0) { nextFaceIdx = fi; break; }
+                }
+                if (nextFaceIdx == UINT32_MAX) break;
+                
+                visitedFaces.insert(nextFaceIdx);
+                const EditFace& face = faces[nextFaceIdx];
+                int n = static_cast<int>(face.loops.size());
+                
+                if (n == 4) {
+                    // QUAD: standard loop cut segment
+                    int edgePos = -1;
+                    for (int i = 0; i < n; i++) {
+                        uint32_t a = face.loops[i].vertexIndex;
+                        uint32_t b = face.loops[(i+1)%n].vertexIndex;
+                        auto key = std::make_pair(std::min(a,b), std::max(a,b));
+                        if (key == currentEdgeKey) { edgePos = i; break; }
+                    }
+                    if (edgePos < 0) break;
+                    
+                    int opposite = (edgePos + 2) % 4;
+                    
+                    uint32_t ea = face.loops[edgePos].vertexIndex;
+                    uint32_t eb = face.loops[(edgePos+1)%4].vertexIndex;
+                    uint32_t oa = face.loops[opposite].vertexIndex;
+                    uint32_t ob = face.loops[(opposite+1)%4].vertexIndex;
+                    
+                    LoopCutSegment seg;
+                    seg.faceIdx = nextFaceIdx;
+                    math::lerp3(seg.p0, vertices[ea].position, vertices[eb].position, factor);
+                    math::lerp3(seg.p1, vertices[oa].position, vertices[ob].position, 1.0f - factor);
+                    segs.push_back(seg);
+                    
+                    // Walk to next face via OPPOSITE edge
+                    currentEdgeKey = std::make_pair(std::min(oa,ob), std::max(oa,ob));
+                } else {
+                    // NON-QUAD (triangle, ngon): skip segment but try to continue walk
+                    // Find any other edge that leads to an unvisited face
+                    bool foundContinuation = false;
+                    for (int i = 0; i < n; i++) {
+                        uint32_t a = face.loops[i].vertexIndex;
+                        uint32_t b = face.loops[(i+1)%n].vertexIndex;
+                        auto testKey = std::make_pair(std::min(a,b), std::max(a,b));
+                        if (testKey == currentEdgeKey) continue; // Skip entry edge
+                        
+                        auto it2 = edgeFaceMap.find(testKey);
+                        if (it2 == edgeFaceMap.end()) continue;
+                        for (uint32_t fi2 : it2->second) {
+                            if (visitedFaces.count(fi2) == 0) {
+                                currentEdgeKey = testKey;
+                                foundContinuation = true;
+                                break;
+                            }
+                        }
+                        if (foundContinuation) break;
+                    }
+                    if (!foundContinuation) break;
+                }
+                
+                if (currentEdgeKey == startKey) return true;
+            }
+            return false;
+        };
+        
+        // Walk direction 1: from the start edge
+        size_t dir1Count = 0;
+        bool looped = walkDirection(startKey, result);
+        dir1Count = result.size();
+        
+        if (!looped) {
+            // Walk direction 2: from the start edge in the other direction
+            std::vector<LoopCutSegment> reverseSegs;
+            walkDirection(startKey, reverseSegs);
+            
+            if (!reverseSegs.empty()) {
+                std::reverse(reverseSegs.begin(), reverseSegs.end());
+                for (auto& seg : reverseSegs) {
+                    std::swap(seg.p0[0], seg.p1[0]);
+                    std::swap(seg.p0[1], seg.p1[1]);
+                    std::swap(seg.p0[2], seg.p1[2]);
+                }
+                result.insert(result.begin(), reverseSegs.begin(), reverseSegs.end());
+            }
+        }
+        
+        // Debug: print once when edge changes (caller typically caches)
+        static uint32_t s_lastDebugEdge = UINT32_MAX;
+        if (edgeIndex != s_lastDebugEdge) {
+            s_lastDebugEdge = edgeIndex;
+            printf("[LoopCut] edge=%u: %s ring, %zu segments (dir1=%zu)\n",
+                   edgeIndex, looped ? "CLOSED" : "OPEN", result.size(), dir1Count);
+        }
+        
+        return result;
+    }
+    
+    // Cached edge-to-face adjacency (topology only, rebuilt when mesh changes)
+    struct EdgeFaceInfo {
+        std::map<std::pair<uint32_t,uint32_t>, std::vector<uint32_t>> edgeFaceMap;
+        std::vector<float> faceLocalNormals; // 3 floats per face (LOCAL space normal, no world transform)
+        bool valid = false;
+    };
+    mutable EdgeFaceInfo m_cachedEdgeFaceInfo;
+    
+    // Invalidate cache (call after any topology change)
+    void invalidateEdgeFaceCache() const { m_cachedEdgeFaceInfo.valid = false; }
+    
+    // Get or rebuild cached edge-face info (topology + local normals)
+    const EdgeFaceInfo& getEdgeFaceInfo() const {
+        if (m_cachedEdgeFaceInfo.valid) return m_cachedEdgeFaceInfo;
+        
+        m_cachedEdgeFaceInfo.edgeFaceMap.clear();
+        m_cachedEdgeFaceInfo.faceLocalNormals.resize(faces.size() * 3, 0.0f);
+        
+        for (uint32_t fi = 0; fi < static_cast<uint32_t>(faces.size()); fi++) {
+            const auto& face = faces[fi];
+            for (size_t i = 0; i < face.loops.size(); i++) {
+                size_t next = (i + 1) % face.loops.size();
+                uint32_t a = face.loops[i].vertexIndex;
+                uint32_t b = face.loops[next].vertexIndex;
+                auto key = std::make_pair(std::min(a,b), std::max(a,b));
+                m_cachedEdgeFaceInfo.edgeFaceMap[key].push_back(fi);
+            }
+            if (face.loops.size() >= 3) {
+                const float* p0 = vertices[face.loops[0].vertexIndex].position;
+                const float* p1 = vertices[face.loops[1].vertexIndex].position;
+                const float* p2 = vertices[face.loops[2].vertexIndex].position;
+                float e1[3] = { p1[0]-p0[0], p1[1]-p0[1], p1[2]-p0[2] };
+                float e2[3] = { p2[0]-p0[0], p2[1]-p0[1], p2[2]-p0[2] };
+                m_cachedEdgeFaceInfo.faceLocalNormals[fi*3+0] = e1[1]*e2[2] - e1[2]*e2[1];
+                m_cachedEdgeFaceInfo.faceLocalNormals[fi*3+1] = e1[2]*e2[0] - e1[0]*e2[2];
+                m_cachedEdgeFaceInfo.faceLocalNormals[fi*3+2] = e1[0]*e2[1] - e1[1]*e2[0];
+            }
+        }
+        m_cachedEdgeFaceInfo.valid = true;
+        return m_cachedEdgeFaceInfo;
+    }
+    
+    // Check if an edge is front-facing using cached adjacency + world matrix
+    bool isEdgeFrontFacing(uint32_t edgeIdx, const float* viewDir, 
+                           const float* worldMatrix, const EdgeFaceInfo& info) const {
+        if (edgeIdx >= edges.size()) return false;
+        const auto& edge = edges[edgeIdx];
+        auto edgeKey = std::make_pair(std::min(edge.v0, edge.v1), std::max(edge.v0, edge.v1));
+        
+        auto it = info.edgeFaceMap.find(edgeKey);
+        if (it == info.edgeFaceMap.end()) return false;
+        
+        for (uint32_t fi : it->second) {
+            float nx = info.faceLocalNormals[fi*3+0];
+            float ny = info.faceLocalNormals[fi*3+1];
+            float nz = info.faceLocalNormals[fi*3+2];
+            // Transform local normal to world space
+            float wn[3];
+            if (worldMatrix) {
+                wn[0] = worldMatrix[0]*nx + worldMatrix[4]*ny + worldMatrix[8]*nz;
+                wn[1] = worldMatrix[1]*nx + worldMatrix[5]*ny + worldMatrix[9]*nz;
+                wn[2] = worldMatrix[2]*nx + worldMatrix[6]*ny + worldMatrix[10]*nz;
+            } else {
+                wn[0] = nx; wn[1] = ny; wn[2] = nz;
+            }
+            float dot = wn[0]*viewDir[0] + wn[1]*viewDir[1] + wn[2]*viewDir[2];
+            if (dot < 0.0f) return true;
+        }
+        return false;
+    }
+    
+    // Find the closest edge to a screen position (for hover detection in Loop Cut / Knife tool)
+    // viewDir: camera forward direction (for back-face culling). Pass nullptr to disable culling.
+    uint32_t findClosestEdgeToScreenPos(
+        float screenX, float screenY,
+        const std::function<bool(float wx, float wy, float wz, float& sx, float& sy)>& project,
+        const float* worldMatrix = nullptr,
+        float maxScreenDist = 15.0f,
+        const float* viewDir = nullptr) const 
+    {
+        uint32_t bestEdge = UINT32_MAX;
+        float bestDist = maxScreenDist;
+        
+        // Use cached adjacency info for back-face culling (much faster than rebuilding)
+        const EdgeFaceInfo* efInfoPtr = nullptr;
+        if (viewDir) efInfoPtr = &getEdgeFaceInfo();
+        
+        auto transformPos = [worldMatrix](const float* pos, float* out) {
+            if (worldMatrix) {
+                out[0] = worldMatrix[0]*pos[0] + worldMatrix[4]*pos[1] + worldMatrix[8]*pos[2] + worldMatrix[12];
+                out[1] = worldMatrix[1]*pos[0] + worldMatrix[5]*pos[1] + worldMatrix[9]*pos[2] + worldMatrix[13];
+                out[2] = worldMatrix[2]*pos[0] + worldMatrix[6]*pos[1] + worldMatrix[10]*pos[2] + worldMatrix[14];
+            } else {
+                out[0] = pos[0]; out[1] = pos[1]; out[2] = pos[2];
+            }
+        };
+        
+        for (uint32_t ei = 0; ei < static_cast<uint32_t>(edges.size()); ei++) {
+            const auto& edge = edges[ei];
+            if (edge.v0 >= vertices.size() || edge.v1 >= vertices.size()) continue;
+            
+            // Skip back-facing edges when depth culling is enabled
+            if (efInfoPtr && !isEdgeFrontFacing(ei, viewDir, worldMatrix, *efInfoPtr)) continue;
+            
+            float w0[3], w1[3];
+            transformPos(vertices[edge.v0].position, w0);
+            transformPos(vertices[edge.v1].position, w1);
+            
+            float sx0, sy0, sx1, sy1;
+            if (!project(w0[0], w0[1], w0[2], sx0, sy0)) continue;
+            if (!project(w1[0], w1[1], w1[2], sx1, sy1)) continue;
+            
+            // Point-to-line-segment distance in screen space
+            float dx = sx1 - sx0, dy = sy1 - sy0;
+            float len2 = dx*dx + dy*dy;
+            if (len2 < 1e-6f) continue;
+            
+            float t = ((screenX - sx0)*dx + (screenY - sy0)*dy) / len2;
+            t = std::max(0.0f, std::min(1.0f, t));
+            
+            float px = sx0 + t * dx;
+            float py = sy0 + t * dy;
+            float dist = std::sqrt((screenX - px)*(screenX - px) + (screenY - py)*(screenY - py));
+            
+            if (dist < bestDist) {
+                bestDist = dist;
+                bestEdge = ei;
+            }
+        }
+        
+        return bestEdge;
+    }
+    
+    // Find the closest edge to a screen point and return the parametric t value
+    // viewDir: camera forward direction (for back-face culling). Pass nullptr to disable culling.
+    uint32_t findClosestEdgeWithT(
+        float screenX, float screenY,
+        const std::function<bool(float wx, float wy, float wz, float& sx, float& sy)>& project,
+        const float* worldMatrix,
+        float& outT,
+        float maxScreenDist = 15.0f,
+        const float* viewDir = nullptr) const
+    {
+        uint32_t bestEdge = UINT32_MAX;
+        float bestDist = maxScreenDist;
+        float bestT = 0.5f;
+        
+        // Use cached adjacency info for back-face culling
+        const EdgeFaceInfo* efInfoPtr = nullptr;
+        if (viewDir) efInfoPtr = &getEdgeFaceInfo();
+        
+        auto transformPos = [worldMatrix](const float* pos, float* out) {
+            if (worldMatrix) {
+                out[0] = worldMatrix[0]*pos[0] + worldMatrix[4]*pos[1] + worldMatrix[8]*pos[2] + worldMatrix[12];
+                out[1] = worldMatrix[1]*pos[0] + worldMatrix[5]*pos[1] + worldMatrix[9]*pos[2] + worldMatrix[13];
+                out[2] = worldMatrix[2]*pos[0] + worldMatrix[6]*pos[1] + worldMatrix[10]*pos[2] + worldMatrix[14];
+            } else {
+                out[0] = pos[0]; out[1] = pos[1]; out[2] = pos[2];
+            }
+        };
+        
+        for (uint32_t ei = 0; ei < static_cast<uint32_t>(edges.size()); ei++) {
+            const auto& edge = edges[ei];
+            if (edge.v0 >= vertices.size() || edge.v1 >= vertices.size()) continue;
+            
+            // Skip back-facing edges when depth culling is enabled
+            if (efInfoPtr && !isEdgeFrontFacing(ei, viewDir, worldMatrix, *efInfoPtr)) continue;
+            
+            float w0[3], w1[3];
+            transformPos(vertices[edge.v0].position, w0);
+            transformPos(vertices[edge.v1].position, w1);
+            
+            float sx0, sy0, sx1, sy1;
+            if (!project(w0[0], w0[1], w0[2], sx0, sy0)) continue;
+            if (!project(w1[0], w1[1], w1[2], sx1, sy1)) continue;
+            
+            float dx = sx1 - sx0, dy = sy1 - sy0;
+            float len2 = dx*dx + dy*dy;
+            if (len2 < 1e-6f) continue;
+            
+            float t = ((screenX - sx0)*dx + (screenY - sy0)*dy) / len2;
+            t = std::max(0.0f, std::min(1.0f, t));
+            
+            float px = sx0 + t * dx;
+            float py = sy0 + t * dy;
+            float dist = std::sqrt((screenX - px)*(screenX - px) + (screenY - py)*(screenY - py));
+            
+            if (dist < bestDist) {
+                bestDist = dist;
+                bestEdge = ei;
+                bestT = t;
+            }
+        }
+        
+        outT = bestT;
+        return bestEdge;
+    }
+    
+    // =========================================================================
+    // 插入环形边 — Insert edge loop perpendicular to the given edge
+    // Like Blender Ctrl+R / Maya Insert Edge Loop
+    // factor: 0.0-1.0 controls position along perpendicular edges (0.5 = midpoint)
+    // Returns new vertex indices for interactive sliding
+    // =========================================================================
+    std::vector<uint32_t> insertEdgeLoop(uint32_t edgeIndex, float factor = 0.5f) {
+        if (edgeIndex >= edges.size()) return {};
+        factor = std::max(0.01f, std::min(0.99f, factor));
+        
+        const EditEdge& startEdge = edges[edgeIndex];
+        uint32_t ev0 = startEdge.v0, ev1 = startEdge.v1;
+        
+        // Build edge-to-faces adjacency map
+        // Key: (min_v, max_v), Value: list of face indices
+        std::map<std::pair<uint32_t,uint32_t>, std::vector<uint32_t>> edgeFaceMap;
+        for (uint32_t fi = 0; fi < static_cast<uint32_t>(faces.size()); fi++) {
+            const EditFace& face = faces[fi];
+            for (size_t i = 0; i < face.loops.size(); i++) {
+                size_t next = (i + 1) % face.loops.size();
+                uint32_t a = face.loops[i].vertexIndex;
+                uint32_t b = face.loops[next].vertexIndex;
+                auto key = std::make_pair(std::min(a,b), std::max(a,b));
+                edgeFaceMap[key].push_back(fi);
+            }
+        }
+        
+        // Walk the edge loop: collect faces to cut and which edges to split
+        struct LoopFaceInfo {
+            uint32_t faceIdx;
+            int edgeLoopIdx;    // Position of the "parallel" edge in the face's loops
+            int perpLoopIdx1;   // Position of perpendicular edge 1 (shared vertex with parallel edge start)
+            int perpLoopIdx2;   // Position of perpendicular edge 2 (shared vertex with parallel edge end)
+            int oppositeLoopIdx;// Position of the opposite edge
+        };
+        
+        std::vector<LoopFaceInfo> loopFaces;
+        std::set<uint32_t> visitedFaces;
+        
+        // Start edge key
+        auto startKey = std::make_pair(std::min(ev0,ev1), std::max(ev0,ev1));
+        
+        // Lambda: walk in one direction collecting faces
+        auto walkDir = [&](std::pair<uint32_t,uint32_t> firstEdgeKey, 
+                           std::vector<LoopFaceInfo>& outFaces) -> bool {
+            auto currentEdgeKey = firstEdgeKey;
+            for (int iteration = 0; iteration < 10000; iteration++) {
+                auto it = edgeFaceMap.find(currentEdgeKey);
+                if (it == edgeFaceMap.end()) break;
+                
+                uint32_t nextFaceIdx = UINT32_MAX;
+                for (uint32_t fi : it->second) {
+                    if (visitedFaces.count(fi) == 0) { nextFaceIdx = fi; break; }
+                }
+                if (nextFaceIdx == UINT32_MAX) break;
+                
+                visitedFaces.insert(nextFaceIdx);
+                const EditFace& face = faces[nextFaceIdx];
+                int n = static_cast<int>(face.loops.size());
+                
+                if (n == 4) {
+                    int edgePos = -1;
+                    for (int i = 0; i < n; i++) {
+                        uint32_t a = face.loops[i].vertexIndex;
+                        uint32_t b = face.loops[(i+1)%n].vertexIndex;
+                        auto key = std::make_pair(std::min(a,b), std::max(a,b));
+                        if (key == currentEdgeKey) { edgePos = i; break; }
+                    }
+                    if (edgePos < 0) break;
+                    
+                    int perp1 = (edgePos + 1) % 4;
+                    int perp2 = (edgePos + 3) % 4;
+                    int opposite = (edgePos + 2) % 4;
+                    outFaces.push_back({nextFaceIdx, edgePos, perp1, perp2, opposite});
+                    
+                    // Walk via OPPOSITE edge
+                    uint32_t ov0 = face.loops[opposite].vertexIndex;
+                    uint32_t ov1 = face.loops[(opposite+1)%4].vertexIndex;
+                    currentEdgeKey = std::make_pair(std::min(ov0,ov1), std::max(ov0,ov1));
+                } else {
+                    // Non-quad: skip but try to continue walk
+                    bool foundContinuation = false;
+                    for (int i = 0; i < n; i++) {
+                        uint32_t a = face.loops[i].vertexIndex;
+                        uint32_t b = face.loops[(i+1)%n].vertexIndex;
+                        auto testKey = std::make_pair(std::min(a,b), std::max(a,b));
+                        if (testKey == currentEdgeKey) continue;
+                        auto it2 = edgeFaceMap.find(testKey);
+                        if (it2 == edgeFaceMap.end()) continue;
+                        for (uint32_t fi2 : it2->second) {
+                            if (visitedFaces.count(fi2) == 0) {
+                                currentEdgeKey = testKey;
+                                foundContinuation = true;
+                                break;
+                            }
+                        }
+                        if (foundContinuation) break;
+                    }
+                    if (!foundContinuation) break;
+                }
+                
+                if (currentEdgeKey == startKey) return true; // Looped back
+            }
+            return false;
+        };
+        
+        // Walk direction 1
+        bool looped = walkDir(startKey, loopFaces);
+        
+        if (!looped) {
+            // Walk direction 2 (visitedFaces already blocks the first direction's faces)
+            std::vector<LoopFaceInfo> reverseFaces;
+            walkDir(startKey, reverseFaces);
+            if (!reverseFaces.empty()) {
+                std::reverse(reverseFaces.begin(), reverseFaces.end());
+                loopFaces.insert(loopFaces.begin(), reverseFaces.begin(), reverseFaces.end());
+            }
+        }
+        
+        if (loopFaces.empty()) return {};
+        
+        pushUndo();
+        
+        // Create new vertices on entry/opposite edges (parallel to hovered edge)
+        // Key: edge (min_v, max_v), Value: new vertex index
+        std::map<std::pair<uint32_t,uint32_t>, uint32_t> edgeNewVerts;
+        std::vector<uint32_t> newVertIndices;
+        
+        auto getOrCreateEdgeVertex = [&](uint32_t va, uint32_t vb, float t) -> uint32_t {
+            auto key = std::make_pair(std::min(va,vb), std::max(va,vb));
+            auto it = edgeNewVerts.find(key);
+            if (it != edgeNewVerts.end()) return it->second;
+            
+            float pos[3];
+            math::lerp3(pos, vertices[va].position, vertices[vb].position, t);
+            uint32_t newVi = addVertex(pos[0], pos[1], pos[2]);
+            edgeNewVerts[key] = newVi;
+            newVertIndices.push_back(newVi);
+            return newVi;
+        };
+        
+        // Collect split info: new vertices on entry and opposite edges
+        struct FaceSplitInfo {
+            uint32_t faceIdx;
+            uint32_t newV1, newV2;  // New vertices on entry and opposite edges
+        };
+        std::vector<FaceSplitInfo> splits;
+        
+        for (auto& info : loopFaces) {
+            const EditFace& face = faces[info.faceIdx];
+            int n = static_cast<int>(face.loops.size());
+            
+            // Entry edge: the edge we entered this face through
+            uint32_t ea = face.loops[info.edgeLoopIdx].vertexIndex;
+            uint32_t eb = face.loops[(info.edgeLoopIdx+1)%n].vertexIndex;
+            
+            // Opposite edge: across the face from entry
+            uint32_t oa = face.loops[info.oppositeLoopIdx].vertexIndex;
+            uint32_t ob = face.loops[(info.oppositeLoopIdx+1)%n].vertexIndex;
+            
+            // New vertex on entry edge at factor t
+            uint32_t nv1 = getOrCreateEdgeVertex(ea, eb, factor);
+            // New vertex on opposite edge at (1-factor) due to reversed direction
+            uint32_t nv2 = getOrCreateEdgeVertex(oa, ob, 1.0f - factor);
+            
+            splits.push_back({info.faceIdx, nv1, nv2});
+        }
+        
+        // Now split each face (process in reverse index order to avoid invalidation)
+        std::sort(splits.begin(), splits.end(), [](const FaceSplitInfo& a, const FaceSplitInfo& b) {
+            return a.faceIdx > b.faceIdx;
+        });
+        
+        for (auto& split : splits) {
+            EditFace& face = faces[split.faceIdx];
+            int n = static_cast<int>(face.loops.size());
+            
+            // Insert the two new vertices into the face's loops
+            // Find which edges they belong to and insert after the first vertex of each edge
+            std::vector<Loop> expandedLoops;
+            
+            for (int i = 0; i < n; i++) {
+                expandedLoops.push_back(face.loops[i]);
+                
+                int next = (i + 1) % n;
+                uint32_t va = face.loops[i].vertexIndex;
+                uint32_t vb = face.loops[next].vertexIndex;
+                auto key = std::make_pair(std::min(va,vb), std::max(va,vb));
+                
+                auto it = edgeNewVerts.find(key);
+                if (it != edgeNewVerts.end()) {
+                    // Insert new vertex after this position
+                    Loop nl(it->second);
+                    // Interpolate UV and normal
+                    float t_interp = factor;
+                    // Check direction
+                    if (va > vb) t_interp = 1.0f - factor;
+                    math::lerp2(nl.uv, face.loops[i].uv, face.loops[next].uv, t_interp);
+                    math::lerp3(nl.normal, face.loops[i].normal, face.loops[next].normal, t_interp);
+                    expandedLoops.push_back(nl);
+                }
+            }
+            
+            // Now find the positions of newV1 and newV2 in expandedLoops
+            int posV1 = -1, posV2 = -1;
+            for (int i = 0; i < static_cast<int>(expandedLoops.size()); i++) {
+                if (expandedLoops[i].vertexIndex == split.newV1) posV1 = i;
+                if (expandedLoops[i].vertexIndex == split.newV2) posV2 = i;
+            }
+            
+            if (posV1 < 0 || posV2 < 0) continue;
+            if (posV1 > posV2) std::swap(posV1, posV2);
+            
+            int nn = static_cast<int>(expandedLoops.size());
+            
+            // Split: face1 = [posV1 .. posV2], face2 = [posV2 .. posV1] wrapping
+            EditFace f1, f2;
+            f1.materialIndex = face.materialIndex;
+            f1.id = nextFaceId();
+            f2.materialIndex = face.materialIndex;
+            f2.id = nextFaceId();
+            
+            for (int i = posV1; i <= posV2; i++) {
+                f1.loops.push_back(expandedLoops[i]);
+            }
+            for (int i = posV2; i < nn; i++) {
+                f2.loops.push_back(expandedLoops[i]);
+            }
+            for (int i = 0; i <= posV1; i++) {
+                f2.loops.push_back(expandedLoops[i]);
+            }
+            
+            f1.calculateNormal(vertices);
+            f2.calculateNormal(vertices);
+            
+            // Replace original face with f1
+            faces[split.faceIdx] = std::move(f1);
+            // Append f2
+            faces.push_back(std::move(f2));
+        }
+        
+        selectedFaces.clear();
+        selectedEdges.clear();
+        selectedVertices.clear();
+        
+        // Select the new edge loop vertices
+        for (uint32_t vi : newVertIndices) {
+            selectedVertices.insert(vi);
+        }
+        
+        rebuildEdges();
+        markDirty();
+        return newVertIndices;
+    }
+    
+    // =========================================================================
+    // 合并面 — Merge selected faces into one polygon
+    // Like Blender's Merge Faces (F key on selected faces)
+    // Selected faces must be adjacent (share edges)
+    // =========================================================================
+    bool mergeSelectedFaces() {
+        if (selectedFaces.size() < 2) return false;
+        
+        std::vector<uint32_t> faceIndices(selectedFaces.begin(), selectedFaces.end());
+        
+        // Build a set of all edges and classify them as boundary or internal
+        // Internal edges: shared by two or more selected faces
+        // Boundary edges: belong to only one selected face
+        struct EdgeInfo {
+            uint32_t v0, v1;
+            int count = 0; // How many selected faces share this edge
+        };
+        
+        std::map<std::pair<uint32_t,uint32_t>, int> edgeCount;
+        
+        for (uint32_t fi : faceIndices) {
+            if (fi >= faces.size()) return false;
+            const EditFace& face = faces[fi];
+            for (size_t i = 0; i < face.loops.size(); i++) {
+                size_t next = (i + 1) % face.loops.size();
+                uint32_t a = face.loops[i].vertexIndex;
+                uint32_t b = face.loops[next].vertexIndex;
+                auto key = std::make_pair(std::min(a,b), std::max(a,b));
+                edgeCount[key]++;
+            }
+        }
+        
+        // Collect boundary edges (shared by exactly one selected face)
+        std::vector<std::pair<uint32_t,uint32_t>> boundaryEdges;
+        for (auto& [key, count] : edgeCount) {
+            if (count == 1) {
+                boundaryEdges.push_back(key);
+            }
+        }
+        
+        if (boundaryEdges.empty()) return false;
+        
+        // Build the boundary loop (ordered sequence of vertices)
+        // Start with any boundary edge and follow the chain
+        std::map<uint32_t, std::vector<uint32_t>> adjacency;
+        for (auto& [v0, v1] : boundaryEdges) {
+            adjacency[v0].push_back(v1);
+            adjacency[v1].push_back(v0);
+        }
+        
+        // Walk the boundary
+        std::vector<uint32_t> boundaryLoop;
+        std::set<uint32_t> visited;
+        uint32_t current = boundaryEdges[0].first;
+        
+        for (size_t iter = 0; iter < boundaryEdges.size() + 1; iter++) {
+            if (visited.count(current)) break;
+            visited.insert(current);
+            boundaryLoop.push_back(current);
+            
+            auto it = adjacency.find(current);
+            if (it == adjacency.end()) break;
+            
+            bool foundNext = false;
+            for (uint32_t next : it->second) {
+                if (!visited.count(next)) {
+                    current = next;
+                    foundNext = true;
+                    break;
+                }
+            }
+            if (!foundNext) break;
+        }
+        
+        if (boundaryLoop.size() < 3) return false;
+        
+        pushUndo();
+        
+        // Get material from first selected face
+        uint32_t matIdx = faces[faceIndices[0]].materialIndex;
+        
+        // Collect UVs for the boundary vertices from the original faces
+        // Use UV from the first face that contains each boundary vertex
+        std::map<uint32_t, std::pair<float,float>> vertexUVs;
+        for (uint32_t fi : faceIndices) {
+            const EditFace& face = faces[fi];
+            for (const Loop& loop : face.loops) {
+                if (vertexUVs.find(loop.vertexIndex) == vertexUVs.end()) {
+                    vertexUVs[loop.vertexIndex] = {loop.uv[0], loop.uv[1]};
+                }
+            }
+        }
+        
+        // Delete selected faces (from back to front to preserve indices)
+        std::sort(faceIndices.rbegin(), faceIndices.rend());
+        for (uint32_t fi : faceIndices) {
+            faces.erase(faces.begin() + fi);
+        }
+        
+        // Add the merged face
+        uint32_t newFi = addFace(boundaryLoop, matIdx);
+        
+        // Apply UVs to the new face
+        EditFace& newFace = faces[newFi];
+        for (auto& loop : newFace.loops) {
+            auto it = vertexUVs.find(loop.vertexIndex);
+            if (it != vertexUVs.end()) {
+                loop.uv[0] = it->second.first;
+                loop.uv[1] = it->second.second;
+            }
+        }
+        
+        selectedFaces.clear();
+        selectedFaces.insert(newFi);
+        rebuildEdges();
+        removeUnusedVertices();
+        markDirty();
+        return true;
+    }
+    
     // 按距离合并顶点
     void mergeByDistance(float threshold = 0.001f) {
         if (vertices.empty()) return;
@@ -917,10 +1803,42 @@ public:
         }
         
         redoStack_.clear();
+        invalidateEdgeFaceCache();
+        invalidateEdgeFaceCache();
     }
     
     bool canUndo() const { return !undoStack_.empty(); }
     bool canRedo() const { return !redoStack_.empty(); }
+    
+    // Clear undo/redo history (called after Commit/Freeze to set new baseline)
+    void clearUndoHistory() {
+        undoStack_.clear();
+        redoStack_.clear();
+    }
+    
+    // Create a full snapshot of current state (for external baseline storage)
+    EditMeshSnapshot createSnapshot() const {
+        EditMeshSnapshot snapshot;
+        snapshot.vertices = vertices;
+        snapshot.faces = faces;
+        snapshot.edges = edges;
+        snapshot.selectedVertices = selectedVertices;
+        snapshot.selectedEdges = selectedEdges;
+        snapshot.selectedFaces = selectedFaces;
+        return snapshot;
+    }
+    
+    // Restore state from an external snapshot (for Cancel to baseline)
+    void restoreFromSnapshot(const EditMeshSnapshot& snapshot) {
+        vertices = snapshot.vertices;
+        faces = snapshot.faces;
+        edges = snapshot.edges;
+        selectedVertices = snapshot.selectedVertices;
+        selectedEdges = snapshot.selectedEdges;
+        selectedFaces = snapshot.selectedFaces;
+        clearUndoHistory();
+        markDirty();
+    }
     
     int getUndoCount() const { return static_cast<int>(undoStack_.size()); }
     int getRedoCount() const { return static_cast<int>(redoStack_.size()); }
@@ -949,6 +1867,7 @@ public:
         
         undoStack_.pop_back();
         markDirty();
+        invalidateEdgeFaceCache();
         return true;
     }
     
@@ -976,6 +1895,7 @@ public:
         
         redoStack_.pop_back();
         markDirty();
+        invalidateEdgeFaceCache();
         return true;
     }
     

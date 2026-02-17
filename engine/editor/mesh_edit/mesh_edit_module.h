@@ -354,7 +354,7 @@ inline bool MeshEditModule::handleInput(const InputEvent& event) {
             break;
             
         case InputEvent::Type::MouseDown:
-            if (event.key == 0) {  // Left mouse
+            if (event.key == 0 && !event.isAlt()) {  // Left mouse, not Alt (Alt = camera orbit)
                 if (currentTool == MeshTool::Select) {
                     if (selectionTool == SelectionTool::Click) {
                         performClickSelection(event.mouseX, event.mouseY, event.isShift());

@@ -37,6 +37,14 @@ struct RHIGPUMesh {
     bool hasNormalTexture = false;
     bool hasSpecularTexture = false;
     
+    // Texture paths (preserved from original Mesh for material editor)
+    std::string diffuseTexturePath;
+    std::string normalTexturePath;
+    std::string specularTexturePath;
+    
+    // Material info
+    std::string materialName;
+    
     // PBR parameters
     float baseColor[3] = {1.0f, 1.0f, 1.0f};
     float metallic = 0.0f;
@@ -58,6 +66,22 @@ struct RHIGPUMesh {
     // Skinned vertices for CPU skinning (edit mode wireframe on animated models)
     std::vector<SkinnedVertex> skinnedVertices;
     bool hasSkinning = false;
+};
+
+// ===== Mesh GPU Backup =====
+// Complete CPU-side backup of GPU mesh data for baseline restore (Cancel in edit mode)
+// Similar to Maya's "Freeze History" concept — stores the committed state
+struct MeshGPUBackup {
+    std::vector<uint8_t> vertexData;       // Raw vertex buffer (Vertex structs)
+    std::vector<uint32_t> indexData;       // Index buffer
+    std::vector<OriginalEdge> originalEdges;
+    std::vector<RHIGPUMesh::GPUOriginalFace> originalFaces;
+    bool hasOriginalEdges = false;
+    bool hasOriginalFaces = false;
+    uint32_t indexCount = 0;
+    std::vector<SkinnedVertex> skinnedVertices;
+    bool hasSkinning = false;
+    bool valid = false;  // True if backup has been saved
 };
 
 // ===== Loaded Model =====
@@ -240,11 +264,28 @@ public:
     
     // Update GPU mesh vertex positions from EditMesh (real-time mesh editing)
     // EditMesh vertex[i] maps 1:1 to GPU vertex[i]
-    void updateMeshVerticesFromEditMesh(const RHILoadedModel& model, int meshIndex, const EditMesh& editMesh);
+    // If the EditMesh has more vertices than the GPU buffer (topology changed),
+    // automatically calls rebuildMeshBuffersFromEditMesh to reallocate.
+    void updateMeshVerticesFromEditMesh(RHILoadedModel& model, int meshIndex, const EditMesh& editMesh);
+    
+    // Full rebuild of GPU vertex/index/edge buffers from EditMesh
+    // Called automatically when topology changes (extrude, cut, merge, etc.)
+    // forceFromLoops: if true, rebuild ALL vertex attributes from EditMesh loop data
+    //   (required for undo/redo where vertex ordering may change — old GPU data is invalid)
+    //   If false (default), preserves old GPU normals/UVs for existing vertices.
+    void rebuildMeshBuffersFromEditMesh(RHILoadedModel& model, int meshIndex, const EditMesh& editMesh, bool forceFromLoops = false);
     
     // Rebuild GPU edge index buffer from EditMesh edges (after topology changes like extrusion)
     // Call this after operations that add/remove edges (not needed for vertex-only moves)
     void rebuildEdgeIndexBuffer(RHILoadedModel& model, int meshIndex, const EditMesh& editMesh);
+    
+    // Backup GPU mesh data to CPU (for baseline/commit in edit mode)
+    // Reads vertex buffer, index buffer, and metadata into a MeshGPUBackup struct
+    MeshGPUBackup backupMeshGPUData(const RHILoadedModel& model, int meshIndex);
+    
+    // Restore GPU mesh data from a previous backup (for Cancel in edit mode)
+    // Recreates vertex buffer, index buffer, and edge buffer from backup data
+    void restoreMeshGPUData(RHILoadedModel& model, int meshIndex, const MeshGPUBackup& backup);
     
     // Render model depth-only (fills depth buffer, no color output)
     // Used for hidden line removal in wireframe mode when X-Ray is OFF
@@ -290,6 +331,28 @@ public:
     
     // Check if IBL is ready (environment loaded and textures generated)
     bool isIBLReady() const;
+    
+    // === Dynamic Material Shader ===
+    // Compile a generated material shader from HLSL source code
+    // Returns an opaque PSO handle (nullptr on failure)
+    // The shader source should include pbr_common.hlsli and procedural.hlsli
+    void* compileMaterialShader(const std::string& hlslSource,
+                                 const std::string& vsEntry = "VSMain",
+                                 const std::string& psEntry = "PSMain");
+    
+    // Render a model using a custom material PSO
+    // materialPSO: handle from compileMaterialShader()
+    // materialCBData: custom constant buffer data (register b1)
+    // materialTextures: array of {registerSlot, gpuHandle} pairs
+    void renderModelWithMaterial(const RHILoadedModel& model, const float* worldMatrix,
+                                  void* materialPSO,
+                                  const void* materialCBData = nullptr, uint32_t materialCBSize = 0);
+    
+    // Get the last material shader compilation error
+    const std::string& getMaterialShaderError() const;
+    
+    // Release a compiled material PSO
+    void releaseMaterialShader(void* materialPSO);
     
     // === Shader Hot-Reload ===
     // Enable/disable shader hot-reload (watches shader files for changes)

@@ -69,6 +69,7 @@ public:
     // Mode-specific state
     int selectedMeshIndex = -1;        // In Edit mode, which mesh is selected
     bool showMaterialNodeEditor = false;
+    bool showMaterialPreview = false;
     
     // View mode (Edit mode shading)
     ViewMode viewMode = ViewMode::Material;

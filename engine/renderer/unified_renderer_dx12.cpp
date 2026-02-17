@@ -782,7 +782,11 @@ struct UnifiedRenderer::Impl {
     bool shaderHotReloadEnabled = false;
     bool shaderReloadPending = false;
     std::string shaderError;
+    std::string materialShaderError;
     std::string shaderBasePath = "engine/renderer/shaders/";
+    
+    // Dynamic material shader PSOs
+    std::unordered_map<void*, ComPtr<ID3D12PipelineState>> materialPSOs;
     
     // Post-Processing
     bool postProcessEnabled = true;  // Now safe with finishSceneRendering() architecture
@@ -2470,6 +2474,10 @@ RHIGPUMesh UnifiedRenderer::uploadMesh(const Mesh& mesh) {
     memcpy(gpu.baseColor, mesh.baseColor, sizeof(mesh.baseColor));
     gpu.metallic = mesh.metallic;
     gpu.roughness = mesh.roughness;
+    gpu.materialName = mesh.materialName;
+    gpu.diffuseTexturePath = mesh.diffuseTexture.path;
+    gpu.normalTexturePath = mesh.normalTexture.path;
+    gpu.specularTexturePath = mesh.specularTexture.path;
     
     // Build original edges from originalFaces (for quad/ngon wireframe display)
     if (mesh.hasOriginalFaces && !mesh.originalFaces.empty()) {
@@ -2604,6 +2612,10 @@ bool UnifiedRenderer::loadModelAsync(const std::string& path, RHILoadedModel& ou
         const auto& mesh = result->meshes[mi];
         RHIGPUMesh gpu;
         gpu.name = mesh.name;  // Copy mesh name
+        gpu.materialName = mesh.materialName;
+        gpu.diffuseTexturePath = mesh.diffuseTexture.path;
+        gpu.normalTexturePath = mesh.normalTexture.path;
+        gpu.specularTexturePath = mesh.specularTexture.path;
         std::cout << "[async] Mesh " << mi << " name: '" << mesh.name 
                   << "' verts: " << mesh.vertices.size() 
                   << " hasSkinning: " << (mesh.hasSkeleton ? "yes" : "no") << std::endl;
@@ -2764,6 +2776,10 @@ bool UnifiedRenderer::loadModelAsync(const std::string& path, RHILoadedModel& ou
         const auto& mesh = result->meshes[mi];
         RHIGPUMesh gpu;
         gpu.name = mesh.name;
+        gpu.materialName = mesh.materialName;
+        gpu.diffuseTexturePath = mesh.diffuseTexture.path;
+        gpu.normalTexturePath = mesh.normalTexture.path;
+        gpu.specularTexturePath = mesh.specularTexture.path;
         gpu.indexCount = static_cast<uint32_t>(mesh.indices.size());
         gpu.meshIndex = static_cast<uint32_t>(impl_->meshStorage.size());
         memcpy(gpu.baseColor, mesh.baseColor, sizeof(mesh.baseColor));
@@ -4616,7 +4632,7 @@ void UnifiedRenderer::buildEditMeshFromGPU(const RHILoadedModel& model, int mesh
     
     const auto& dx12Mesh = impl_->meshStorage[storageIdx];
     
-    // Read vertex positions from GPU buffer
+    // Read vertex data from GPU buffer (keep mapped until faces are built)
     void* mappedVB = nullptr;
     D3D12_RANGE readRange = {0, dx12Mesh.vbv.SizeInBytes};
     HRESULT hr = dx12Mesh.vertexBuffer->Map(0, &readRange, &mappedVB);
@@ -4625,16 +4641,10 @@ void UnifiedRenderer::buildEditMeshFromGPU(const RHILoadedModel& model, int mesh
     const Vertex* srcVerts = static_cast<const Vertex*>(mappedVB);
     uint32_t vertexCount = dx12Mesh.vbv.SizeInBytes / sizeof(Vertex);
     
-    // Store UV data for later use (EditVertex doesn't store UV, Loop does)
-    std::vector<std::pair<float, float>> vertexUVs(vertexCount);
-    
     // Copy vertices to EditMesh
     for (uint32_t i = 0; i < vertexCount; i++) {
         outMesh.addVertex(srcVerts[i].position[0], srcVerts[i].position[1], srcVerts[i].position[2]);
-        vertexUVs[i] = {srcVerts[i].uv[0], srcVerts[i].uv[1]};
     }
-    
-    dx12Mesh.vertexBuffer->Unmap(0, nullptr);
     
     // Add edges from originalEdges
     if (gpuMesh.hasOriginalEdges) {
@@ -4644,19 +4654,32 @@ void UnifiedRenderer::buildEditMeshFromGPU(const RHILoadedModel& model, int mesh
     }
     
     // Add faces from originalFaces (quads/ngons)
+    // Store COMPLETE per-vertex attributes (normal, tangent, UV, color) in each Loop
+    // so that undo/redo/cancel can reconstruct GPU data perfectly
     int quadCount = 0, ngonCount = 0;
     if (gpuMesh.hasOriginalFaces) {
         for (const auto& srcFace : gpuMesh.originalFaces) {
             if (srcFace.vertexIndices.size() < 3) continue;
             
-            // Create face with loops
             luma::EditFace face;
             for (uint32_t vi : srcFace.vertexIndices) {
-                if (vi < outMesh.vertices.size()) {
+                if (vi < vertexCount) {
                     luma::Loop loop;
                     loop.vertexIndex = vi;
-                    loop.uv[0] = vertexUVs[vi].first;
-                    loop.uv[1] = vertexUVs[vi].second;
+                    // Copy ALL vertex attributes into the loop
+                    loop.uv[0] = srcVerts[vi].uv[0];
+                    loop.uv[1] = srcVerts[vi].uv[1];
+                    loop.normal[0] = srcVerts[vi].normal[0];
+                    loop.normal[1] = srcVerts[vi].normal[1];
+                    loop.normal[2] = srcVerts[vi].normal[2];
+                    loop.tangent[0] = srcVerts[vi].tangent[0];
+                    loop.tangent[1] = srcVerts[vi].tangent[1];
+                    loop.tangent[2] = srcVerts[vi].tangent[2];
+                    loop.tangent[3] = srcVerts[vi].tangent[3];
+                    loop.color[0] = srcVerts[vi].color[0];
+                    loop.color[1] = srcVerts[vi].color[1];
+                    loop.color[2] = srcVerts[vi].color[2];
+                    loop.color[3] = 1.0f;
                     face.loops.push_back(loop);
                 }
             }
@@ -4668,6 +4691,9 @@ void UnifiedRenderer::buildEditMeshFromGPU(const RHILoadedModel& model, int mesh
             }
         }
     }
+    
+    D3D12_RANGE noWrite = {0, 0};
+    dx12Mesh.vertexBuffer->Unmap(0, &noWrite);
     
     std::cout << "[buildEditMeshFromGPU] Created " << outMesh.vertices.size() 
               << " verts, " << outMesh.edges.size() << " edges, "
@@ -4685,7 +4711,7 @@ void UnifiedRenderer::buildEditMeshFromGPUTriangles(const RHILoadedModel& model,
     
     const auto& dx12Mesh = impl_->meshStorage[storageIdx];
     
-    // Read vertex positions
+    // Read vertex data (keep mapped until faces are built for attribute copying)
     void* mappedVB = nullptr;
     D3D12_RANGE readRange = {0, dx12Mesh.vbv.SizeInBytes};
     HRESULT hr = dx12Mesh.vertexBuffer->Map(0, &readRange, &mappedVB);
@@ -4699,30 +4725,57 @@ void UnifiedRenderer::buildEditMeshFromGPUTriangles(const RHILoadedModel& model,
         outMesh.addVertex(srcVerts[i].position[0], srcVerts[i].position[1], srcVerts[i].position[2]);
     }
     
-    dx12Mesh.vertexBuffer->Unmap(0, nullptr);
-    
-    // Read indices and create triangle faces
+    // Read indices and create triangle faces with complete loop attributes
     void* mappedIB = nullptr;
     D3D12_RANGE ibReadRange = {0, dx12Mesh.ibv.SizeInBytes};
     hr = dx12Mesh.indexBuffer->Map(0, &ibReadRange, &mappedIB);
-    if (FAILED(hr) || !mappedIB) return;
+    if (FAILED(hr) || !mappedIB) {
+        D3D12_RANGE noWrite = {0, 0};
+        dx12Mesh.vertexBuffer->Unmap(0, &noWrite);
+        return;
+    }
     
     const uint32_t* indices = static_cast<const uint32_t*>(mappedIB);
     uint32_t indexCount = dx12Mesh.indexCount;
     
-    // Create triangle faces
+    // Create triangle faces with full vertex attributes in loops
     for (uint32_t i = 0; i + 2 < indexCount; i += 3) {
-        std::vector<uint32_t> triVerts = { indices[i], indices[i+1], indices[i+2] };
-        outMesh.addFace(triVerts);
+        luma::EditFace face;
+        for (int j = 0; j < 3; j++) {
+            uint32_t vi = indices[i + j];
+            if (vi < vertexCount) {
+                luma::Loop loop;
+                loop.vertexIndex = vi;
+                loop.uv[0] = srcVerts[vi].uv[0];
+                loop.uv[1] = srcVerts[vi].uv[1];
+                loop.normal[0] = srcVerts[vi].normal[0];
+                loop.normal[1] = srcVerts[vi].normal[1];
+                loop.normal[2] = srcVerts[vi].normal[2];
+                loop.tangent[0] = srcVerts[vi].tangent[0];
+                loop.tangent[1] = srcVerts[vi].tangent[1];
+                loop.tangent[2] = srcVerts[vi].tangent[2];
+                loop.tangent[3] = srcVerts[vi].tangent[3];
+                loop.color[0] = srcVerts[vi].color[0];
+                loop.color[1] = srcVerts[vi].color[1];
+                loop.color[2] = srcVerts[vi].color[2];
+                loop.color[3] = 1.0f;
+                face.loops.push_back(loop);
+            }
+        }
+        if (face.loops.size() == 3) {
+            outMesh.faces.push_back(face);
+        }
     }
     
-    dx12Mesh.indexBuffer->Unmap(0, nullptr);
+    D3D12_RANGE noWrite = {0, 0};
+    dx12Mesh.indexBuffer->Unmap(0, &noWrite);
+    dx12Mesh.vertexBuffer->Unmap(0, &noWrite);
     
     std::cout << "[buildEditMeshFromGPUTriangles] Created " << outMesh.vertices.size() 
               << " verts, " << outMesh.faces.size() << " faces" << std::endl;
 }
 
-void UnifiedRenderer::updateMeshVerticesFromEditMesh(const RHILoadedModel& model, int meshIndex, const EditMesh& editMesh) {
+void UnifiedRenderer::updateMeshVerticesFromEditMesh(RHILoadedModel& model, int meshIndex, const EditMesh& editMesh) {
     if (meshIndex < 0 || meshIndex >= static_cast<int>(model.meshes.size())) return;
     
     size_t storageIdx = model.meshStorageStartIndex + meshIndex;
@@ -4731,27 +4784,227 @@ void UnifiedRenderer::updateMeshVerticesFromEditMesh(const RHILoadedModel& model
     auto& dx12Mesh = impl_->meshStorage[storageIdx];
     if (!dx12Mesh.vertexBuffer) return;
     
-    // Map vertex buffer (UPLOAD heap allows CPU write)
+    uint32_t gpuVertexCount = dx12Mesh.vbv.SizeInBytes / sizeof(Vertex);
+    uint32_t editVertexCount = static_cast<uint32_t>(editMesh.vertices.size());
+    
+    // If vertex count changed (topology edit: extrude, cut, merge, etc.),
+    // do a full buffer rebuild instead of just position update
+    if (editVertexCount != gpuVertexCount) {
+        rebuildMeshBuffersFromEditMesh(model, meshIndex, editMesh);
+        return;
+    }
+    
+    // Fast path: same vertex count — just update positions in-place
     void* mappedVB = nullptr;
     D3D12_RANGE readRange = {0, 0};  // We're writing, not reading
     HRESULT hr = dx12Mesh.vertexBuffer->Map(0, &readRange, &mappedVB);
     if (FAILED(hr) || !mappedVB) return;
     
     Vertex* dstVerts = static_cast<Vertex*>(mappedVB);
-    uint32_t gpuVertexCount = dx12Mesh.vbv.SizeInBytes / sizeof(Vertex);
-    uint32_t editVertexCount = static_cast<uint32_t>(editMesh.vertices.size());
-    uint32_t count = std::min(gpuVertexCount, editVertexCount);
     
     // Update only positions (preserve normals, UVs, tangents, etc.)
-    for (uint32_t i = 0; i < count; i++) {
+    for (uint32_t i = 0; i < editVertexCount; i++) {
         dstVerts[i].position[0] = editMesh.vertices[i].position[0];
         dstVerts[i].position[1] = editMesh.vertices[i].position[1];
         dstVerts[i].position[2] = editMesh.vertices[i].position[2];
     }
     
     // Unmap with write range
-    D3D12_RANGE writeRange = {0, count * sizeof(Vertex)};
+    D3D12_RANGE writeRange = {0, editVertexCount * sizeof(Vertex)};
     dx12Mesh.vertexBuffer->Unmap(0, &writeRange);
+}
+
+void UnifiedRenderer::rebuildMeshBuffersFromEditMesh(RHILoadedModel& model, int meshIndex, const EditMesh& editMesh, bool forceFromLoops) {
+    if (meshIndex < 0 || meshIndex >= static_cast<int>(model.meshes.size())) return;
+    
+    size_t storageIdx = model.meshStorageStartIndex + meshIndex;
+    if (storageIdx >= impl_->meshStorage.size()) return;
+    
+    auto& dx12Mesh = impl_->meshStorage[storageIdx];
+    auto& gpuMesh = model.meshes[meshIndex];
+    
+    uint32_t vertCount = static_cast<uint32_t>(editMesh.vertices.size());
+    if (vertCount == 0) return;
+    
+    uint32_t oldVertCount = dx12Mesh.vbv.SizeInBytes / sizeof(Vertex);
+    
+    // Determine the start index for vertices that need attribute computation from loops.
+    // If forceFromLoops is true (undo/redo), ALL vertices need recomputation because
+    // vertex ordering may have changed (e.g., removeUnusedVertices remaps indices).
+    // If false (normal topology ops), only NEW vertices (beyond old count) need it.
+    uint32_t recomputeFrom = forceFromLoops ? 0 : oldVertCount;
+    
+    std::vector<Vertex> newVertices(vertCount);
+    
+    if (!forceFromLoops && oldVertCount > 0 && dx12Mesh.vertexBuffer) {
+        // Preserve existing GPU vertex data for vertices 0..min(old,new)-1
+        void* readMapped = nullptr;
+        D3D12_RANGE readRange = {0, oldVertCount * sizeof(Vertex)};
+        HRESULT readHr = dx12Mesh.vertexBuffer->Map(0, &readRange, &readMapped);
+        if (SUCCEEDED(readHr) && readMapped) {
+            uint32_t copyCount = std::min(oldVertCount, vertCount);
+            memcpy(newVertices.data(), readMapped, copyCount * sizeof(Vertex));
+            D3D12_RANGE noWrite = {0, 0};
+            dx12Mesh.vertexBuffer->Unmap(0, &noWrite);
+        }
+    }
+    
+    // Update ALL vertex positions from EditMesh (positions may have changed)
+    for (uint32_t i = 0; i < vertCount; i++) {
+        newVertices[i].position[0] = editMesh.vertices[i].position[0];
+        newVertices[i].position[1] = editMesh.vertices[i].position[1];
+        newVertices[i].position[2] = editMesh.vertices[i].position[2];
+    }
+    
+    // Compute normals/UVs/tangents/colors from face loops for vertices >= recomputeFrom
+    if (vertCount > recomputeFrom) {
+        uint32_t recomputeCount = vertCount - recomputeFrom;
+        
+        // Initialize defaults
+        for (uint32_t i = recomputeFrom; i < vertCount; i++) {
+            newVertices[i].normal[0] = 0; newVertices[i].normal[1] = 0; newVertices[i].normal[2] = 0;
+            newVertices[i].tangent[0] = 1; newVertices[i].tangent[1] = 0;
+            newVertices[i].tangent[2] = 0; newVertices[i].tangent[3] = 1;
+            newVertices[i].uv[0] = 0; newVertices[i].uv[1] = 0;
+            newVertices[i].color[0] = 1; newVertices[i].color[1] = 1; newVertices[i].color[2] = 1;
+        }
+        
+        // Accumulate normals and collect UV/tangent/color from face loops
+        std::vector<int> normalCount(recomputeCount, 0);
+        std::vector<bool> hasUV(recomputeCount, false);
+        
+        for (const auto& face : editMesh.faces) {
+            for (const auto& loop : face.loops) {
+                uint32_t vi = loop.vertexIndex;
+                if (vi < recomputeFrom || vi >= vertCount) continue;
+                
+                uint32_t ni = vi - recomputeFrom;
+                
+                newVertices[vi].normal[0] += loop.normal[0];
+                newVertices[vi].normal[1] += loop.normal[1];
+                newVertices[vi].normal[2] += loop.normal[2];
+                normalCount[ni]++;
+                
+                if (!hasUV[ni]) {
+                    hasUV[ni] = true;
+                    newVertices[vi].uv[0] = loop.uv[0];
+                    newVertices[vi].uv[1] = loop.uv[1];
+                    newVertices[vi].tangent[0] = loop.tangent[0];
+                    newVertices[vi].tangent[1] = loop.tangent[1];
+                    newVertices[vi].tangent[2] = loop.tangent[2];
+                    newVertices[vi].tangent[3] = loop.tangent[3];
+                    newVertices[vi].color[0] = loop.color[0];
+                    newVertices[vi].color[1] = loop.color[1];
+                    newVertices[vi].color[2] = loop.color[2];
+                }
+            }
+        }
+        
+        // Normalize accumulated normals
+        for (uint32_t i = recomputeFrom; i < vertCount; i++) {
+            uint32_t ni = i - recomputeFrom;
+            if (normalCount[ni] > 0) {
+                float len = std::sqrt(
+                    newVertices[i].normal[0] * newVertices[i].normal[0] +
+                    newVertices[i].normal[1] * newVertices[i].normal[1] +
+                    newVertices[i].normal[2] * newVertices[i].normal[2]);
+                if (len > 1e-6f) {
+                    newVertices[i].normal[0] /= len;
+                    newVertices[i].normal[1] /= len;
+                    newVertices[i].normal[2] /= len;
+                }
+            } else {
+                newVertices[i].normal[1] = 1.0f; // Default up
+            }
+        }
+    }
+    
+    // === 2. Triangulate EditMesh faces to build index buffer ===
+    std::vector<uint32_t> newIndices;
+    newIndices.reserve(editMesh.faces.size() * 3); // Rough estimate
+    
+    for (const auto& face : editMesh.faces) {
+        if (face.loops.size() < 3) continue;
+        
+        // Fan triangulation: (v0, v1, v2), (v0, v2, v3), ..., (v0, vn-2, vn-1)
+        uint32_t v0 = face.loops[0].vertexIndex;
+        for (size_t i = 1; i + 1 < face.loops.size(); i++) {
+            newIndices.push_back(v0);
+            newIndices.push_back(face.loops[i].vertexIndex);
+            newIndices.push_back(face.loops[i + 1].vertexIndex);
+        }
+    }
+    
+    // === 3. Recreate GPU vertex buffer ===
+    const UINT vbSize = static_cast<UINT>(newVertices.size() * sizeof(Vertex));
+    
+    D3D12_HEAP_PROPERTIES heapProps{}; heapProps.Type = D3D12_HEAP_TYPE_UPLOAD;
+    D3D12_RESOURCE_DESC bufDesc{}; bufDesc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+    bufDesc.Width = vbSize; bufDesc.Height = 1; bufDesc.DepthOrArraySize = 1; bufDesc.MipLevels = 1;
+    bufDesc.SampleDesc.Count = 1; bufDesc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+    
+    dx12Mesh.vertexBuffer.Reset();
+    HRESULT hr = impl_->device->CreateCommittedResource(&heapProps, D3D12_HEAP_FLAG_NONE, &bufDesc,
+        D3D12_RESOURCE_STATE_GENERIC_READ, nullptr, IID_PPV_ARGS(&dx12Mesh.vertexBuffer));
+    if (FAILED(hr)) return;
+    
+    void* mapped = nullptr;
+    dx12Mesh.vertexBuffer->Map(0, nullptr, &mapped);
+    memcpy(mapped, newVertices.data(), vbSize);
+    dx12Mesh.vertexBuffer->Unmap(0, nullptr);
+    dx12Mesh.vbv.BufferLocation = dx12Mesh.vertexBuffer->GetGPUVirtualAddress();
+    dx12Mesh.vbv.SizeInBytes = vbSize;
+    dx12Mesh.vbv.StrideInBytes = sizeof(Vertex);
+    
+    // === 4. Recreate GPU index buffer ===
+    const UINT ibSize = static_cast<UINT>(newIndices.size() * sizeof(uint32_t));
+    if (ibSize > 0) {
+        bufDesc.Width = ibSize;
+        dx12Mesh.indexBuffer.Reset();
+        hr = impl_->device->CreateCommittedResource(&heapProps, D3D12_HEAP_FLAG_NONE, &bufDesc,
+            D3D12_RESOURCE_STATE_GENERIC_READ, nullptr, IID_PPV_ARGS(&dx12Mesh.indexBuffer));
+        if (SUCCEEDED(hr)) {
+            dx12Mesh.indexBuffer->Map(0, nullptr, &mapped);
+            memcpy(mapped, newIndices.data(), ibSize);
+            dx12Mesh.indexBuffer->Unmap(0, nullptr);
+            dx12Mesh.ibv.BufferLocation = dx12Mesh.indexBuffer->GetGPUVirtualAddress();
+            dx12Mesh.ibv.SizeInBytes = ibSize;
+            dx12Mesh.ibv.Format = DXGI_FORMAT_R32_UINT;
+            dx12Mesh.indexCount = static_cast<uint32_t>(newIndices.size());
+        }
+    }
+    
+    // === 5. Update RHIGPUMesh metadata ===
+    gpuMesh.indexCount = static_cast<uint32_t>(newIndices.size());
+    
+    // === 6. Rebuild edge index buffer ===
+    gpuMesh.originalEdges.clear();
+    gpuMesh.originalEdges.reserve(editMesh.edges.size());
+    for (const auto& edge : editMesh.edges) {
+        gpuMesh.originalEdges.push_back({edge.v0, edge.v1});
+    }
+    gpuMesh.hasOriginalEdges = !gpuMesh.originalEdges.empty();
+    
+    dx12Mesh.edgeIndexBuffer.Reset();
+    dx12Mesh.edgeIndexCount = 0;
+    if (gpuMesh.hasOriginalEdges) {
+        impl_->buildEdgeIndexBuffer(dx12Mesh, gpuMesh.originalEdges);
+    }
+    
+    // Update skinned vertices if needed
+    if (gpuMesh.hasSkinning) {
+        gpuMesh.skinnedVertices.resize(vertCount);
+        for (uint32_t i = 0; i < vertCount; i++) {
+            gpuMesh.skinnedVertices[i].position[0] = newVertices[i].position[0];
+            gpuMesh.skinnedVertices[i].position[1] = newVertices[i].position[1];
+            gpuMesh.skinnedVertices[i].position[2] = newVertices[i].position[2];
+            gpuMesh.skinnedVertices[i].normal[0] = newVertices[i].normal[0];
+            gpuMesh.skinnedVertices[i].normal[1] = newVertices[i].normal[1];
+            gpuMesh.skinnedVertices[i].normal[2] = newVertices[i].normal[2];
+            gpuMesh.skinnedVertices[i].uv[0] = newVertices[i].uv[0];
+            gpuMesh.skinnedVertices[i].uv[1] = newVertices[i].uv[1];
+        }
+    }
 }
 
 void UnifiedRenderer::rebuildEdgeIndexBuffer(RHILoadedModel& model, int meshIndex, const EditMesh& editMesh) {
@@ -4777,6 +5030,136 @@ void UnifiedRenderer::rebuildEdgeIndexBuffer(RHILoadedModel& model, int meshInde
     
     // Build new GPU edge index buffer
     impl_->buildEdgeIndexBuffer(dx12Mesh, gpuMesh.originalEdges);
+}
+
+// ===== Backup/Restore GPU mesh data (for edit mode baseline) =====
+
+MeshGPUBackup UnifiedRenderer::backupMeshGPUData(const RHILoadedModel& model, int meshIndex) {
+    MeshGPUBackup backup;
+    
+    if (meshIndex < 0 || meshIndex >= static_cast<int>(model.meshes.size())) return backup;
+    
+    size_t storageIdx = model.meshStorageStartIndex + meshIndex;
+    if (storageIdx >= impl_->meshStorage.size()) return backup;
+    
+    const auto& dx12Mesh = impl_->meshStorage[storageIdx];
+    const auto& gpuMesh = model.meshes[meshIndex];
+    
+    // Read vertex buffer
+    if (dx12Mesh.vertexBuffer && dx12Mesh.vbv.SizeInBytes > 0) {
+        backup.vertexData.resize(dx12Mesh.vbv.SizeInBytes);
+        void* mapped = nullptr;
+        D3D12_RANGE readRange = {0, dx12Mesh.vbv.SizeInBytes};
+        HRESULT hr = dx12Mesh.vertexBuffer->Map(0, &readRange, &mapped);
+        if (SUCCEEDED(hr) && mapped) {
+            memcpy(backup.vertexData.data(), mapped, dx12Mesh.vbv.SizeInBytes);
+            D3D12_RANGE noWrite = {0, 0};
+            dx12Mesh.vertexBuffer->Unmap(0, &noWrite);
+        }
+    }
+    
+    // Read index buffer
+    if (dx12Mesh.indexBuffer && dx12Mesh.ibv.SizeInBytes > 0) {
+        uint32_t indexCount = dx12Mesh.ibv.SizeInBytes / sizeof(uint32_t);
+        backup.indexData.resize(indexCount);
+        void* mapped = nullptr;
+        D3D12_RANGE readRange = {0, dx12Mesh.ibv.SizeInBytes};
+        HRESULT hr = dx12Mesh.indexBuffer->Map(0, &readRange, &mapped);
+        if (SUCCEEDED(hr) && mapped) {
+            memcpy(backup.indexData.data(), mapped, dx12Mesh.ibv.SizeInBytes);
+            D3D12_RANGE noWrite = {0, 0};
+            dx12Mesh.indexBuffer->Unmap(0, &noWrite);
+        }
+    }
+    
+    // Copy metadata
+    backup.originalEdges = gpuMesh.originalEdges;
+    backup.hasOriginalEdges = gpuMesh.hasOriginalEdges;
+    backup.originalFaces = gpuMesh.originalFaces;
+    backup.hasOriginalFaces = gpuMesh.hasOriginalFaces;
+    backup.indexCount = gpuMesh.indexCount;
+    backup.skinnedVertices = gpuMesh.skinnedVertices;
+    backup.hasSkinning = gpuMesh.hasSkinning;
+    backup.valid = true;
+    
+    printf("[GPU Backup] Saved mesh %d: %zu bytes VB, %zu indices\n",
+           meshIndex, backup.vertexData.size(), backup.indexData.size());
+    
+    return backup;
+}
+
+void UnifiedRenderer::restoreMeshGPUData(RHILoadedModel& model, int meshIndex, const MeshGPUBackup& backup) {
+    if (!backup.valid) return;
+    if (meshIndex < 0 || meshIndex >= static_cast<int>(model.meshes.size())) return;
+    
+    size_t storageIdx = model.meshStorageStartIndex + meshIndex;
+    if (storageIdx >= impl_->meshStorage.size()) return;
+    
+    auto& dx12Mesh = impl_->meshStorage[storageIdx];
+    auto& gpuMesh = model.meshes[meshIndex];
+    
+    D3D12_HEAP_PROPERTIES heapProps{}; heapProps.Type = D3D12_HEAP_TYPE_UPLOAD;
+    D3D12_RESOURCE_DESC bufDesc{}; bufDesc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+    bufDesc.Height = 1; bufDesc.DepthOrArraySize = 1; bufDesc.MipLevels = 1;
+    bufDesc.SampleDesc.Count = 1; bufDesc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+    
+    // Restore vertex buffer
+    if (!backup.vertexData.empty()) {
+        UINT vbSize = static_cast<UINT>(backup.vertexData.size());
+        bufDesc.Width = vbSize;
+        
+        dx12Mesh.vertexBuffer.Reset();
+        HRESULT hr = impl_->device->CreateCommittedResource(&heapProps, D3D12_HEAP_FLAG_NONE, &bufDesc,
+            D3D12_RESOURCE_STATE_GENERIC_READ, nullptr, IID_PPV_ARGS(&dx12Mesh.vertexBuffer));
+        if (SUCCEEDED(hr)) {
+            void* mapped = nullptr;
+            dx12Mesh.vertexBuffer->Map(0, nullptr, &mapped);
+            memcpy(mapped, backup.vertexData.data(), vbSize);
+            dx12Mesh.vertexBuffer->Unmap(0, nullptr);
+            dx12Mesh.vbv.BufferLocation = dx12Mesh.vertexBuffer->GetGPUVirtualAddress();
+            dx12Mesh.vbv.SizeInBytes = vbSize;
+            dx12Mesh.vbv.StrideInBytes = sizeof(Vertex);
+        }
+    }
+    
+    // Restore index buffer
+    if (!backup.indexData.empty()) {
+        UINT ibSize = static_cast<UINT>(backup.indexData.size() * sizeof(uint32_t));
+        bufDesc.Width = ibSize;
+        
+        dx12Mesh.indexBuffer.Reset();
+        HRESULT hr = impl_->device->CreateCommittedResource(&heapProps, D3D12_HEAP_FLAG_NONE, &bufDesc,
+            D3D12_RESOURCE_STATE_GENERIC_READ, nullptr, IID_PPV_ARGS(&dx12Mesh.indexBuffer));
+        if (SUCCEEDED(hr)) {
+            void* mapped = nullptr;
+            dx12Mesh.indexBuffer->Map(0, nullptr, &mapped);
+            memcpy(mapped, backup.indexData.data(), ibSize);
+            dx12Mesh.indexBuffer->Unmap(0, nullptr);
+            dx12Mesh.ibv.BufferLocation = dx12Mesh.indexBuffer->GetGPUVirtualAddress();
+            dx12Mesh.ibv.SizeInBytes = ibSize;
+            dx12Mesh.ibv.Format = DXGI_FORMAT_R32_UINT;
+            dx12Mesh.indexCount = static_cast<uint32_t>(backup.indexData.size());
+        }
+    }
+    
+    // Restore metadata
+    gpuMesh.originalEdges = backup.originalEdges;
+    gpuMesh.hasOriginalEdges = backup.hasOriginalEdges;
+    gpuMesh.originalFaces = backup.originalFaces;
+    gpuMesh.hasOriginalFaces = backup.hasOriginalFaces;
+    gpuMesh.indexCount = backup.indexCount;
+    gpuMesh.skinnedVertices = backup.skinnedVertices;
+    gpuMesh.hasSkinning = backup.hasSkinning;
+    
+    // Rebuild edge index buffer from restored originalEdges
+    dx12Mesh.edgeIndexBuffer.Reset();
+    dx12Mesh.edgeIndexCount = 0;
+    if (gpuMesh.hasOriginalEdges && !gpuMesh.originalEdges.empty()) {
+        impl_->buildEdgeIndexBuffer(dx12Mesh, gpuMesh.originalEdges);
+    }
+    
+    printf("[GPU Restore] Restored mesh %d: %zu bytes VB, %zu indices\n",
+           meshIndex, backup.vertexData.size(), backup.indexData.size());
 }
 
 bool UnifiedRenderer::getViewProjectionInverse(float* outMatrix16) const {
@@ -5274,6 +5657,200 @@ void* UnifiedRenderer::getNativeCommandEncoder() const { return impl_ ? impl_->c
 void* UnifiedRenderer::getNativeSrvHeap() const { return impl_ ? impl_->srvHeap.Get() : nullptr; }
 
 void UnifiedRenderer::waitForGPU() { if (impl_) impl_->waitForGPU(); }
+
+// ===== Dynamic Material Shader Compilation =====
+
+void* UnifiedRenderer::compileMaterialShader(const std::string& hlslSource,
+                                              const std::string& vsEntry,
+                                              const std::string& psEntry) {
+    if (!impl_ || !impl_->ready) return nullptr;
+    
+    impl_->materialShaderError.clear();
+    
+    // Custom include handler for pbr_common.hlsli and procedural.hlsli
+    // For now, we concatenate the includes inline
+    // In production, use a D3DInclude handler
+    
+    // Load include files
+    std::string pbrCommon = loadShaderFile(impl_->shaderBasePath + "pbr_common.hlsli");
+    std::string procedural = loadShaderFile(impl_->shaderBasePath + "procedural.hlsli");
+    
+    // Replace #include directives with actual content
+    std::string fullSource = hlslSource;
+    
+    // Simple include replacement
+    auto replaceInclude = [](std::string& src, const std::string& inc, const std::string& content) {
+        std::string pattern = "#include \"" + inc + "\"";
+        size_t pos = src.find(pattern);
+        if (pos != std::string::npos) {
+            src.replace(pos, pattern.size(), "// --- " + inc + " ---\n" + content + "\n// --- end " + inc + " ---\n");
+        }
+    };
+    
+    replaceInclude(fullSource, "pbr_common.hlsli", pbrCommon);
+    replaceInclude(fullSource, "procedural.hlsli", procedural);
+    
+    ComPtr<ID3DBlob> vs, ps, errorBlob;
+    UINT flags = 0;
+#ifdef _DEBUG
+    flags = D3DCOMPILE_DEBUG | D3DCOMPILE_SKIP_OPTIMIZATION;
+#endif
+    
+    // Compile VS
+    HRESULT hr = D3DCompile(fullSource.c_str(), fullSource.size(), "material.hlsl", nullptr, nullptr,
+                            vsEntry.c_str(), "vs_5_0", flags, 0, &vs, &errorBlob);
+    if (FAILED(hr)) {
+        if (errorBlob) impl_->materialShaderError = std::string((char*)errorBlob->GetBufferPointer());
+        std::cerr << "[material shader] VS compile error: " << impl_->materialShaderError << std::endl;
+        return nullptr;
+    }
+    
+    // Compile PS
+    hr = D3DCompile(fullSource.c_str(), fullSource.size(), "material.hlsl", nullptr, nullptr,
+                    psEntry.c_str(), "ps_5_0", flags, 0, &ps, &errorBlob);
+    if (FAILED(hr)) {
+        if (errorBlob) impl_->materialShaderError = std::string((char*)errorBlob->GetBufferPointer());
+        std::cerr << "[material shader] PS compile error: " << impl_->materialShaderError << std::endl;
+        return nullptr;
+    }
+    
+    // Create PSO (same layout as PBR pipeline)
+    D3D12_INPUT_ELEMENT_DESC inputLayout[] = {
+        {"POSITION", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 0, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0},
+        {"NORMAL", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 12, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0},
+        {"TANGENT", 0, DXGI_FORMAT_R32G32B32A32_FLOAT, 0, 24, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0},
+        {"TEXCOORD", 0, DXGI_FORMAT_R32G32_FLOAT, 0, 40, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0},
+        {"COLOR", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 48, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0},
+    };
+    
+    D3D12_GRAPHICS_PIPELINE_STATE_DESC psoDesc{};
+    psoDesc.InputLayout = {inputLayout, _countof(inputLayout)};
+    psoDesc.pRootSignature = impl_->rootSignature.Get();
+    psoDesc.VS = {vs->GetBufferPointer(), vs->GetBufferSize()};
+    psoDesc.PS = {ps->GetBufferPointer(), ps->GetBufferSize()};
+    psoDesc.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID;
+    psoDesc.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
+    psoDesc.RasterizerState.DepthClipEnable = TRUE;
+    psoDesc.BlendState.RenderTarget[0].BlendEnable = TRUE;
+    psoDesc.BlendState.RenderTarget[0].SrcBlend = D3D12_BLEND_SRC_ALPHA;
+    psoDesc.BlendState.RenderTarget[0].DestBlend = D3D12_BLEND_INV_SRC_ALPHA;
+    psoDesc.BlendState.RenderTarget[0].BlendOp = D3D12_BLEND_OP_ADD;
+    psoDesc.BlendState.RenderTarget[0].SrcBlendAlpha = D3D12_BLEND_ONE;
+    psoDesc.BlendState.RenderTarget[0].DestBlendAlpha = D3D12_BLEND_ZERO;
+    psoDesc.BlendState.RenderTarget[0].BlendOpAlpha = D3D12_BLEND_OP_ADD;
+    psoDesc.BlendState.RenderTarget[0].RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
+    psoDesc.DepthStencilState.DepthEnable = TRUE;
+    psoDesc.DepthStencilState.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ALL;
+    psoDesc.DepthStencilState.DepthFunc = D3D12_COMPARISON_FUNC_LESS;
+    psoDesc.SampleMask = UINT_MAX;
+    psoDesc.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+    psoDesc.NumRenderTargets = 1;
+    psoDesc.RTVFormats[0] = impl_->postProcessEnabled ? DXGI_FORMAT_R16G16B16A16_FLOAT : DXGI_FORMAT_R8G8B8A8_UNORM;
+    psoDesc.DSVFormat = DXGI_FORMAT_D32_FLOAT;
+    psoDesc.SampleDesc.Count = 1;
+    
+    ComPtr<ID3D12PipelineState> newPSO;
+    hr = impl_->device->CreateGraphicsPipelineState(&psoDesc, IID_PPV_ARGS(&newPSO));
+    if (FAILED(hr)) {
+        impl_->materialShaderError = "Failed to create PSO for material shader";
+        std::cerr << "[material shader] PSO creation failed" << std::endl;
+        return nullptr;
+    }
+    
+    // Store and return raw pointer as handle
+    ID3D12PipelineState* rawPtr = newPSO.Get();
+    impl_->materialPSOs[rawPtr] = std::move(newPSO);
+    
+    std::cerr << "[material shader] Successfully compiled material shader" << std::endl;
+    return rawPtr;
+}
+
+void UnifiedRenderer::renderModelWithMaterial(const RHILoadedModel& model, const float* worldMatrix,
+                                               void* materialPSO,
+                                               const void* materialCBData, uint32_t materialCBSize) {
+    if (!impl_ || !impl_->ready || !materialPSO) return;
+    
+    auto psoIt = impl_->materialPSOs.find(materialPSO);
+    if (psoIt == impl_->materialPSOs.end()) return;
+    
+    auto* cmdList = impl_->cmdList.Get();
+    
+    // Set the material PSO
+    cmdList->SetPipelineState(psoIt->second.Get());
+    cmdList->SetGraphicsRootSignature(impl_->rootSignature.Get());
+    cmdList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    
+    // Bind SRV heap
+    ID3D12DescriptorHeap* heaps[] = { impl_->srvHeap.Get() };
+    cmdList->SetDescriptorHeaps(1, heaps);
+    
+    // Render each mesh
+    for (const auto& gpuMesh : model.meshes) {
+        if (gpuMesh.meshIndex >= impl_->meshStorage.size()) continue;
+        auto& dx12Mesh = impl_->meshStorage[gpuMesh.meshIndex];
+        if (!dx12Mesh.vertexBuffer || !dx12Mesh.indexBuffer) continue;
+        
+        // Set constants (same as regular render)
+        auto& c = impl_->constants;
+        
+        // Build world matrix
+        if (worldMatrix) {
+            memcpy(c.world, worldMatrix, 64);
+        }
+        
+        // Build WVP
+        float wvp[16];
+        // ... matrices would be computed here using stored view/proj
+        // For now, use the same path as renderModel
+        
+        // Upload constants
+        UINT drawOffset = impl_->currentDrawIndex * impl_->kAlignedConstantSize;
+        memcpy(impl_->constantBufferMapped + drawOffset, &c, sizeof(c));
+        
+        D3D12_GPU_VIRTUAL_ADDRESS cbAddr = impl_->constantBuffer->GetGPUVirtualAddress() + drawOffset;
+        cmdList->SetGraphicsRootConstantBufferView(0, cbAddr);
+        impl_->currentDrawIndex++;
+        
+        // Bind textures
+        D3D12_GPU_DESCRIPTOR_HANDLE srvStart = impl_->srvHeap->GetGPUDescriptorHandleForHeapStart();
+        
+        auto bindTexture = [&](UINT slot, UINT srvIndex) {
+            D3D12_GPU_DESCRIPTOR_HANDLE handle = srvStart;
+            handle.ptr += srvIndex * impl_->srvDescSize;
+            cmdList->SetGraphicsRootDescriptorTable(slot, handle);
+        };
+        
+        // Bind standard textures (diffuse, normal, specular, shadow, IBL)
+        bindTexture(1, dx12Mesh.diffuseSrvIndex > 0 ? dx12Mesh.diffuseSrvIndex : impl_->defaultTextureSrvIndex);
+        bindTexture(2, dx12Mesh.normalSrvIndex > 0 ? dx12Mesh.normalSrvIndex : impl_->defaultTextureSrvIndex);
+        bindTexture(3, dx12Mesh.specularSrvIndex > 0 ? dx12Mesh.specularSrvIndex : impl_->defaultTextureSrvIndex);
+        
+        // Shadow & IBL
+        if (impl_->shadowMapSrvIndex > 0) bindTexture(4, impl_->shadowMapSrvIndex);
+        else bindTexture(4, impl_->defaultTextureSrvIndex);
+        
+        // Note: IBL textures (slots 5, 6, 7) would be bound here too
+        bindTexture(5, impl_->defaultTextureSrvIndex);
+        bindTexture(6, impl_->defaultTextureSrvIndex);
+        bindTexture(7, impl_->defaultTextureSrvIndex);
+        
+        // Draw
+        cmdList->IASetVertexBuffers(0, 1, &dx12Mesh.vbv);
+        cmdList->IASetIndexBuffer(&dx12Mesh.ibv);
+        cmdList->DrawIndexedInstanced(dx12Mesh.indexCount, 1, 0, 0, 0);
+    }
+}
+
+const std::string& UnifiedRenderer::getMaterialShaderError() const {
+    static std::string empty;
+    return impl_ ? impl_->materialShaderError : empty;
+}
+
+void UnifiedRenderer::releaseMaterialShader(void* materialPSO) {
+    if (!impl_ || !materialPSO) return;
+    impl_->waitForGPU();
+    impl_->materialPSOs.erase(materialPSO);
+}
 
 }  // namespace luma
 

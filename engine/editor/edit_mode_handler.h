@@ -28,6 +28,13 @@ enum class EditSubMode {
     Material    // Material editing
 };
 
+// Deferred action for edit mode (processed at start of frame to avoid GPU sync issues)
+enum class EditModeAction {
+    None,
+    SaveAndExit,    // Keep current state, exit edit mode
+    CancelAndExit   // Restore baseline, exit edit mode
+};
+
 // Edit Mode Handler
 class EditModeHandler : public EditorModeHandler {
 public:
@@ -54,6 +61,37 @@ public:
     // EditMesh management
     void setEditMesh(EditMesh* mesh);
     EditMesh* getEditMesh() const { return m_editMesh; }
+    
+    // Undo/Redo for mesh editing operations
+    bool undoMeshEdit();
+    bool redoMeshEdit();
+    
+    // ===== History Baseline System (Maya-like Freeze History) =====
+    
+    // saveBaseline(): Snapshot current GPU + EditMesh state as the committed baseline.
+    //   Called when entering edit mode and after commitChanges().
+    void saveBaseline();
+    
+    // commitChanges(): "Freeze history" — saves current state as new baseline,
+    //   clears undo/redo stacks. Future undo/cancel will only go back to this point.
+    void commitChanges();
+    
+    // Whether there are uncommitted changes (edits since last commit/baseline)
+    bool hasUncommittedChanges() const;
+    
+    // ===== Deferred Actions =====
+    // These set flags processed at frame start by processPendingActions().
+    // This avoids GPU sync issues (destroying buffers while draw calls are in-flight).
+    
+    // Request save & exit: keep current mesh state, exit to Scene mode
+    void requestSaveAndExit() { m_pendingAction = EditModeAction::SaveAndExit; }
+    
+    // Request cancel: restore baseline GPU/mesh state, exit to Scene mode
+    void requestCancel() { m_pendingAction = EditModeAction::CancelAndExit; }
+    
+    // Process deferred actions. Call at START of frame, before any draw commands.
+    // Returns the action that was processed. Caller handles mode switching if != None.
+    EditModeAction processPendingActions();
     
     // Selection mode (vertex, edge, face)
     void setSelectionMode(SelectionMode mode);
@@ -237,7 +275,41 @@ public:
         setViewMode(viewMode);
         setSelectedMeshIndex(meshIndex);
         
-        // 4) Edit tool → gizmo mode
+        // 4) Update toolbar selection counts for UI hints
+        if (m_editMesh) {
+            toolbar.selectedFaceCount = static_cast<int>(m_editMesh->selectedFaces.size());
+            toolbar.selectedEdgeCount = static_cast<int>(m_editMesh->selectedEdges.size());
+            toolbar.selectedVertexCount = static_cast<int>(m_editMesh->selectedVertices.size());
+        }
+        
+        // 5a) Track tool changes and reset interactive state
+        if (toolbar.currentTool != m_currentEditTool) {
+            resetToolState();
+            m_currentEditTool = toolbar.currentTool;
+        }
+        
+        // 5b) Handle geometry tool "Apply" actions (from sidebar buttons)
+        if (toolbar.applyRequested) {
+            toolbar.applyRequested = false;
+            using ET = EditModeToolbar::EditTool;
+            switch (toolbar.currentTool) {
+                case ET::LoopCut:
+                    performLoopCut(toolbar.loopCutFactor);
+                    break;
+                case ET::Cut:
+                    performCut();
+                    break;
+                case ET::MergeFaces:
+                    performMergeFaces();
+                    break;
+                case ET::MergeByDistance:
+                    performMergeByDistance(toolbar.mergeDistance);
+                    break;
+                default: break;
+            }
+        }
+        
+        // 6) Edit tool → gizmo mode
         using ET = EditModeToolbar::EditTool;
         switch (toolbar.currentTool) {
             case ET::Move:
@@ -260,12 +332,149 @@ public:
                 setExtrudeMode(true);
                 setGizmoMode(GizmoMode::Translate);
                 break;
+            // Geometry tools — these are "action" tools (immediate operation, no gizmo)
+            case ET::LoopCut:
+            case ET::Cut:
+            case ET::MergeFaces:
+            case ET::MergeByDistance:
+                setShowGizmo(false);
+                setExtrudeMode(false);
+                break;
             case ET::Select:
             default:
                 setShowGizmo(false);
                 setExtrudeMode(false);
                 break;
         }
+    }
+    
+    // =========================================================================
+    // Geometry Operations — triggered from toolbar buttons
+    // =========================================================================
+    
+    // Loop Cut: insert edge loop through a specific edge (or selected edge as fallback)
+    bool performLoopCut(float factor = 0.5f, uint32_t edgeIdx = UINT32_MAX) {
+        if (!m_editMesh) { printf("[LoopCut] No editMesh!\n"); return false; }
+        
+        // Use provided edge, or fall back to selected edge
+        if (edgeIdx == UINT32_MAX) {
+            if (m_editMesh->selectedEdges.empty()) { printf("[LoopCut] No edge!\n"); return false; }
+            edgeIdx = *m_editMesh->selectedEdges.begin();
+        }
+        
+        printf("[LoopCut] Applying: edge=%u, factor=%.3f, totalEdges=%zu\n",
+               edgeIdx, factor, m_editMesh->edges.size());
+        
+        std::vector<uint32_t> newVerts = m_editMesh->insertEdgeLoop(edgeIdx, factor);
+        
+        if (newVerts.empty()) { printf("[LoopCut] insertEdgeLoop returned 0 verts!\n"); return false; }
+        
+        printf("[LoopCut] Success: %zu new vertices created\n", newVerts.size());
+        syncEditMeshToGPU();
+        rebuildGPUEdgeIndexBuffer();
+        m_dirty = true;
+        return true;
+    }
+    
+    // Apply the knife tool cut (using collected cut points)
+    bool applyKnifeCut() {
+        if (!m_editMesh || m_knife.points.size() < 2) return false;
+        
+        // For now, use the first two cut points
+        auto& p0 = m_knife.points[0];
+        auto& p1 = m_knife.points[1];
+        
+        // Find which face contains both edges
+        // Build edge-to-face adjacency
+        for (uint32_t fi = 0; fi < static_cast<uint32_t>(m_editMesh->faces.size()); fi++) {
+            const auto& face = m_editMesh->faces[fi];
+            bool hasEdge0 = false, hasEdge1 = false;
+            int loopIdx0 = -1, loopIdx1 = -1;
+            
+            for (int i = 0; i < static_cast<int>(face.loops.size()); i++) {
+                int next = (i + 1) % face.loops.size();
+                uint32_t a = face.loops[i].vertexIndex;
+                uint32_t b = face.loops[next].vertexIndex;
+                
+                auto key = std::make_pair(std::min(a,b), std::max(a,b));
+                auto key0 = std::make_pair(
+                    std::min(m_editMesh->edges[p0.edgeIndex].v0, m_editMesh->edges[p0.edgeIndex].v1),
+                    std::max(m_editMesh->edges[p0.edgeIndex].v0, m_editMesh->edges[p0.edgeIndex].v1));
+                auto key1 = std::make_pair(
+                    std::min(m_editMesh->edges[p1.edgeIndex].v0, m_editMesh->edges[p1.edgeIndex].v1),
+                    std::max(m_editMesh->edges[p1.edgeIndex].v0, m_editMesh->edges[p1.edgeIndex].v1));
+                
+                if (key == key0) { hasEdge0 = true; loopIdx0 = i; }
+                if (key == key1) { hasEdge1 = true; loopIdx1 = i; }
+            }
+            
+            if (hasEdge0 && hasEdge1 && loopIdx0 != loopIdx1) {
+                // Found the face — cut it
+                if (m_editMesh->cutFaceOnEdges(fi, loopIdx0, p0.t, loopIdx1, p1.t)) {
+                    syncEditMeshToGPU();
+                    rebuildGPUEdgeIndexBuffer();
+                    m_dirty = true;
+                    
+                    // Reset knife state for next cut
+                    m_knife.points.clear();
+                    m_knife.active = false;
+                    return true;
+                }
+            }
+        }
+        
+        // Cut points aren't on the same face — reset
+        m_knife.points.clear();
+        m_knife.active = false;
+        return false;
+    }
+    
+    // Cut: split a selected face by connecting two selected vertices
+    bool performCut() {
+        if (!m_editMesh) return false;
+        
+        // Need exactly one face selected and at least two vertices selected
+        if (m_editMesh->selectedFaces.size() != 1) return false;
+        if (m_editMesh->selectedVertices.size() < 2) return false;
+        
+        uint32_t faceIdx = *m_editMesh->selectedFaces.begin();
+        
+        // Use the first two selected vertices
+        auto it = m_editMesh->selectedVertices.begin();
+        uint32_t v0 = *it++;
+        uint32_t v1 = *it;
+        
+        if (!m_editMesh->splitFace(faceIdx, v0, v1)) return false;
+        
+        syncEditMeshToGPU();
+        rebuildGPUEdgeIndexBuffer();
+        m_dirty = true;
+        return true;
+    }
+    
+    // Merge Faces: combine selected adjacent faces into one polygon
+    bool performMergeFaces() {
+        if (!m_editMesh) return false;
+        if (m_editMesh->selectedFaces.size() < 2) return false;
+        
+        if (!m_editMesh->mergeSelectedFaces()) return false;
+        
+        syncEditMeshToGPU();
+        rebuildGPUEdgeIndexBuffer();
+        m_dirty = true;
+        return true;
+    }
+    
+    // Merge by Distance: merge nearby vertices
+    bool performMergeByDistance(float threshold) {
+        if (!m_editMesh) return false;
+        
+        m_editMesh->mergeByDistance(threshold);
+        
+        syncEditMeshToGPU();
+        rebuildGPUEdgeIndexBuffer();
+        m_dirty = true;
+        return true;
     }
     
     // Perform the extrude operation based on current selection mode
@@ -320,6 +529,17 @@ private:
     int m_selectedMeshIndex = -1;
     bool m_dirty = false;
     
+    // Baseline state (for Cancel / Commit)
+    MeshGPUBackup m_baselineGPU;              // GPU vertex/index data at commit point
+    EditMeshSnapshot m_baselineEditMesh;       // EditMesh state at commit point
+    bool m_hasBaseline = false;               // Whether a baseline has been saved
+    
+    // Deferred action (set by UI, processed at frame start)
+    EditModeAction m_pendingAction = EditModeAction::None;
+    
+    // Internal: restore baseline GPU + EditMesh state
+    void cancelChanges();
+    
     // UI state
     bool m_showOriginalEdges = true;
     bool m_showAllEdges = false;
@@ -338,11 +558,45 @@ private:
     bool m_showGizmo = true;
     bool m_extrudeMode = false;
     
+    // Current tool (for interactive tools like LoopCut, Knife)
+    EditModeToolbar::EditTool m_currentEditTool = EditModeToolbar::EditTool::Select;
+    
+    // ===== Interactive Tool State =====
+    
+    // Loop Cut tool (Blender Ctrl+R style)
+    struct LoopCutState {
+        enum class Phase { Hover, Slide };  // Hover=picking edge, Slide=adjusting factor
+        Phase phase = Phase::Hover;
+        uint32_t hoverEdge = UINT32_MAX;    // Edge under mouse cursor
+        uint32_t confirmedEdge = UINT32_MAX;// Edge confirmed for cutting
+        float factor = 0.5f;                // Current slide position (0-1)
+        float slideStartY = 0.0f;           // Mouse Y when slide started
+        std::vector<EditMesh::LoopCutSegment> previewSegments; // Current preview
+    } m_loopCut;
+    
+    // Knife/Cut tool (Blender K style)
+    struct KnifeCutState {
+        bool active = false;                // Whether knife mode is active
+        struct CutPoint {
+            uint32_t edgeIndex;             // Which edge this point is on
+            float t;                        // Parametric position along edge (0-1)
+            float worldPos[3];              // 3D position of cut point
+        };
+        std::vector<CutPoint> points;       // Placed cut points
+        float hoverPos[3] = {0,0,0};       // Current hover position (for preview line)
+        uint32_t hoverEdge = UINT32_MAX;    // Edge under cursor
+        float hoverT = 0.5f;               // T value on hovered edge
+        bool hasHover = false;              // Whether we have a valid hover point
+    } m_knife;
+    
     // Sync EditMesh vertex positions back to GPU vertex buffer (real-time deform)
     // Public so undo/redo in main.cpp can also trigger it
     public:
     void syncEditMeshToGPU();
     void rebuildGPUEdgeIndexBuffer();
+    // Force complete GPU rebuild from EditMesh loop data (for undo/redo where vertex
+    // ordering may change — old GPU data cannot be preserved)
+    void forceFullGPURebuild();
     private:
     
     // Callbacks
@@ -356,6 +610,11 @@ private:
     void renderMeshWireframe(Entity* entity, const float* wireColor);
     void renderSelectedOverlay(Entity* entity);
     void renderSelectionHighlights();
+    void renderLoopCutPreview();   // Draw loop cut preview lines
+    void renderKnifePreview();     // Draw knife tool cut path
+    bool handleLoopCutInput(const InputEvent& event);  // Loop cut tool interaction
+    bool handleKnifeInput(const InputEvent& event);     // Knife tool interaction
+    void resetToolState();         // Reset interactive tool state when switching tools
     void handleMeshPicking(float mouseX, float mouseY, bool additive);
     void handleBoxSelection(float x1, float y1, float x2, float y2, bool additive);
     bool projectToScreen(float wx, float wy, float wz, float& sx, float& sy);
@@ -558,6 +817,10 @@ inline void EditModeHandler::renderUI() {
     
     // Render selection highlights (vertices, edges, faces) as ImGui overlay
     renderSelectionHighlights();
+    
+    // Render interactive tool previews
+    renderLoopCutPreview();
+    renderKnifePreview();
 }
 
 inline void EditModeHandler::renderSelectionHighlights() {
@@ -602,10 +865,8 @@ inline void EditModeHandler::renderSelectionHighlights() {
             }
             
             if (allVisible && screenPts.size() >= 3) {
-                // Fan triangulation for fill
-                for (size_t i = 1; i < screenPts.size() - 1; ++i) {
-                    drawList->AddTriangleFilled(screenPts[0], screenPts[i], screenPts[i+1], faceColor);
-                }
+                // Fill polygon without visible triangulation lines
+                drawList->AddConvexPolyFilled(screenPts.data(), static_cast<int>(screenPts.size()), faceColor);
                 // Edge outline
                 for (size_t i = 0; i < screenPts.size(); ++i) {
                     drawList->AddLine(screenPts[i], screenPts[(i+1) % screenPts.size()], edgeColor, 2.0f);
@@ -658,8 +919,436 @@ inline void EditModeHandler::renderSelectionHighlights() {
     }
 }
 
+inline void EditModeHandler::renderLoopCutPreview() {
+    if (m_currentEditTool != EditModeToolbar::EditTool::LoopCut) return;
+    if (!m_active || !m_editMesh || !m_ctx || m_loopCut.previewSegments.empty()) return;
+    
+    auto* selectedEntity = m_ctx->scene ? m_ctx->scene->getSelectedEntity() : nullptr;
+    if (!selectedEntity) return;
+    const float* wm = selectedEntity->worldMatrix.m;
+    
+    ImDrawList* drawList = ImGui::GetForegroundDrawList();
+    
+    // Compute view direction for depth culling (camera → scene center)
+    float viewDir[3];
+    if (m_ctx->cameraPos && m_ctx->sceneCenter) {
+        viewDir[0] = m_ctx->sceneCenter[0] - m_ctx->cameraPos[0];
+        viewDir[1] = m_ctx->sceneCenter[1] - m_ctx->cameraPos[1];
+        viewDir[2] = m_ctx->sceneCenter[2] - m_ctx->cameraPos[2];
+        float len = sqrtf(viewDir[0]*viewDir[0] + viewDir[1]*viewDir[1] + viewDir[2]*viewDir[2]);
+        if (len > 0.0001f) { viewDir[0]/=len; viewDir[1]/=len; viewDir[2]/=len; }
+    } else {
+        viewDir[0] = 0; viewDir[1] = 0; viewDir[2] = 1;
+    }
+    
+    // Colors - Blender style
+    ImU32 lineColor = (m_loopCut.phase == LoopCutState::Phase::Slide) 
+        ? IM_COL32(255, 200, 0, 255)   // Bright yellow during slide
+        : IM_COL32(255, 220, 50, 200); // Softer yellow during hover
+    float lineWidth = (m_loopCut.phase == LoopCutState::Phase::Slide) ? 3.0f : 2.0f;
+    
+    for (const auto& seg : m_loopCut.previewSegments) {
+        // Depth cull: skip segments on back-facing faces
+        if (seg.faceIdx < m_editMesh->faces.size()) {
+            const auto& face = m_editMesh->faces[seg.faceIdx];
+            if (face.loops.size() >= 3) {
+                // Compute face normal in world space
+                const float* v0p = m_editMesh->vertices[face.loops[0].vertexIndex].position;
+                const float* v1p = m_editMesh->vertices[face.loops[1].vertexIndex].position;
+                const float* v2p = m_editMesh->vertices[face.loops[2].vertexIndex].position;
+                
+                // Edges in local space
+                float e1[3] = { v1p[0]-v0p[0], v1p[1]-v0p[1], v1p[2]-v0p[2] };
+                float e2[3] = { v2p[0]-v0p[0], v2p[1]-v0p[1], v2p[2]-v0p[2] };
+                // Cross product (local normal)
+                float ln[3] = {
+                    e1[1]*e2[2] - e1[2]*e2[1],
+                    e1[2]*e2[0] - e1[0]*e2[2],
+                    e1[0]*e2[1] - e1[1]*e2[0]
+                };
+                // Transform normal to world space (rotation part of world matrix)
+                float wn[3] = {
+                    wm[0]*ln[0] + wm[4]*ln[1] + wm[8]*ln[2],
+                    wm[1]*ln[0] + wm[5]*ln[1] + wm[9]*ln[2],
+                    wm[2]*ln[0] + wm[6]*ln[1] + wm[10]*ln[2]
+                };
+                float dot = wn[0]*viewDir[0] + wn[1]*viewDir[1] + wn[2]*viewDir[2];
+                if (dot < 0.0f) continue; // Back-facing — skip
+            }
+        }
+        
+        // Transform to world space
+        float w0[3], w1[3];
+        w0[0] = wm[0]*seg.p0[0] + wm[4]*seg.p0[1] + wm[8]*seg.p0[2] + wm[12];
+        w0[1] = wm[1]*seg.p0[0] + wm[5]*seg.p0[1] + wm[9]*seg.p0[2] + wm[13];
+        w0[2] = wm[2]*seg.p0[0] + wm[6]*seg.p0[1] + wm[10]*seg.p0[2] + wm[14];
+        w1[0] = wm[0]*seg.p1[0] + wm[4]*seg.p1[1] + wm[8]*seg.p1[2] + wm[12];
+        w1[1] = wm[1]*seg.p1[0] + wm[5]*seg.p1[1] + wm[9]*seg.p1[2] + wm[13];
+        w1[2] = wm[2]*seg.p1[0] + wm[6]*seg.p1[1] + wm[10]*seg.p1[2] + wm[14];
+        
+        float sx0, sy0, sx1, sy1;
+        if (projectToScreen(w0[0], w0[1], w0[2], sx0, sy0) &&
+            projectToScreen(w1[0], w1[1], w1[2], sx1, sy1)) {
+            drawList->AddLine(ImVec2(sx0, sy0), ImVec2(sx1, sy1), lineColor, lineWidth);
+        }
+    }
+    
+    // During hover, highlight the edge under cursor
+    if (m_loopCut.phase == LoopCutState::Phase::Hover && m_loopCut.hoverEdge != UINT32_MAX) {
+        if (m_loopCut.hoverEdge < m_editMesh->edges.size()) {
+            const auto& edge = m_editMesh->edges[m_loopCut.hoverEdge];
+            if (edge.v0 < m_editMesh->vertices.size() && edge.v1 < m_editMesh->vertices.size()) {
+                float w0[3], w1[3];
+                const float* p0 = m_editMesh->vertices[edge.v0].position;
+                const float* p1 = m_editMesh->vertices[edge.v1].position;
+                w0[0] = wm[0]*p0[0] + wm[4]*p0[1] + wm[8]*p0[2] + wm[12];
+                w0[1] = wm[1]*p0[0] + wm[5]*p0[1] + wm[9]*p0[2] + wm[13];
+                w0[2] = wm[2]*p0[0] + wm[6]*p0[1] + wm[10]*p0[2] + wm[14];
+                w1[0] = wm[0]*p1[0] + wm[4]*p1[1] + wm[8]*p1[2] + wm[12];
+                w1[1] = wm[1]*p1[0] + wm[5]*p1[1] + wm[9]*p1[2] + wm[13];
+                w1[2] = wm[2]*p1[0] + wm[6]*p1[1] + wm[10]*p1[2] + wm[14];
+                
+                float sx0, sy0, sx1, sy1;
+                if (projectToScreen(w0[0], w0[1], w0[2], sx0, sy0) &&
+                    projectToScreen(w1[0], w1[1], w1[2], sx1, sy1)) {
+                    drawList->AddLine(ImVec2(sx0, sy0), ImVec2(sx1, sy1), 
+                        IM_COL32(0, 220, 255, 255), 3.0f);
+                }
+            }
+        }
+    }
+    
+    // Status text
+    if (m_loopCut.phase == LoopCutState::Phase::Hover) {
+        drawList->AddText(ImVec2(10, ImGui::GetIO().DisplaySize.y - 30),
+            IM_COL32(255, 220, 50, 255), "Loop Cut: Hover over edge, LMB to confirm | ESC to cancel");
+    } else {
+        char buf[128];
+        snprintf(buf, sizeof(buf), "Loop Cut: Slide to adjust (%.0f%%) | LMB to apply | ESC to cancel",
+            m_loopCut.factor * 100.0f);
+        drawList->AddText(ImVec2(10, ImGui::GetIO().DisplaySize.y - 30),
+            IM_COL32(255, 200, 0, 255), buf);
+    }
+}
+
+inline void EditModeHandler::renderKnifePreview() {
+    if (m_currentEditTool != EditModeToolbar::EditTool::Cut) return;
+    if (!m_active || !m_editMesh || !m_ctx) return;
+    
+    auto* selectedEntity = m_ctx->scene ? m_ctx->scene->getSelectedEntity() : nullptr;
+    if (!selectedEntity) return;
+    const float* wm = selectedEntity->worldMatrix.m;
+    
+    ImDrawList* drawList = ImGui::GetForegroundDrawList();
+    
+    auto worldTransform = [wm](const float* p, float* out) {
+        out[0] = wm[0]*p[0] + wm[4]*p[1] + wm[8]*p[2] + wm[12];
+        out[1] = wm[1]*p[0] + wm[5]*p[1] + wm[9]*p[2] + wm[13];
+        out[2] = wm[2]*p[0] + wm[6]*p[1] + wm[10]*p[2] + wm[14];
+    };
+    
+    // Draw placed cut points
+    ImU32 pointColor = IM_COL32(255, 50, 50, 255);
+    ImU32 lineColor = IM_COL32(255, 80, 80, 220);
+    ImU32 hoverPointColor = IM_COL32(255, 150, 50, 255);
+    
+    std::vector<ImVec2> screenPoints;
+    for (const auto& pt : m_knife.points) {
+        float w[3];
+        worldTransform(pt.worldPos, w);
+        float sx, sy;
+        if (projectToScreen(w[0], w[1], w[2], sx, sy)) {
+            screenPoints.push_back(ImVec2(sx, sy));
+            // Red diamond for placed cut points
+            drawList->AddCircleFilled(ImVec2(sx, sy), 5.0f, pointColor, 4);
+            drawList->AddCircle(ImVec2(sx, sy), 5.0f, IM_COL32(255, 255, 255, 200), 4, 1.5f);
+        }
+    }
+    
+    // Draw lines between placed points
+    for (size_t i = 1; i < screenPoints.size(); i++) {
+        drawList->AddLine(screenPoints[i-1], screenPoints[i], lineColor, 2.5f);
+    }
+    
+    // Draw hover point and preview line from last placed point
+    if (m_knife.hasHover) {
+        float w[3];
+        worldTransform(m_knife.hoverPos, w);
+        float sx, sy;
+        if (projectToScreen(w[0], w[1], w[2], sx, sy)) {
+            // Orange circle for hover position
+            drawList->AddCircleFilled(ImVec2(sx, sy), 4.0f, hoverPointColor, 8);
+            drawList->AddCircle(ImVec2(sx, sy), 6.0f, IM_COL32(255, 200, 100, 200), 8, 1.5f);
+            
+            // Dashed preview line from last point to hover
+            if (!screenPoints.empty()) {
+                ImU32 dashColor = IM_COL32(255, 120, 50, 180);
+                ImVec2 from = screenPoints.back();
+                ImVec2 to(sx, sy);
+                // Simple dashed line
+                float dx = to.x - from.x, dy = to.y - from.y;
+                float len = std::sqrt(dx*dx + dy*dy);
+                if (len > 0) {
+                    float dashLen = 8.0f, gapLen = 4.0f;
+                    float nx = dx/len, ny = dy/len;
+                    float d = 0;
+                    while (d < len) {
+                        float d1 = std::min(d + dashLen, len);
+                        drawList->AddLine(
+                            ImVec2(from.x + nx*d, from.y + ny*d),
+                            ImVec2(from.x + nx*d1, from.y + ny*d1),
+                            dashColor, 2.0f);
+                        d = d1 + gapLen;
+                    }
+                }
+            }
+        }
+    }
+    
+    // Highlight hovered edge in magenta
+    if (m_knife.hoverEdge != UINT32_MAX && m_knife.hoverEdge < m_editMesh->edges.size()) {
+        const auto& edge = m_editMesh->edges[m_knife.hoverEdge];
+        if (edge.v0 < m_editMesh->vertices.size() && edge.v1 < m_editMesh->vertices.size()) {
+            float w0[3], w1[3];
+            worldTransform(m_editMesh->vertices[edge.v0].position, w0);
+            worldTransform(m_editMesh->vertices[edge.v1].position, w1);
+            float sx0, sy0, sx1, sy1;
+            if (projectToScreen(w0[0], w0[1], w0[2], sx0, sy0) &&
+                projectToScreen(w1[0], w1[1], w1[2], sx1, sy1)) {
+                drawList->AddLine(ImVec2(sx0, sy0), ImVec2(sx1, sy1),
+                    IM_COL32(255, 50, 200, 255), 2.5f);
+            }
+        }
+    }
+    
+    // Status text (scissors icon ✂)
+    char buf[128];
+    snprintf(buf, sizeof(buf), "Knife: %d/%d points placed | LMB on edge to place | ESC to cancel",
+        (int)m_knife.points.size(), 2);
+    drawList->AddText(ImVec2(10, ImGui::GetIO().DisplaySize.y - 30),
+        IM_COL32(255, 80, 80, 255), buf);
+}
+
+inline void EditModeHandler::resetToolState() {
+    m_loopCut.phase = LoopCutState::Phase::Hover;
+    m_loopCut.hoverEdge = UINT32_MAX;
+    m_loopCut.confirmedEdge = UINT32_MAX;
+    m_loopCut.previewSegments.clear();
+    m_loopCut.factor = 0.5f;
+    
+    m_knife.active = false;
+    m_knife.points.clear();
+    m_knife.hoverEdge = UINT32_MAX;
+    m_knife.hasHover = false;
+}
+
+inline bool EditModeHandler::handleLoopCutInput(const InputEvent& event) {
+    if (!m_editMesh || !m_projectionCallback) return false;
+    
+    auto* selectedEntity = m_ctx->scene ? m_ctx->scene->getSelectedEntity() : nullptr;
+    if (!selectedEntity) return false;
+    const float* worldMatrix = selectedEntity->worldMatrix.m;
+    
+    auto projFunc = [this, worldMatrix](float wx, float wy, float wz, float& sx, float& sy) -> bool {
+        return projectToScreen(wx, wy, wz, sx, sy);
+    };
+    
+    // Transform projection to include world matrix
+    auto projWithWorld = [this, worldMatrix](float lx, float ly, float lz, float& sx, float& sy) -> bool {
+        float wx = worldMatrix[0]*lx + worldMatrix[4]*ly + worldMatrix[8]*lz + worldMatrix[12];
+        float wy = worldMatrix[1]*lx + worldMatrix[5]*ly + worldMatrix[9]*lz + worldMatrix[13];
+        float wz = worldMatrix[2]*lx + worldMatrix[6]*ly + worldMatrix[10]*lz + worldMatrix[14];
+        return projectToScreen(wx, wy, wz, sx, sy);
+    };
+    
+    // Compute camera forward direction for back-face culling
+    // Use cameraPos toward sceneCenter as a reliable view direction
+    float camFwd[3] = {
+        m_ctx->sceneCenter[0] - m_ctx->cameraPos[0],
+        m_ctx->sceneCenter[1] - m_ctx->cameraPos[1],
+        m_ctx->sceneCenter[2] - m_ctx->cameraPos[2]
+    };
+    float fwdLen = std::sqrt(camFwd[0]*camFwd[0] + camFwd[1]*camFwd[1] + camFwd[2]*camFwd[2]);
+    if (fwdLen > 1e-6f) { camFwd[0]/=fwdLen; camFwd[1]/=fwdLen; camFwd[2]/=fwdLen; }
+    
+    if (m_loopCut.phase == LoopCutState::Phase::Hover) {
+        // Phase 1: Hover — find edge under cursor and show preview
+        if (event.type == InputEvent::Type::MouseMove) {
+            uint32_t edge = m_editMesh->findClosestEdgeToScreenPos(
+                event.mouseX, event.mouseY, projWithWorld, worldMatrix, 20.0f, camFwd);
+            
+            if (edge != m_loopCut.hoverEdge) {
+                m_loopCut.hoverEdge = edge;
+                if (edge != UINT32_MAX) {
+                    m_loopCut.previewSegments = m_editMesh->previewEdgeLoop(edge, 0.5f);
+                } else {
+                    m_loopCut.previewSegments.clear();
+                }
+            }
+            return true; // Consume mouse move in loop cut mode
+        }
+        
+        if (event.type == InputEvent::Type::MouseDown && event.key == 0 && !event.isAlt()) {
+            if (m_loopCut.hoverEdge != UINT32_MAX && !m_loopCut.previewSegments.empty()) {
+                // Confirm edge, enter slide phase
+                m_loopCut.confirmedEdge = m_loopCut.hoverEdge;
+                m_loopCut.phase = LoopCutState::Phase::Slide;
+                m_loopCut.factor = 0.5f;
+                m_loopCut.slideStartY = event.mouseY;
+                return true;
+            }
+        }
+        
+        // Escape or RMB cancels
+        if ((event.type == InputEvent::Type::KeyDown && event.key == 27) ||
+            (event.type == InputEvent::Type::MouseDown && event.key == 1)) {
+            resetToolState();
+            return true;
+        }
+    }
+    else if (m_loopCut.phase == LoopCutState::Phase::Slide) {
+        // Phase 2: Slide — mouse Y adjusts factor (like Blender Ctrl+R)
+        if (event.type == InputEvent::Type::MouseMove) {
+            float deltaY = event.mouseY - m_loopCut.slideStartY;
+            float sensitivity = 0.004f;
+            m_loopCut.factor = std::max(0.01f, std::min(0.99f, 0.5f + deltaY * sensitivity));
+            
+            m_loopCut.previewSegments = m_editMesh->previewEdgeLoop(
+                m_loopCut.confirmedEdge, m_loopCut.factor);
+            return true;
+        }
+        
+        // LMB applies the cut at current factor
+        if (event.type == InputEvent::Type::MouseDown && event.key == 0 && !event.isAlt()) {
+            performLoopCut(m_loopCut.factor, m_loopCut.confirmedEdge);
+            
+            m_loopCut.phase = LoopCutState::Phase::Hover;
+            m_loopCut.confirmedEdge = UINT32_MAX;
+            m_loopCut.hoverEdge = UINT32_MAX;
+            m_loopCut.previewSegments.clear();
+            return true;
+        }
+        
+        // Enter applies at factor 0.5 (even cut, like Blender)
+        if (event.type == InputEvent::Type::KeyDown && event.key == 13/*Enter*/) {
+            performLoopCut(0.5f, m_loopCut.confirmedEdge);
+            
+            m_loopCut.phase = LoopCutState::Phase::Hover;
+            m_loopCut.confirmedEdge = UINT32_MAX;
+            m_loopCut.hoverEdge = UINT32_MAX;
+            m_loopCut.previewSegments.clear();
+            return true;
+        }
+        
+        // RMB or Escape cancels slide (back to hover)
+        if ((event.type == InputEvent::Type::KeyDown && event.key == 27) ||
+            (event.type == InputEvent::Type::MouseDown && event.key == 1)) {
+            m_loopCut.phase = LoopCutState::Phase::Hover;
+            m_loopCut.confirmedEdge = UINT32_MAX;
+            m_loopCut.previewSegments.clear();
+            return true;
+        }
+    }
+    
+    return false;
+}
+
+inline bool EditModeHandler::handleKnifeInput(const InputEvent& event) {
+    if (!m_editMesh || !m_projectionCallback) return false;
+    
+    auto* selectedEntity = m_ctx->scene ? m_ctx->scene->getSelectedEntity() : nullptr;
+    if (!selectedEntity) return false;
+    const float* worldMatrix = selectedEntity->worldMatrix.m;
+    
+    auto projWithWorld = [this, worldMatrix](float lx, float ly, float lz, float& sx, float& sy) -> bool {
+        float wx = worldMatrix[0]*lx + worldMatrix[4]*ly + worldMatrix[8]*lz + worldMatrix[12];
+        float wy = worldMatrix[1]*lx + worldMatrix[5]*ly + worldMatrix[9]*lz + worldMatrix[13];
+        float wz = worldMatrix[2]*lx + worldMatrix[6]*ly + worldMatrix[10]*lz + worldMatrix[14];
+        return projectToScreen(wx, wy, wz, sx, sy);
+    };
+    
+    // Compute camera forward direction for back-face culling
+    float camFwd[3] = {
+        m_ctx->sceneCenter[0] - m_ctx->cameraPos[0],
+        m_ctx->sceneCenter[1] - m_ctx->cameraPos[1],
+        m_ctx->sceneCenter[2] - m_ctx->cameraPos[2]
+    };
+    float fwdLen = std::sqrt(camFwd[0]*camFwd[0] + camFwd[1]*camFwd[1] + camFwd[2]*camFwd[2]);
+    if (fwdLen > 1e-6f) { camFwd[0]/=fwdLen; camFwd[1]/=fwdLen; camFwd[2]/=fwdLen; }
+    
+    if (event.type == InputEvent::Type::MouseMove) {
+        // Update hover position — find closest edge
+        float t;
+        uint32_t edge = m_editMesh->findClosestEdgeWithT(
+            event.mouseX, event.mouseY, projWithWorld, worldMatrix, t, 20.0f, camFwd);
+        
+        m_knife.hoverEdge = edge;
+        m_knife.hoverT = t;
+        
+        if (edge != UINT32_MAX && edge < m_editMesh->edges.size()) {
+            const auto& e = m_editMesh->edges[edge];
+            if (e.v0 < m_editMesh->vertices.size() && e.v1 < m_editMesh->vertices.size()) {
+                math::lerp3(m_knife.hoverPos,
+                    m_editMesh->vertices[e.v0].position,
+                    m_editMesh->vertices[e.v1].position, t);
+                m_knife.hasHover = true;
+            }
+        } else {
+            m_knife.hasHover = false;
+        }
+        return true;
+    }
+    
+    if (event.type == InputEvent::Type::MouseDown && event.key == 0 && !event.isAlt()) {
+        // Place cut point on the hovered edge
+        if (m_knife.hoverEdge != UINT32_MAX && m_knife.hasHover) {
+            KnifeCutState::CutPoint pt;
+            pt.edgeIndex = m_knife.hoverEdge;
+            pt.t = m_knife.hoverT;
+            pt.worldPos[0] = m_knife.hoverPos[0];
+            pt.worldPos[1] = m_knife.hoverPos[1];
+            pt.worldPos[2] = m_knife.hoverPos[2];
+            m_knife.points.push_back(pt);
+            m_knife.active = true;
+            
+            // If we have 2 points, auto-apply the cut
+            if (m_knife.points.size() >= 2) {
+                applyKnifeCut();
+            }
+            return true;
+        }
+    }
+    
+    // Enter confirms (same as having 2 points)
+    if (event.type == InputEvent::Type::KeyDown && event.key == 13/*Enter*/) {
+        if (m_knife.points.size() >= 2) {
+            applyKnifeCut();
+        }
+        return true;
+    }
+    
+    // Escape or RMB cancels
+    if ((event.type == InputEvent::Type::KeyDown && event.key == 27) ||
+        (event.type == InputEvent::Type::MouseDown && event.key == 1)) {
+        m_knife.points.clear();
+        m_knife.active = false;
+        return true;
+    }
+    
+    return false;
+}
+
 inline bool EditModeHandler::handleInput(const InputEvent& event) {
     if (!m_active || !m_ctx) return false;
+    
+    // Handle interactive tool input FIRST (Loop Cut, Knife)
+    // These tools override normal selection/gizmo interaction
+    if (m_currentEditTool == EditModeToolbar::EditTool::LoopCut) {
+        if (handleLoopCutInput(event)) return true;
+    }
+    if (m_currentEditTool == EditModeToolbar::EditTool::Cut) {
+        if (handleKnifeInput(event)) return true;
+    }
     
     // Handle gizmo interaction first (only when transform tool is active)
     if (m_showGizmo && m_meshGizmo.hasSelection() && m_rayCallback) {
@@ -755,7 +1444,7 @@ inline bool EditModeHandler::handleInput(const InputEvent& event) {
             break;
             
         case InputEvent::Type::MouseDown:
-            if (event.key == 0) { // Left mouse
+            if (event.key == 0 && !event.isAlt()) { // Left mouse, not Alt (Alt = camera orbit)
                 // Start selection
                 if (m_selectTool != SelectionTool::Click) {
                     m_isSelecting = true;
@@ -784,8 +1473,8 @@ inline bool EditModeHandler::handleInput(const InputEvent& event) {
                                       m_selectEndX, m_selectEndY, event.isShift());
                     m_isSelecting = false;
                     return true;
-                } else if (m_selectTool == SelectionTool::Click) {
-                    // Click selection
+                } else if (m_selectTool == SelectionTool::Click && !event.isAlt()) {
+                    // Click selection (not Alt — Alt = camera orbit)
                     handleMeshPicking(event.mouseX, event.mouseY, event.isShift());
                     return true;
                 }
@@ -913,22 +1602,172 @@ inline void EditModeHandler::syncEditMeshToGPU() {
     if (!selectedEntity || !selectedEntity->hasModel) return;
     if (m_selectedMeshIndex >= static_cast<int>(selectedEntity->model.meshes.size())) return;
     
-    // Update GPU vertex buffer positions
+    // Update GPU vertex buffer positions (automatically does full rebuild if topology changed)
     m_ctx->renderer->updateMeshVerticesFromEditMesh(
         selectedEntity->model, m_selectedMeshIndex, *m_editMesh);
     
-    // Also update skinnedVertices (used by skinned mesh wireframe rendering)
+    // For the fast path (position-only update), also update skinnedVertices
+    // (rebuildMeshBuffersFromEditMesh already handles skinned vertices for topology changes)
     auto& gpuMesh = selectedEntity->model.meshes[m_selectedMeshIndex];
-    if (gpuMesh.hasSkinning && !gpuMesh.skinnedVertices.empty()) {
-        uint32_t count = std::min(
-            static_cast<uint32_t>(gpuMesh.skinnedVertices.size()),
-            static_cast<uint32_t>(m_editMesh->vertices.size()));
+    if (gpuMesh.hasSkinning && gpuMesh.skinnedVertices.size() == m_editMesh->vertices.size()) {
+        uint32_t count = static_cast<uint32_t>(m_editMesh->vertices.size());
         for (uint32_t i = 0; i < count; i++) {
             gpuMesh.skinnedVertices[i].position[0] = m_editMesh->vertices[i].position[0];
             gpuMesh.skinnedVertices[i].position[1] = m_editMesh->vertices[i].position[1];
             gpuMesh.skinnedVertices[i].position[2] = m_editMesh->vertices[i].position[2];
         }
     }
+}
+
+inline void EditModeHandler::forceFullGPURebuild() {
+    if (!m_editMesh || !m_ctx || !m_ctx->renderer || !m_ctx->scene) return;
+    if (m_selectedMeshIndex < 0) return;
+    
+    auto* selectedEntity = m_ctx->scene->getSelectedEntity();
+    if (!selectedEntity || !selectedEntity->hasModel) return;
+    if (m_selectedMeshIndex >= static_cast<int>(selectedEntity->model.meshes.size())) return;
+    
+    // Force a complete rebuild of GPU buffers from EditMesh data.
+    // Unlike syncEditMeshToGPU (which tries to preserve old GPU normals/UVs),
+    // this always rebuilds from scratch using EditMesh loop data.
+    // Required for undo/redo where vertex ordering may have changed.
+    m_ctx->renderer->rebuildMeshBuffersFromEditMesh(
+        selectedEntity->model, m_selectedMeshIndex, *m_editMesh, true /*forceFromLoops*/);
+    
+    // Update skinned vertices
+    auto& gpuMesh = selectedEntity->model.meshes[m_selectedMeshIndex];
+    if (gpuMesh.hasSkinning) {
+        uint32_t count = static_cast<uint32_t>(m_editMesh->vertices.size());
+        gpuMesh.skinnedVertices.resize(count);
+        for (uint32_t i = 0; i < count; i++) {
+            gpuMesh.skinnedVertices[i].position[0] = m_editMesh->vertices[i].position[0];
+            gpuMesh.skinnedVertices[i].position[1] = m_editMesh->vertices[i].position[1];
+            gpuMesh.skinnedVertices[i].position[2] = m_editMesh->vertices[i].position[2];
+        }
+    }
+}
+
+inline bool EditModeHandler::undoMeshEdit() {
+    if (!m_editMesh || !m_editMesh->canUndo()) return false;
+    
+    m_editMesh->undo();
+    
+    // Undo may change topology AND vertex ordering (removeUnusedVertices remaps indices).
+    // We MUST force a full rebuild from EditMesh loop data — we cannot preserve old GPU
+    // vertex attributes because they correspond to the post-edit vertex ordering, not the
+    // restored pre-edit ordering.
+    forceFullGPURebuild();
+    
+    // Update gizmo state
+    m_meshGizmo.setEditMesh(m_editMesh);
+    if (m_extrudeMode) updateExtrudeNormal();
+    
+    m_dirty = true;
+    if (m_meshChangedCallback) m_meshChangedCallback();
+    return true;
+}
+
+inline bool EditModeHandler::redoMeshEdit() {
+    if (!m_editMesh || !m_editMesh->canRedo()) return false;
+    
+    m_editMesh->redo();
+    
+    // Same as undo — vertex ordering may differ, force full rebuild
+    forceFullGPURebuild();
+    
+    // Update gizmo state
+    m_meshGizmo.setEditMesh(m_editMesh);
+    if (m_extrudeMode) updateExtrudeNormal();
+    
+    m_dirty = true;
+    if (m_meshChangedCallback) m_meshChangedCallback();
+    return true;
+}
+
+// ===== Baseline / Commit / Cancel =====
+
+inline void EditModeHandler::saveBaseline() {
+    if (!m_editMesh || !m_ctx || !m_ctx->renderer || !m_ctx->scene) return;
+    if (m_selectedMeshIndex < 0) return;
+    
+    auto* selectedEntity = m_ctx->scene->getSelectedEntity();
+    if (!selectedEntity || !selectedEntity->hasModel) return;
+    if (m_selectedMeshIndex >= static_cast<int>(selectedEntity->model.meshes.size())) return;
+    
+    // Save GPU data backup
+    m_baselineGPU = m_ctx->renderer->backupMeshGPUData(selectedEntity->model, m_selectedMeshIndex);
+    
+    // Save EditMesh snapshot
+    m_baselineEditMesh = m_editMesh->createSnapshot();
+    
+    m_hasBaseline = true;
+    printf("[EditMode] Baseline saved (mesh %d)\n", m_selectedMeshIndex);
+}
+
+inline void EditModeHandler::commitChanges() {
+    if (!m_editMesh) return;
+    
+    // Save current state as new baseline
+    saveBaseline();
+    
+    // Clear undo/redo history — no going back past this point
+    m_editMesh->clearUndoHistory();
+    
+    m_dirty = false;
+    printf("[EditMode] Changes committed — history frozen\n");
+}
+
+inline void EditModeHandler::cancelChanges() {
+    if (!m_editMesh || !m_hasBaseline) return;
+    if (!m_ctx || !m_ctx->renderer || !m_ctx->scene) return;
+    if (m_selectedMeshIndex < 0) return;
+    
+    auto* selectedEntity = m_ctx->scene->getSelectedEntity();
+    if (!selectedEntity || !selectedEntity->hasModel) return;
+    if (m_selectedMeshIndex >= static_cast<int>(selectedEntity->model.meshes.size())) return;
+    
+    // Restore GPU buffers from baseline
+    m_ctx->renderer->restoreMeshGPUData(selectedEntity->model, m_selectedMeshIndex, m_baselineGPU);
+    
+    // Restore EditMesh from baseline snapshot
+    m_editMesh->restoreFromSnapshot(m_baselineEditMesh);
+    
+    // Update gizmo and state
+    m_meshGizmo.setEditMesh(m_editMesh);
+    m_extrudeMode = false;
+    m_meshGizmo.setExtrudeMode(false);
+    
+    m_dirty = false;
+    // Note: Do NOT call m_meshChangedCallback here — the caller will handle
+    // mode switching and cleanup. Calling it could trigger side effects while
+    // we're in a transitional state.
+    printf("[EditMode] Changes cancelled — restored to baseline\n");
+}
+
+inline bool EditModeHandler::hasUncommittedChanges() const {
+    if (!m_editMesh) return false;
+    return m_editMesh->canUndo();
+}
+
+inline EditModeAction EditModeHandler::processPendingActions() {
+    auto action = m_pendingAction;
+    m_pendingAction = EditModeAction::None;
+    
+    if (action == EditModeAction::None) return action;
+    
+    if (action == EditModeAction::CancelAndExit) {
+        // Restore baseline GPU buffers + EditMesh state
+        // Safe to do here because we're at the start of the frame,
+        // before any draw commands reference the current buffers.
+        cancelChanges();
+        printf("[EditMode] Cancel processed — baseline restored\n");
+    } else if (action == EditModeAction::SaveAndExit) {
+        // Keep current GPU state as-is
+        printf("[EditMode] Save & exit processed\n");
+    }
+    
+    m_dirty = false;
+    return action;
 }
 
 } // namespace editor

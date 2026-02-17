@@ -851,7 +851,26 @@ public:
             ImGui::TextColored(ImVec4(0.6f, 0.6f, 0.6f, 1.0f), 
                               "粗糙度: %.2f", mesh.roughness);
         }
+        
+        ImGui::Spacing();
+        ImGui::Separator();
+        ImGui::Spacing();
+        
+        // Open Node Editor button
+        ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.2f, 0.4f, 0.7f, 1.0f));
+        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.3f, 0.5f, 0.8f, 1.0f));
+        if (ImGui::Button(loc("Open Material Node Editor"), ImVec2(-1, 32))) {
+            showNodeEditor = true;
+        }
+        ImGui::PopStyleColor(2);
+        
+        if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip("%s", loc("Open the visual node-based material editor\nfor advanced material authoring"));
+        }
     }
+    
+    // Flag to open the node editor (read by parent)
+    bool showNodeEditor = false;
     
 private:
     void drawTextureSlot(const char* label, const char* icon, bool hasTexture) {
@@ -894,8 +913,16 @@ public:
     SelectTool selectTool = SelectTool::Box;  // 默认框选
     
     // 编辑工具
-    enum class EditTool { Select, Move, Rotate, Scale, Extrude };
+    enum class EditTool { Select, Move, Rotate, Scale, Extrude, LoopCut, Cut, MergeFaces, MergeByDistance };
     EditTool currentTool = EditTool::Select;
+    float mergeDistance = 0.001f;  // Threshold for Merge by Distance
+    float loopCutFactor = 0.5f;   // Edge loop position (0-1)
+    bool applyRequested = false;  // Set to true when user clicks "Apply" for geometry tools
+    
+    // Status messages for geometry tools
+    int selectedFaceCount = 0;
+    int selectedEdgeCount = 0;
+    int selectedVertexCount = 0;
     
     // 线框显示选项
     bool showOriginalEdges = true;  // 显示四边面原始边
@@ -918,6 +945,15 @@ public:
             return selectMode != SelectMode::Vertex;  // Not for vertices
         if (tool == EditTool::Scale)
             return selectMode == SelectMode::Face;     // Only for faces
+        // Geometry tools
+        if (tool == EditTool::LoopCut)
+            return true;  // Interactive: hover to pick edge, works in any mode
+        if (tool == EditTool::Cut)
+            return true;  // Interactive knife: click edges to cut, works in any mode
+        if (tool == EditTool::MergeFaces)
+            return selectMode == SelectMode::Face;     // Merge faces in face mode
+        if (tool == EditTool::MergeByDistance)
+            return true;  // Always available
         return true;
     }
     
@@ -1051,6 +1087,59 @@ public:
         // 第三行工具（特殊操作）
         drawToolBtn(EditTool::Extrude, "[E]", loc("Extrude"), "E");
         
+        ImGui::Spacing();
+        ImGui::TextColored(ImVec4(0.6f, 0.6f, 0.6f, 1.0f), "%s", loc("Geometry"));
+        
+        drawToolBtn(EditTool::LoopCut, "[L]", loc("Loop Cut"), "Ctrl+R");
+        ImGui::SameLine(0, 4);
+        drawToolBtn(EditTool::Cut, "[C]", loc("Cut"), "K");
+        drawToolBtn(EditTool::MergeFaces, "[F]", loc("Merge Faces"), "F");
+        ImGui::SameLine(0, 4);
+        drawToolBtn(EditTool::MergeByDistance, "[D]", loc("Merge Dist"), "M");
+        
+        // === Geometry Tool Options & Apply ===
+        if (currentTool == EditTool::LoopCut) {
+            ImGui::Spacing();
+            ImGui::TextColored(ImVec4(0.9f, 0.85f, 0.4f, 1.0f), "%s", loc("Loop Cut Tool"));
+            ImGui::Spacing();
+            ImGui::TextWrapped("%s", loc("1. Hover over an edge to preview loop"));
+            ImGui::TextWrapped("%s", loc("2. LMB to confirm edge"));
+            ImGui::TextWrapped("%s", loc("3. Slide mouse to adjust position"));
+            ImGui::TextWrapped("%s", loc("4. LMB to apply cut"));
+            ImGui::TextColored(ImVec4(0.6f, 0.6f, 0.6f, 1.0f), "%s", loc("ESC / RMB to cancel"));
+        }
+        else if (currentTool == EditTool::Cut) {
+            ImGui::Spacing();
+            ImGui::TextColored(ImVec4(0.9f, 0.5f, 0.4f, 1.0f), "%s", loc("Knife Tool"));
+            ImGui::Spacing();
+            ImGui::TextWrapped("%s", loc("1. Click on an edge to place first cut point"));
+            ImGui::TextWrapped("%s", loc("2. Click on another edge (same face) to cut"));
+            ImGui::TextColored(ImVec4(0.6f, 0.6f, 0.6f, 1.0f), "%s", loc("ESC / RMB to cancel"));
+        }
+        else if (currentTool == EditTool::MergeFaces) {
+            ImGui::Spacing();
+            ImGui::TextColored(ImVec4(0.9f, 0.85f, 0.4f, 1.0f), "%s", loc("Merge Faces"));
+            if (selectedFaceCount >= 2) {
+                ImGui::TextColored(ImVec4(0.5f, 0.9f, 0.5f, 1.0f), "%d %s", selectedFaceCount, loc("faces selected"));
+                if (ImGui::Button(loc("Apply Merge"), ImVec2(editBtnWidth, 28))) {
+                    applyRequested = true;
+                    changed = true;
+                }
+            } else {
+                ImGui::TextColored(ImVec4(0.9f, 0.5f, 0.5f, 1.0f), "%s", loc("Select 2+ adjacent faces"));
+            }
+        }
+        else if (currentTool == EditTool::MergeByDistance) {
+            ImGui::Spacing();
+            ImGui::TextColored(ImVec4(0.9f, 0.85f, 0.4f, 1.0f), "%s", loc("Merge by Distance"));
+            ImGui::SetNextItemWidth(editBtnWidth);
+            ImGui::SliderFloat("##mergedist", &mergeDistance, 0.0001f, 0.5f, "%.4f");
+            if (ImGui::Button(loc("Apply Merge"), ImVec2(editBtnWidth, 28))) {
+                applyRequested = true;
+                changed = true;
+            }
+        }
+        
         // Auto-switch to valid tool when current tool becomes unavailable
         if (!isToolAvailable(currentTool)) {
             currentTool = EditTool::Move;  // Fallback to Move (always available)
@@ -1172,6 +1261,32 @@ public:
         }
         if (ImGui::IsKeyPressed(ImGuiKey_E, false)) {
             currentTool = EditTool::Extrude;
+            if (onToolChanged) onToolChanged(currentTool);
+            changed = true;
+        }
+        
+        // Geometry tools shortcuts
+        // Ctrl+R = Loop Cut (like Blender)
+        if (ImGui::IsKeyPressed(ImGuiKey_R, false) && ImGui::GetIO().KeyCtrl && isToolAvailable(EditTool::LoopCut)) {
+            currentTool = EditTool::LoopCut;
+            if (onToolChanged) onToolChanged(currentTool);
+            changed = true;
+        }
+        // K = Cut/Knife (like Blender)
+        if (ImGui::IsKeyPressed(ImGuiKey_K, false) && isToolAvailable(EditTool::Cut)) {
+            currentTool = EditTool::Cut;
+            if (onToolChanged) onToolChanged(currentTool);
+            changed = true;
+        }
+        // F = Merge Faces (like Blender's Make Face/Fill)
+        if (ImGui::IsKeyPressed(ImGuiKey_F, false) && isToolAvailable(EditTool::MergeFaces)) {
+            currentTool = EditTool::MergeFaces;
+            if (onToolChanged) onToolChanged(currentTool);
+            changed = true;
+        }
+        // M = Merge by Distance (like Blender)
+        if (ImGui::IsKeyPressed(ImGuiKey_M, false) && !ImGui::GetIO().KeyCtrl && isToolAvailable(EditTool::MergeByDistance)) {
+            currentTool = EditTool::MergeByDistance;
             if (onToolChanged) onToolChanged(currentTool);
             changed = true;
         }
@@ -1446,12 +1561,32 @@ class EditModeSaveBar {
 public:
     std::function<void()> onSave;
     std::function<void()> onCancel;
+    std::function<void()> onCommit;
     
-    void draw(bool hasChanges, float panelWidth) {
+    void draw(bool hasChanges, bool hasUncommitted, float panelWidth) {
         ImGui::Spacing();
         ImGui::Separator();
         ImGui::Spacing();
         
+        // Row 1: Commit button (full width) — like Maya's "Freeze History"
+        ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.2f, 0.45f, 0.7f, 1.0f));
+        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.3f, 0.55f, 0.8f, 1.0f));
+        ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.15f, 0.35f, 0.6f, 1.0f));
+        
+        ImGui::BeginDisabled(!hasUncommitted);
+        if (ImGui::Button(loc("Commit Changes"), ImVec2(panelWidth - 16, 28))) {
+            if (onCommit) onCommit();
+        }
+        ImGui::EndDisabled();
+        if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
+            ImGui::SetTooltip("%s", loc("Freeze history: save current state as new baseline.\nFuture undo/cancel will only go back to this point."));
+        }
+        
+        ImGui::PopStyleColor(3);
+        
+        ImGui::Spacing();
+        
+        // Row 2: Save & Exit + Cancel
         float btnWidth = (panelWidth - 30) / 2.0f;
         
         // 保存按钮
@@ -1477,15 +1612,18 @@ public:
             if (onCancel) onCancel();
         }
         if (ImGui::IsItemHovered()) {
-            ImGui::SetTooltip("%s", loc("Discard changes and return to Scene mode"));
+            ImGui::SetTooltip("%s", loc("Discard all uncommitted changes and return to baseline"));
         }
         
         ImGui::PopStyleColor(2);
         
         // 修改提示
-        if (hasChanges) {
+        if (hasUncommitted) {
             ImGui::Spacing();
-            ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.2f, 1.0f), "%s", loc("* Unsaved changes"));
+            ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.2f, 1.0f), "%s", loc("* Uncommitted changes"));
+        } else if (hasChanges) {
+            ImGui::Spacing();
+            ImGui::TextColored(ImVec4(0.5f, 0.8f, 0.5f, 1.0f), "%s", loc("All changes committed"));
         }
     }
 };

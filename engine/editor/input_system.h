@@ -11,6 +11,7 @@
 
 #include "engine/editor/edit_module.h"
 #include "engine/editor/mode_handler.h"
+#include "engine/editor/edit_mode_handler.h"
 #include "engine/editor/gizmo.h"
 #include "engine/editor/command.h"
 #include "engine/editor/commands/scene_commands.h"
@@ -152,12 +153,34 @@ private:
         bool ctrl = event.isCtrl();
         bool shift = event.isShift();
         
-        // Global shortcuts
+        // Global shortcuts — Undo/Redo
+        // In Edit mode, route to EditMesh's internal undo system
+        // In other modes, use scene-level command history
         if (ctrl && wParam == 'Z') {
+            if (m_ctx.modeHandlers->getCurrentMode() == EditorMode::Edit) {
+                auto* editHandler = dynamic_cast<EditModeHandler*>(
+                    m_ctx.modeHandlers->getHandler(EditorMode::Edit));
+                if (editHandler) {
+                    if (shift) editHandler->redoMeshEdit();
+                    else editHandler->undoMeshEdit();
+                    return 0;
+                }
+            }
             shift ? getCommandHistory().redo() : getCommandHistory().undo();
             return 0;
         }
-        if (ctrl && wParam == 'Y') { getCommandHistory().redo(); return 0; }
+        if (ctrl && wParam == 'Y') {
+            if (m_ctx.modeHandlers->getCurrentMode() == EditorMode::Edit) {
+                auto* editHandler = dynamic_cast<EditModeHandler*>(
+                    m_ctx.modeHandlers->getHandler(EditorMode::Edit));
+                if (editHandler) {
+                    editHandler->redoMeshEdit();
+                    return 0;
+                }
+            }
+            getCommandHistory().redo();
+            return 0;
+        }
         if (ctrl && wParam == 'D') {
             if (auto* sel = m_ctx.scene->getSelectedEntity()) {
                 getCommandHistory().execute(std::make_unique<DuplicateEntityCommand>(m_ctx.scene, sel));
@@ -272,7 +295,19 @@ private:
     }
     
     LRESULT handleMouseUp(int button, const InputEvent& event) {
-        // Mode handler FIRST (MeshEditGizmo endDrag has priority in Edit mode)
+        // Camera mode release has HIGHEST priority.
+        // When viewport is orbiting/panning/zooming, the MouseUp MUST reach
+        // the viewport to stop the camera movement. This is critical because
+        // the user may release Alt before releasing the mouse button, so
+        // event.isAlt() can be false even during a camera orbit release.
+        if (m_ctx.viewport && m_ctx.viewport->cameraMode != CameraMode::None) {
+            m_ctx.viewport->onMouseUp(button);
+            if (button == 0) *m_ctx.mouseWasDown = false;
+            if (m_ctx.viewport->cameraMode == CameraMode::None) ReleaseCapture();
+            return 0;
+        }
+        
+        // Mode handler (MeshEditGizmo endDrag has priority in Edit mode)
         if (m_ctx.modeHandlers->handleInput(event)) {
             if (button == 0) *m_ctx.mouseWasDown = false;
             ReleaseCapture();
@@ -299,7 +334,14 @@ private:
     }
     
     LRESULT handleMouseMove(float mouseX, float mouseY, const InputEvent& event) {
-        // Mode handler FIRST (MeshEditGizmo drag has priority in Edit mode)
+        // Camera mode has highest priority during orbit/pan/zoom
+        // (prevents edit mode from intercepting camera movement)
+        if (m_ctx.viewport && m_ctx.viewport->cameraMode != CameraMode::None && m_ctx.getSceneRadius) {
+            m_ctx.viewport->onMouseMove(mouseX, mouseY, m_ctx.getSceneRadius());
+            return 0;
+        }
+        
+        // Mode handler (MeshEditGizmo drag has priority in Edit mode)
         if (m_ctx.modeHandlers->handleInput(event)) return 0;
         
         // Scene-level gizmo drag (only when mode handler didn't consume)
@@ -312,10 +354,6 @@ private:
             return 0;
         }
         
-        // Fallback camera
-        if (m_ctx.viewport && m_ctx.viewport->cameraMode != CameraMode::None && m_ctx.getSceneRadius) {
-            m_ctx.viewport->onMouseMove(mouseX, mouseY, m_ctx.getSceneRadius());
-        }
         return 0;
     }
     
