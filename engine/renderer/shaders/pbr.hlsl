@@ -190,30 +190,20 @@ float4 PSMain(PSInput input) : SV_TARGET {
     float3 kD = (1.0 - F) * (1.0 - metal);
     float3 diffuse = kD * albedo / PI;
     
-    // Shadow
-    float3 shadowCoord = input.shadowCoord.xyz / input.shadowCoord.w;
-    shadowCoord.xy = shadowCoord.xy * 0.5 + 0.5;
-    shadowCoord.y = 1.0 - shadowCoord.y;  // Flip Y for DX
-    float shadow = sampleShadowPCF(shadowCoord, N, lightDir);
-    
-    float3 lightColor = float3(1.0, 0.98, 0.95) * 2.5;
-    float3 Lo = (diffuse + specular) * NdotL * lightColor * shadow;
-    
-    // Ambient - use IBL or fallback to simple hemisphere
+    // Studio-style ambient lighting (no main directional light)
+    // This provides a clean preview; scene lights can be added later
     float3 ambient;
     if (iblEnabled > 0.5) {
-        // Rotate normal for environment rotation
+        // IBL path (for future HDR environment maps)
         float3 rotatedN = rotateY(N, iblRotation);
         float3 R = reflect(-V, N);
         float3 rotatedR = rotateY(R, iblRotation);
         
-        // IBL Diffuse (Irradiance)
         float3 irradiance = irradianceMap.Sample(texSampler, rotatedN).rgb;
         float3 F_ibl = fresnelSchlickRoughness(NdotV, F0, rough);
         float3 kD_ibl = (1.0 - F_ibl) * (1.0 - metal);
         float3 diffuseIBL = irradiance * albedo * kD_ibl;
         
-        // IBL Specular (Prefiltered + BRDF LUT)
         float mipLevel = rough * iblMaxMip;
         float3 prefilteredColor = prefilteredMap.SampleLevel(texSampler, rotatedR, mipLevel).rgb;
         float2 brdf = brdfLUT.Sample(texSampler, float2(NdotV, rough)).rg;
@@ -221,14 +211,21 @@ float4 PSMain(PSInput input) : SV_TARGET {
         
         ambient = (diffuseIBL + specularIBL) * iblIntensity;
     } else {
-        // Fallback: simple hemisphere ambient
-        float3 skyColor = float3(0.5, 0.6, 0.8);
-        float3 groundColor = float3(0.3, 0.25, 0.2);
-        float3 ambientColor = lerp(groundColor, skyColor, N.y * 0.5 + 0.5);
-        ambient = albedo * ambientColor * 0.25;
+        // 3-point studio lighting simulation
+        // Key: strong from top-front, Fill: softer from sides
+        float3 keyDir = normalize(float3(0.0, 0.7, 0.7));    // Top-front
+        float3 fillDir1 = normalize(float3(0.8, 0.1, 0.5));  // Right-front
+        float3 fillDir2 = normalize(float3(-0.8, 0.1, 0.5)); // Left-front
+        
+        float keyLight = max(dot(N, keyDir), 0.0) * 0.55;    // Stronger key
+        float fillLight = (max(dot(N, fillDir1), 0.0) + max(dot(N, fillDir2), 0.0)) * 0.15;
+        float baseAmbient = 0.22;  // Lower base = more contrast
+        
+        float totalLight = baseAmbient + keyLight + fillLight;
+        ambient = albedo * float3(0.98, 0.96, 0.94) * totalLight;
     }
     
-    float3 color = ambient + Lo;
+    float3 color = ambient;
     
     // ACES Tone Mapping
     float a_tm = 2.51; float b_tm = 0.03; float c_tm = 2.43; float d_tm = 0.59; float e_tm = 0.14;

@@ -59,44 +59,8 @@ void InitWindow(DxContext& ctx) {
 
 void InitDx(DxContext& ctx) {
     luma::rhi::NativeWindow wnd{ctx.hwnd, ctx.width, ctx.height};
-    ctx.backend = luma::rhi::create_dx12_backend(wnd);
+    ctx.backend = std::make_shared<luma::rhi::Dx12Backend>(wnd);
     ctx.renderGraph = std::make_unique<luma::render_graph::RenderGraph>(ctx.backend);
-}
-
-void PopulateCommandList(DxContext& ctx, float r, float g, float b) {
-    ThrowIfFailed(ctx.commandAllocators[ctx.frameIndex]->Reset(), "Allocator Reset");
-    ThrowIfFailed(ctx.commandList->Reset(ctx.commandAllocators[ctx.frameIndex].Get(), nullptr), "CommandList Reset");
-
-    D3D12_RESOURCE_BARRIER barrier{};
-    barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
-    barrier.Flags = D3D12_RESOURCE_BARRIER_FLAG_NONE;
-    barrier.Transition.pResource = ctx.renderTargets[ctx.frameIndex].Get();
-    barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_PRESENT;
-    barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_RENDER_TARGET;
-    barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
-    ctx.commandList->ResourceBarrier(1, &barrier);
-
-    D3D12_CPU_DESCRIPTOR_HANDLE rtvHandle = ctx.rtvHeap->GetCPUDescriptorHandleForHeapStart();
-    rtvHandle.ptr += static_cast<SIZE_T>(ctx.frameIndex) * ctx.rtvDescriptorSize;
-    FLOAT clearColor[] = {r, g, b, 1.0f};
-    ctx.commandList->ClearRenderTargetView(rtvHandle, clearColor, 0, nullptr);
-
-    barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_RENDER_TARGET;
-    barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_PRESENT;
-    ctx.commandList->ResourceBarrier(1, &barrier);
-
-    ThrowIfFailed(ctx.commandList->Close(), "CommandList Close");
-}
-
-void WaitForGpu(DxContext& ctx) {
-    const UINT64 fenceToWaitFor = ctx.fenceValue;
-    ThrowIfFailed(ctx.commandQueue->Signal(ctx.fence.Get(), fenceToWaitFor), "Fence Signal");
-    ctx.fenceValue++;
-    if (ctx.fence->GetCompletedValue() < fenceToWaitFor) {
-        ThrowIfFailed(ctx.fence->SetEventOnCompletion(fenceToWaitFor, ctx.fenceEvent), "SetEventOnCompletion");
-        WaitForSingleObject(ctx.fenceEvent, INFINITE);
-    }
-    ctx.frameIndex = ctx.swapChain->GetCurrentBackBufferIndex();
 }
 
 void RenderFrame(DxContext& ctx, float t) {
@@ -148,8 +112,6 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
             RenderFrame(ctx, engine.timeline().time());
         }
     }
-    WaitForGpu(ctx);
-    CloseHandle(ctx.fenceEvent);
     return 0;
 }
 

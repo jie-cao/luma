@@ -394,7 +394,7 @@ private:
         
         info.preset.name = "talking";
         info.preset.data.setWeight(ARKitBlendShapes::jawOpen, 0.3f);
-        info.preset.data.setWeight(ARKitBlendShapes::mouthOpen, 0.2f);
+        info.preset.data.setWeight(ARKitBlendShapes::mouthFunnel, 0.2f);
         
         addExpressionWithPreset(info);
     }
@@ -757,7 +757,7 @@ private:
         info.preset.name = "anime_dead";
         info.preset.data.setWeight(ARKitBlendShapes::eyeBlinkLeft, 0.7f);
         info.preset.data.setWeight(ARKitBlendShapes::eyeBlinkRight, 0.7f);
-        info.preset.data.setWeight(ARKitBlendShapes::mouthOpen, 0.3f);
+        info.preset.data.setWeight(ARKitBlendShapes::mouthFunnel, 0.3f);
         info.preset.data.setWeight(ARKitBlendShapes::jawOpen, 0.2f);
         
         addExpressionWithPreset(info);

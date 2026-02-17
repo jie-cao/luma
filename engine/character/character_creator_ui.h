@@ -144,6 +144,20 @@ private:
     std::string exportPath_ = "character.glb";
     int exportFormatIndex_ = 0;
     
+    // Photo import state
+    bool photoImportActive_ = false;
+    bool photoImportCompleted_ = false;
+    float photoImportProgress_ = 0.0f;
+    std::string photoImportStatus_;
+    
+    // Face region editing
+    FaceRegion currentFaceRegion_ = FaceRegion::Overall;
+    bool faceRegionEditing_ = false;
+    
+    // Comparison mode
+    bool showComparison_ = false;
+    FaceShapeParams comparisonSnapshot_;
+    
     // === Render Functions ===
     
     void renderMainPanel();
@@ -507,6 +521,8 @@ void CharacterCreatorUI::renderFaceShapePanel() {
     auto& face = character_->getFace();
     auto& shape = face.getShapeParams();
     
+    bool changed = false;
+    
     ImGui::Text("Face Shape");
     
     // Face presets
@@ -519,6 +535,7 @@ void CharacterCreatorUI::renderFaceShapePanel() {
                     for (const auto* preset : presets) {
                         if (ImGui::Selectable(preset->name.c_str())) {
                             face.setShapeParams(preset->shapeParams);
+                            changed = true;
                         }
                     }
                     ImGui::TreePop();
@@ -530,88 +547,110 @@ void CharacterCreatorUI::renderFaceShapePanel() {
     
     ImGui::Separator();
     
-    sliderWithReset("Face Width", &shape.faceWidth, 0.0f, 1.0f);
-    sliderWithReset("Face Length", &shape.faceLength, 0.0f, 1.0f);
-    sliderWithReset("Face Roundness", &shape.faceRoundness, 0.0f, 1.0f);
+    changed |= sliderWithReset("Face Width", &shape.faceWidth, 0.0f, 1.0f);
+    changed |= sliderWithReset("Face Length", &shape.faceLength, 0.0f, 1.0f);
+    changed |= sliderWithReset("Face Roundness", &shape.faceRoundness, 0.0f, 1.0f);
     
     ImGui::Separator();
     ImGui::Text("Forehead");
-    sliderWithReset("Height", &shape.foreheadHeight, 0.0f, 1.0f);
-    sliderWithReset("Width", &shape.foreheadWidth, 0.0f, 1.0f);
-    sliderWithReset("Slope", &shape.foreheadSlope, 0.0f, 1.0f);
+    changed |= sliderWithReset("Height", &shape.foreheadHeight, 0.0f, 1.0f);
+    changed |= sliderWithReset("Width", &shape.foreheadWidth, 0.0f, 1.0f);
+    changed |= sliderWithReset("Slope", &shape.foreheadSlope, 0.0f, 1.0f);
     
     ImGui::Separator();
     ImGui::Text("Jaw & Chin");
-    sliderWithReset("Jaw Width", &shape.jawWidth, 0.0f, 1.0f);
-    sliderWithReset("Jaw Angle", &shape.jawAngle, 0.0f, 1.0f);
-    sliderWithReset("Jaw Line", &shape.jawLine, 0.0f, 1.0f);
-    sliderWithReset("Chin Length", &shape.chinLength, 0.0f, 1.0f);
-    sliderWithReset("Chin Width", &shape.chinWidth, 0.0f, 1.0f);
-    sliderWithReset("Chin Shape", &shape.chinShape, 0.0f, 1.0f);
+    changed |= sliderWithReset("Jaw Width", &shape.jawWidth, 0.0f, 1.0f);
+    changed |= sliderWithReset("Jaw Angle", &shape.jawAngle, 0.0f, 1.0f);
+    changed |= sliderWithReset("Jaw Line", &shape.jawLine, 0.0f, 1.0f);
+    changed |= sliderWithReset("Chin Length", &shape.chinLength, 0.0f, 1.0f);
+    changed |= sliderWithReset("Chin Width", &shape.chinWidth, 0.0f, 1.0f);
+    changed |= sliderWithReset("Chin Shape", &shape.chinShape, 0.0f, 1.0f);
     
     ImGui::Separator();
     ImGui::Text("Cheeks");
-    sliderWithReset("Cheekbone Height", &shape.cheekboneHeight, 0.0f, 1.0f);
-    sliderWithReset("Cheekbone Width", &shape.cheekboneWidth, 0.0f, 1.0f);
-    sliderWithReset("Cheekbone Prominence", &shape.cheekboneProminence, 0.0f, 1.0f);
-    sliderWithReset("Cheek Fullness", &shape.cheekFullness, 0.0f, 1.0f);
+    changed |= sliderWithReset("Cheekbone Height", &shape.cheekboneHeight, 0.0f, 1.0f);
+    changed |= sliderWithReset("Cheekbone Width", &shape.cheekboneWidth, 0.0f, 1.0f);
+    changed |= sliderWithReset("Cheekbone Prominence", &shape.cheekboneProminence, 0.0f, 1.0f);
+    changed |= sliderWithReset("Cheek Fullness", &shape.cheekFullness, 0.0f, 1.0f);
+    
+    if (changed) {
+        face.applyParameters();
+    }
 }
 
 void CharacterCreatorUI::renderFaceEyesPanel() {
     auto& face = character_->getFace();
     auto& shape = face.getShapeParams();
     
+    bool changed = false;
+    
     ImGui::Text("Eyes");
     
-    sliderWithReset("Size", &shape.eyeSize, 0.0f, 1.0f);
-    sliderWithReset("Width", &shape.eyeWidth, 0.0f, 1.0f);
-    sliderWithReset("Height Position", &shape.eyeHeight, 0.0f, 1.0f);
-    sliderWithReset("Spacing", &shape.eyeSpacing, 0.0f, 1.0f);
-    sliderWithReset("Angle", &shape.eyeAngle, 0.0f, 1.0f);
-    sliderWithReset("Depth", &shape.eyeDepth, 0.0f, 1.0f);
-    sliderWithReset("Upper Eyelid", &shape.upperEyelid, 0.0f, 1.0f);
-    sliderWithReset("Lower Eyelid", &shape.lowerEyelid, 0.0f, 1.0f);
+    changed |= sliderWithReset("Size", &shape.eyeSize, 0.0f, 1.0f);
+    changed |= sliderWithReset("Width", &shape.eyeWidth, 0.0f, 1.0f);
+    changed |= sliderWithReset("Height Position", &shape.eyeHeight, 0.0f, 1.0f);
+    changed |= sliderWithReset("Spacing", &shape.eyeSpacing, 0.0f, 1.0f);
+    changed |= sliderWithReset("Angle", &shape.eyeAngle, 0.0f, 1.0f);
+    changed |= sliderWithReset("Depth", &shape.eyeDepth, 0.0f, 1.0f);
+    changed |= sliderWithReset("Upper Eyelid", &shape.upperEyelid, 0.0f, 1.0f);
+    changed |= sliderWithReset("Lower Eyelid", &shape.lowerEyelid, 0.0f, 1.0f);
     
     ImGui::Separator();
     ImGui::Text("Eyebrows");
     
-    sliderWithReset("Brow Height", &shape.browHeight, 0.0f, 1.0f);
-    sliderWithReset("Brow Thickness", &shape.browThickness, 0.0f, 1.0f);
-    sliderWithReset("Brow Angle", &shape.browAngle, 0.0f, 1.0f);
-    sliderWithReset("Brow Curve", &shape.browCurve, 0.0f, 1.0f);
+    changed |= sliderWithReset("Brow Height", &shape.browHeight, 0.0f, 1.0f);
+    changed |= sliderWithReset("Brow Thickness", &shape.browThickness, 0.0f, 1.0f);
+    changed |= sliderWithReset("Brow Angle", &shape.browAngle, 0.0f, 1.0f);
+    changed |= sliderWithReset("Brow Curve", &shape.browCurve, 0.0f, 1.0f);
+    
+    if (changed) {
+        face.applyParameters();
+    }
 }
 
 void CharacterCreatorUI::renderFaceNosePanel() {
     auto& face = character_->getFace();
     auto& shape = face.getShapeParams();
     
+    bool changed = false;
+    
     ImGui::Text("Nose");
     
-    sliderWithReset("Length", &shape.noseLength, 0.0f, 1.0f);
-    sliderWithReset("Width", &shape.noseWidth, 0.0f, 1.0f);
-    sliderWithReset("Height", &shape.noseHeight, 0.0f, 1.0f);
-    sliderWithReset("Bridge", &shape.noseBridge, 0.0f, 1.0f);
-    sliderWithReset("Bridge Curve", &shape.noseBridgeCurve, 0.0f, 1.0f);
-    sliderWithReset("Tip Shape", &shape.noseTip, 0.0f, 1.0f);
-    sliderWithReset("Tip Angle", &shape.noseTipAngle, 0.0f, 1.0f);
-    sliderWithReset("Nostril Width", &shape.nostrilWidth, 0.0f, 1.0f);
-    sliderWithReset("Nostril Flare", &shape.nostrilFlare, 0.0f, 1.0f);
+    changed |= sliderWithReset("Length", &shape.noseLength, 0.0f, 1.0f);
+    changed |= sliderWithReset("Width", &shape.noseWidth, 0.0f, 1.0f);
+    changed |= sliderWithReset("Height", &shape.noseHeight, 0.0f, 1.0f);
+    changed |= sliderWithReset("Bridge", &shape.noseBridge, 0.0f, 1.0f);
+    changed |= sliderWithReset("Bridge Curve", &shape.noseBridgeCurve, 0.0f, 1.0f);
+    changed |= sliderWithReset("Tip Shape", &shape.noseTip, 0.0f, 1.0f);
+    changed |= sliderWithReset("Tip Angle", &shape.noseTipAngle, 0.0f, 1.0f);
+    changed |= sliderWithReset("Nostril Width", &shape.nostrilWidth, 0.0f, 1.0f);
+    changed |= sliderWithReset("Nostril Flare", &shape.nostrilFlare, 0.0f, 1.0f);
+    
+    if (changed) {
+        face.applyParameters();
+    }
 }
 
 void CharacterCreatorUI::renderFaceMouthPanel() {
     auto& face = character_->getFace();
     auto& shape = face.getShapeParams();
     
+    bool changed = false;
+    
     ImGui::Text("Mouth");
     
-    sliderWithReset("Width", &shape.mouthWidth, 0.0f, 1.0f);
-    sliderWithReset("Height Position", &shape.mouthHeight, 0.0f, 1.0f);
-    sliderWithReset("Upper Lip", &shape.upperLipThickness, 0.0f, 1.0f);
-    sliderWithReset("Lower Lip", &shape.lowerLipThickness, 0.0f, 1.0f);
-    sliderWithReset("Lip Protrusion", &shape.lipProtrusion, 0.0f, 1.0f);
-    sliderWithReset("Mouth Corners", &shape.mouthCorners, 0.0f, 1.0f);
-    sliderWithReset("Lip Curve", &shape.lipCurve, 0.0f, 1.0f);
-    sliderWithReset("Philtrum", &shape.philtrum, 0.0f, 1.0f);
+    changed |= sliderWithReset("Width", &shape.mouthWidth, 0.0f, 1.0f);
+    changed |= sliderWithReset("Height Position", &shape.mouthHeight, 0.0f, 1.0f);
+    changed |= sliderWithReset("Upper Lip", &shape.upperLipThickness, 0.0f, 1.0f);
+    changed |= sliderWithReset("Lower Lip", &shape.lowerLipThickness, 0.0f, 1.0f);
+    changed |= sliderWithReset("Lip Protrusion", &shape.lipProtrusion, 0.0f, 1.0f);
+    changed |= sliderWithReset("Mouth Corners", &shape.mouthCorners, 0.0f, 1.0f);
+    changed |= sliderWithReset("Lip Curve", &shape.lipCurve, 0.0f, 1.0f);
+    changed |= sliderWithReset("Philtrum", &shape.philtrum, 0.0f, 1.0f);
+    
+    if (changed) {
+        face.applyParameters();
+    }
 }
 
 void CharacterCreatorUI::renderFaceTexturePanel() {

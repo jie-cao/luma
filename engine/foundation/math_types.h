@@ -309,6 +309,15 @@ struct Mat4 {
             (m[2] * p.x + m[6] * p.y + m[10] * p.z + m[14]) / w
         };
     }
+    
+    // Transform direction (rotation only, no translation)
+    Vec3 transformDirection(const Vec3& d) const {
+        return {
+            m[0] * d.x + m[4] * d.y + m[8]  * d.z,
+            m[1] * d.x + m[5] * d.y + m[9]  * d.z,
+            m[2] * d.x + m[6] * d.y + m[10] * d.z
+        };
+    }
 };
 
 }  // namespace luma

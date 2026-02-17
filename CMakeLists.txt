@@ -52,6 +52,30 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(stb)
 
+# ===== ONNX Runtime for AI Face Analysis =====
+option(LUMA_USE_ONNXRUNTIME "Enable ONNX Runtime for AI-powered face analysis" ON)
+
+if(LUMA_USE_ONNXRUNTIME AND WIN32)
+    set(ONNXRUNTIME_VERSION "1.17.0")
+    FetchContent_Declare(
+        onnxruntime_prebuilt
+        URL "https://github.com/microsoft/onnxruntime/releases/download/v${ONNXRUNTIME_VERSION}/onnxruntime-win-x64-${ONNXRUNTIME_VERSION}.zip"
+    )
+    FetchContent_GetProperties(onnxruntime_prebuilt)
+    if(NOT onnxruntime_prebuilt_POPULATED)
+        FetchContent_Populate(onnxruntime_prebuilt)
+    endif()
+
+    add_library(onnxruntime INTERFACE)
+    target_include_directories(onnxruntime INTERFACE "${onnxruntime_prebuilt_SOURCE_DIR}/include")
+    target_link_directories(onnxruntime INTERFACE "${onnxruntime_prebuilt_SOURCE_DIR}/lib")
+    target_link_libraries(onnxruntime INTERFACE onnxruntime.lib)
+    target_compile_definitions(onnxruntime INTERFACE LUMA_HAS_ONNXRUNTIME=1)
+
+    set(ORT_DLL_DIR "${onnxruntime_prebuilt_SOURCE_DIR}/lib")
+    message(STATUS "ONNX Runtime ${ONNXRUNTIME_VERSION} enabled, DLLs in: ${ORT_DLL_DIR}")
+endif()
+
 # ===== Core Engine Library =====
 set(LUMA_CORE_SOURCES
     engine/foundation/log.cpp
@@ -72,6 +96,7 @@ set(LUMA_CORE_SOURCES
 if(WIN32)
     list(APPEND LUMA_CORE_SOURCES
         engine/renderer/unified_renderer_dx12.cpp
+        engine/renderer/rhi/dx12_backend.cpp
     )
 elseif(APPLE)
     list(APPEND LUMA_CORE_SOURCES
@@ -84,6 +109,11 @@ add_library(luma_core ${LUMA_CORE_SOURCES})
 target_include_directories(luma_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 target_include_directories(luma_core PRIVATE ${assimp_SOURCE_DIR}/include ${assimp_BINARY_DIR}/include ${stb_SOURCE_DIR})
 target_link_libraries(luma_core PUBLIC assimp)
+
+# ONNX Runtime (optional)
+if(LUMA_USE_ONNXRUNTIME AND TARGET onnxruntime)
+    target_link_libraries(luma_core PUBLIC onnxruntime)
+endif()
 
 # Platform-specific linking
 if(WIN32)
@@ -127,7 +157,7 @@ target_link_libraries(luma_packager PRIVATE luma_core)
 
 # ===== Windows DX12 Clear Example =====
 if(WIN32)
-    add_executable(luma_dx12_clear apps/dx12_clear/main.cpp)
+    add_executable(luma_dx12_clear WIN32 apps/dx12_clear/main.cpp)
     target_link_libraries(luma_dx12_clear PRIVATE luma_core d3d12 dxgi)
     target_compile_definitions(luma_dx12_clear PRIVATE UNICODE _UNICODE)
 endif()
@@ -155,6 +185,17 @@ if(LUMA_USE_IMGUI AND WIN32)
     add_executable(luma_studio apps/luma_studio/main.cpp)
     target_link_libraries(luma_studio PRIVATE luma_core imgui d3d12 dxgi)
     target_compile_definitions(luma_studio PRIVATE UNICODE _UNICODE IMGUI_IMPL_WIN32_DISABLE_GAMEPAD)
+    target_compile_options(luma_studio PRIVATE /bigobj)
+
+    # Copy ONNX Runtime DLL to output directory
+    if(LUMA_USE_ONNXRUNTIME AND DEFINED ORT_DLL_DIR)
+        add_custom_command(TARGET luma_studio POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                "${ORT_DLL_DIR}/onnxruntime.dll"
+                "$<TARGET_FILE_DIR:luma_studio>/onnxruntime.dll"
+            COMMENT "Copying ONNX Runtime DLL"
+        )
+    endif()
 endif()
 
 # ===== macOS LUMA Studio =====

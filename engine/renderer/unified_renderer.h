@@ -426,6 +426,11 @@ public:
     uint32_t getWidth() const;
     uint32_t getHeight() const;
     
+    // Camera position and target for ray picking
+    Vec3 getCameraPosition() const;
+    Vec3 getCameraTarget() const;
+    void setCameraForPicking(const Vec3& pos, const Vec3& target);
+    
     // Get inverse view-projection matrix (for picking/ray generation)
     // Returns false if not available
     bool getViewProjectionInverse(float* outMatrix16) const;

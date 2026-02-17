@@ -517,28 +517,39 @@ public:
     BlendShapeMesh* getBlendShapeMesh() { return blendShapeMesh_; }
     
     // Setup mapping from face params to blend shape channels
-    // Setup mapping from FaceShapeParams to FaceTemplateMesh blend shape channels.
-    // First arg = blend shape channel name (camelCase, matches FaceTemplateMesh),
-    // second arg = parameter key (underscore, matches FaceShapeParams::getAllParams()).
+    // Setup mapping from FaceShapeParams to BlendShape channels.
+    // Supports both old camelCase names (procedural) and new id_ prefixed names (pre-sculpted).
+    // First arg = blend shape channel name, second arg = parameter key (underscore format).
     void setupDefaultMappings() {
         shapeMappings_.clear();
         
-        // Overall face
-        addShapeMapping("faceWidth", "face_width");
+        // Overall face - try new names first, fallback to old
+        addShapeMapping("id_face_width", "face_width");
+        addShapeMapping("faceWidth", "face_width");  // fallback
+        addShapeMapping("id_face_length", "face_length");
         addShapeMapping("faceLength", "face_length");
+        addShapeMapping("id_face_round", "face_roundness");
         addShapeMapping("faceRoundness", "face_roundness");
         
         // Forehead
+        addShapeMapping("id_forehead_height", "forehead_height");
         addShapeMapping("foreheadHeight", "forehead_height");
+        addShapeMapping("id_forehead_width", "forehead_width");
         addShapeMapping("foreheadWidth", "forehead_width");
+        addShapeMapping("id_forehead_slope", "forehead_slope");
         addShapeMapping("foreheadSlope", "forehead_slope");
         
         // Eyes
+        addShapeMapping("id_eye_size", "eye_size");
         addShapeMapping("eyeSize", "eye_size");
         addShapeMapping("eyeWidth", "eye_width");
+        addShapeMapping("id_eye_height", "eye_height");
         addShapeMapping("eyeHeight", "eye_height");
+        addShapeMapping("id_eye_spacing", "eye_spacing");
         addShapeMapping("eyeSpacing", "eye_spacing");
+        addShapeMapping("id_eye_angle_up", "eye_angle");
         addShapeMapping("eyeAngle", "eye_angle");
+        addShapeMapping("id_eye_depth", "eye_depth");
         addShapeMapping("eyeDepth", "eye_depth");
         addShapeMapping("upperEyelid", "upper_eyelid");
         addShapeMapping("lowerEyelid", "lower_eyelid");
@@ -546,55 +557,81 @@ public:
         addShapeMapping("eyeCornerOuter", "eye_corner_outer");
         
         // Eyebrows
+        addShapeMapping("id_brow_height", "brow_height");
         addShapeMapping("browHeight", "brow_height");
         addShapeMapping("browThickness", "brow_thickness");
         addShapeMapping("browLength", "brow_length");
         addShapeMapping("browAngle", "brow_angle");
+        addShapeMapping("id_brow_spacing", "brow_spacing");
         addShapeMapping("browSpacing", "brow_spacing");
         addShapeMapping("browCurve", "brow_curve");
         
         // Nose
+        addShapeMapping("id_nose_length", "nose_length");
         addShapeMapping("noseLength", "nose_length");
+        addShapeMapping("id_nose_width", "nose_width");
         addShapeMapping("noseWidth", "nose_width");
+        addShapeMapping("id_nose_height", "nose_height");
         addShapeMapping("noseHeight", "nose_height");
+        addShapeMapping("id_nose_bridge_width", "nose_bridge");
         addShapeMapping("noseBridge", "nose_bridge");
+        addShapeMapping("id_nose_bridge_curve", "nose_bridge_curve");
         addShapeMapping("noseBridgeCurve", "nose_bridge_curve");
+        addShapeMapping("id_nose_tip_up", "nose_tip");
         addShapeMapping("noseTip", "nose_tip");
         addShapeMapping("noseTipAngle", "nose_tip_angle");
+        addShapeMapping("id_nostril_width", "nostril_width");
         addShapeMapping("nostrilWidth", "nostril_width");
+        addShapeMapping("id_nostril_flare", "nostril_flare");
         addShapeMapping("nostrilFlare", "nostril_flare");
         
         // Mouth
+        addShapeMapping("id_mouth_width", "mouth_width");
         addShapeMapping("mouthWidth", "mouth_width");
         addShapeMapping("mouthHeight", "mouth_height");
+        addShapeMapping("id_lip_upper_thick", "upper_lip_thickness");
         addShapeMapping("upperLipThickness", "upper_lip_thickness");
+        addShapeMapping("id_lip_lower_thick", "lower_lip_thickness");
         addShapeMapping("lowerLipThickness", "lower_lip_thickness");
+        addShapeMapping("id_lip_protrusion", "lip_protrusion");
         addShapeMapping("lipProtrusion", "lip_protrusion");
         addShapeMapping("mouthCorners", "mouth_corners");
+        addShapeMapping("id_philtrum_length", "philtrum");
         addShapeMapping("philtrum", "philtrum");
         addShapeMapping("lipCurve", "lip_curve");
         
         // Chin
+        addShapeMapping("id_chin_length", "chin_length");
         addShapeMapping("chinLength", "chin_length");
+        addShapeMapping("id_chin_width", "chin_width");
         addShapeMapping("chinWidth", "chin_width");
+        addShapeMapping("id_chin_protrusion", "chin_protrusion");
         addShapeMapping("chinProtrusion", "chin_protrusion");
         addShapeMapping("chinShape", "chin_shape");
         addShapeMapping("chinCleft", "chin_cleft");
         
         // Jaw
+        addShapeMapping("id_jaw_width", "jaw_width");
         addShapeMapping("jawWidth", "jaw_width");
+        addShapeMapping("id_jaw_angle", "jaw_angle");
         addShapeMapping("jawAngle", "jaw_angle");
         addShapeMapping("jawLine", "jaw_line");
         
         // Cheeks
+        addShapeMapping("id_cheekbone_height", "cheekbone_height");
         addShapeMapping("cheekboneHeight", "cheekbone_height");
+        addShapeMapping("id_cheekbone_width", "cheekbone_width");
         addShapeMapping("cheekboneWidth", "cheekbone_width");
+        addShapeMapping("id_cheekbone_protrusion", "cheekbone_prominence");
         addShapeMapping("cheekboneProminence", "cheekbone_prominence");
+        addShapeMapping("id_cheek_fullness", "cheek_fullness");
         addShapeMapping("cheekFullness", "cheek_fullness");
         addShapeMapping("cheekFat", "cheek_fat");
         
         // Ears
+        addShapeMapping("id_ear_size", "ear_size");
         addShapeMapping("earSize", "ear_size");
+        addShapeMapping("id_ear_angle", "ear_angle");
         addShapeMapping("earAngle", "ear_angle");
         addShapeMapping("earLobe", "ear_lobe");
         addShapeMapping("earPointiness", "ear_pointiness");

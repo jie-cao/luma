@@ -19,10 +19,7 @@
 #include <functional>
 #include <chrono>
 
-// Forward declare test namespaces
-namespace luma { namespace test { namespace MeshEditTests { inline void registerMeshEditTests(class UnitTestRunner& runner); }}}
-namespace luma { namespace test { namespace SelectionTests { inline void registerSelectionTests(class UnitTestRunner& runner); }}}
-namespace luma { namespace test { namespace ShaderTests { inline void registerShaderTests(class UnitTestRunner& runner); }}}
+// Test headers included after UnitTestRunner class definition (see bottom of this file)
 
 namespace luma {
 namespace test {
@@ -769,14 +766,7 @@ inline void registerAllTests(UnitTestRunner& runner) {
     runner.addTest("Timeline", "Timeline Playback", TimelineTests::testTimeline);
     runner.addTest("Timeline", "Timeline Markers", TimelineTests::testTimelineMarkers);
     
-    // Mesh Edit Tests (new)
-    MeshEditTests::registerMeshEditTests(runner);
-    
-    // Selection Tests (new)
-    SelectionTests::registerSelectionTests(runner);
-    
-    // Shader Tests (new)
-    ShaderTests::registerShaderTests(runner);
+    // Additional tests registered externally from run_tests.cpp
 }
 
 // ===== Run All Unit Tests =====

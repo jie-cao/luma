@@ -5,8 +5,30 @@
 #include <memory>
 #include <string>
 #include <vector>
+#include <unordered_map>
 
 namespace luma::rhi {
+
+// ===== Resource State (for barrier transitions) =====
+enum class ResourceState {
+    Undefined,
+    Present,
+    ColorAttachment,
+    DepthStencilAttachment,
+    ShaderResource,
+    CopySource,
+    CopyDest
+};
+
+// ===== Backend Abstract Interface (for RenderGraph) =====
+class Backend {
+public:
+    virtual ~Backend() = default;
+    virtual void render_clear(float r, float g, float b) = 0;
+    virtual void present() = 0;
+    virtual void transition_backbuffer(ResourceState before, ResourceState after) = 0;
+    virtual void bind_material_params(const std::unordered_map<std::string, std::string>& params) = 0;
+};
 
 // ===== Forward Declarations =====
 class Device;

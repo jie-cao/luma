@@ -1,0 +1,555 @@
+{
+  "version": "1.0",
+  "meshFile": "head_base.bin",
+  "landmarkStandard": "ibug68",
+  "landmarkCount": 68,
+  "markedCount": 68,
+  "auto_estimated": false,
+  "note": "由 LUMA Studio 手动标记",
+  "landmarks": [
+    {
+      "id": 0,
+      "name": "jaw_right_ear",
+      "region": "jaw",
+      "vertices": [8614],
+      "weights": [1.0],
+      "auto_estimated": false
+    },
+    {
+      "id": 1,
+      "name": "jaw_right_1",
+      "region": "jaw",
+      "vertices": [10398],
+      "weights": [1.0],
+      "auto_estimated": false
+    },
+    {
+      "id": 2,
+      "name": "jaw_right_2",
+      "region": "jaw",
+      "vertices": [3238],
+      "weights": [1.0],
+      "auto_estimated": false
+    },
+    {
+      "id": 3,
+      "name": "jaw_right_3",
+      "region": "jaw",
+      "vertices": [6842],
+      "weights": [1.0],
+      "auto_estimated": false
+    },
+    {
+      "id": 4,
+      "name": "jaw_right_4",
+      "region": "jaw",
+      "vertices": [2875],
+      "weights": [1.0],
+      "auto_estimated": false
+    },
+    {
+      "id": 5,
+      "name": "jaw_right_chin",
+      "region": "jaw",
+      "vertices": [9995],
+      "weights": [1.0],
+      "auto_estimated": false
+    },
+    {
+      "id": 6,
+      "name": "jaw_chin_right",
+      "region": "chin",
+      "vertices": [11543],
+      "weights": [1.0],
+      "auto_estimated": false
+    },
+    {
+      "id": 7,
+      "name": "jaw_chin_center",
+      "region": "chin",
+      "vertices": [11747],
+      "weights": [1.0],
+      "auto_estimated": false
+    },
+    {
+      "id": 8,
+      "name": "jaw_chin_bottom",
+      "region": "chin",
+      "vertices": [12358],
+      "weights": [1.0],
+      "auto_estimated": false
+    },
+    {
+      "id": 9,
+      "name": "jaw_chin_left",
+      "region": "chin",
+      "vertices": [5619],
+      "weights": [1.0],
+      "auto_estimated": false
+    },
+    {
+      "id": 10,
+      "name": "jaw_left_chin",
+      "region": "jaw",
+      "vertices": [5415],
+      "weights": [1.0],
+      "auto_estimated": false
+    },
+    {
+      "id": 11,
+      "name": "jaw_left_4",
+      "region": "jaw",
+      "vertices": [5344],
+      "weights": [1.0],
+      "auto_estimated": false
+    },
+    {
+      "id": 12,
+      "name": "jaw_left_3",
+      "region": "jaw",
+      "vertices": [5583],
+      "weights": [1.0],
+      "auto_estimated": false
+    },
+    {
+      "id": 13,
+      "name": "jaw_left_2",
+      "region": "jaw",
+      "vertices": [391],
+      "weights": [1.0],
+      "auto_estimated": false
+    },
+    {
+      "id": 14,
+      "name": "jaw_left_1",
+      "region": "jaw",
+      "vertices": [338],
+      "weights": [1.0],
+      "auto_estimated": false
+    },
+    {
+      "id": 15,
+      "name": "jaw_left_ear_low",
+      "region": "jaw",
+      "vertices": [330],
+      "weights": [1.0],
+      "auto_estimated": false
+    },
+    {
+      "id": 16,
+      "name": "jaw_left_ear",
+      "region": "jaw",
+      "vertices": [122],
+      "weights": [1.0],
+      "auto_estimated": false
+    },
+    {
+      "id": 17,
+      "name": "left_brow_inner",
+      "region": "left_eyebrow",
+      "vertices": [1518],
+      "weights": [1.0],
+      "auto_estimated": false
+    },
+    {
+      "id": 18,
+      "name": "left_brow_1",
+      "region": "left_eyebrow",
+      "vertices": [1438],
+      "weights": [1.0],
+      "auto_estimated": false
+    },
+    {
+      "id": 19,
+      "name": "left_brow_center",
+      "region": "left_eyebrow",
+      "vertices": [1523],
+      "weights": [1.0],
+      "auto_estimated": false
+    },
+    {
+      "id": 20,
+      "name": "left_brow_2",
+      "region": "left_eyebrow",
+      "vertices": [1451],
+      "weights": [1.0],
+      "auto_estimated": false
+    },
+    {
+      "id": 21,
+      "name": "left_brow_outer",
+      "region": "left_eyebrow",
+      "vertices": [1659],
+      "weights": [1.0],
+      "auto_estimated": false
+    },
+    {
+      "id": 22,
+      "name": "right_brow_inner",
+      "region": "right_eyebrow",
+      "vertices": [7646],
+      "weights": [1.0],
+      "auto_estimated": false
+    },
+    {
+      "id": 23,
+      "name": "right_brow_1",
+      "region": "right_eyebrow",
+      "vertices": [7092],
+      "weights": [1.0],
+      "auto_estimated": false
+    },
+    {
+      "id": 24,
+      "name": "right_brow_center",
+      "region": "right_eyebrow",
+      "vertices": [7671],
+      "weights": [1.0],
+      "auto_estimated": false
+    },
+    {
+      "id": 25,
+      "name": "right_brow_2",
+      "region": "right_eyebrow",
+      "vertices": [7578],
+      "weights": [1.0],
+      "auto_estimated": false
+    },
+    {
+      "id": 26,
+      "name": "right_brow_outer",
+      "region": "right_eyebrow",
+      "vertices": [7458],
+      "weights": [1.0],
+      "auto_estimated": false
+    },
+    {
+      "id": 27,
+      "name": "nose_bridge_top",
+      "region": "nose",
+      "vertices": [12320],
+      "weights": [1.0],
+      "auto_estimated": false
+    },
+    {
+      "id": 28,
+      "name": "nose_bridge_1",
+      "region": "nose",
+      "vertices": [12438],
+      "weights": [1.0],
+      "auto_estimated": false
+    },
+    {
+      "id": 29,
+      "name": "nose_bridge_2",
+      "region": "nose",
+      "vertices": [12309],
+      "weights": [1.0],
+      "auto_estimated": false
+    },
+    {
+      "id": 30,
+      "name": "nose_bridge_bottom",
+      "region": "nose",
+      "vertices": [12287],
+      "weights": [1.0],
+      "auto_estimated": false
+    },
+    {
+      "id": 31,
+      "name": "nose_left_wing",
+      "region": "nose",
+      "vertices": [3988],
+      "weights": [1.0],
+      "auto_estimated": false
+    },
+    {
+      "id": 32,
+      "name": "nose_left_nostril",
+      "region": "nose",
+      "vertices": [458],
+      "weights": [1.0],
+      "auto_estimated": false
+    },
+    {
+      "id": 33,
+      "name": "nose_tip",
+      "region": "nose",
+      "vertices": [12300],
+      "weights": [1.0],
+      "auto_estimated": false
+    },
+    {
+      "id": 34,
+      "name": "nose_right_nostril",
+      "region": "nose",
+      "vertices": [10153],
+      "weights": [1.0],
+      "auto_estimated": false
+    },
+    {
+      "id": 35,
+      "name": "nose_right_wing",
+      "region": "nose",
+      "vertices": [6607],
+      "weights": [1.0],
+      "auto_estimated": false
+    },
+    {
+      "id": 36,
+      "name": "left_eye_outer",
+      "region": "left_eye",
+      "vertices": [580],
+      "weights": [1.0],
+      "auto_estimated": false
+    },
+    {
+      "id": 37,
+      "name": "left_eye_top_outer",
+      "region": "left_eye",
+      "vertices": [4906],
+      "weights": [1.0],
+      "auto_estimated": false
+    },
+    {
+      "id": 38,
+      "name": "left_eye_top_inner",
+      "region": "left_eye",
+      "vertices": [1139],
+      "weights": [1.0],
+      "auto_estimated": false
+    },
+    {
+      "id": 39,
+      "name": "left_eye_inner",
+      "region": "left_eye",
+      "vertices": [1254],
+      "weights": [1.0],
+      "auto_estimated": false
+    },
+    {
+      "id": 40,
+      "name": "left_eye_bottom_inner",
+      "region": "left_eye",
+      "vertices": [1053],
+      "weights": [1.0],
+      "auto_estimated": false
+    },
+    {
+      "id": 41,
+      "name": "left_eye_bottom_outer",
+      "region": "left_eye",
+      "vertices": [5951],
+      "weights": [1.0],
+      "auto_estimated": false
+    },
+    {
+      "id": 42,
+      "name": "right_eye_inner",
+      "region": "right_eye",
+      "vertices": [6702],
+      "weights": [1.0],
+      "auto_estimated": false
+    },
+    {
+      "id": 43,
+      "name": "right_eye_top_inner",
+      "region": "right_eye",
+      "vertices": [12117],
+      "weights": [1.0],
+      "auto_estimated": false
+    },
+    {
+      "id": 44,
+      "name": "right_eye_top_outer",
+      "region": "right_eye",
+      "vertices": [12204],
+      "weights": [1.0],
+      "auto_estimated": false
+    },
+    {
+      "id": 45,
+      "name": "right_eye_outer",
+      "region": "right_eye",
+      "vertices": [6708],
+      "weights": [1.0],
+      "auto_estimated": false
+    },
+    {
+      "id": 46,
+      "name": "right_eye_bottom_outer",
+      "region": "right_eye",
+      "vertices": [12079],
+      "weights": [1.0],
+      "auto_estimated": false
+    },
+    {
+      "id": 47,
+      "name": "right_eye_bottom_inner",
+      "region": "right_eye",
+      "vertices": [7181],
+      "weights": [1.0],
+      "auto_estimated": false
+    },
+    {
+      "id": 48,
+      "name": "mouth_left",
+      "region": "mouth",
+      "vertices": [5845],
+      "weights": [1.0],
+      "auto_estimated": false
+    },
+    {
+      "id": 49,
+      "name": "mouth_top_left_1",
+      "region": "mouth",
+      "vertices": [4543],
+      "weights": [1.0],
+      "auto_estimated": false
+    },
+    {
+      "id": 50,
+      "name": "mouth_top_left_2",
+      "region": "mouth",
+      "vertices": [4509],
+      "weights": [1.0],
+      "auto_estimated": false
+    },
+    {
+      "id": 51,
+      "name": "mouth_top_center",
+      "region": "mouth",
+      "vertices": [12278],
+      "weights": [1.0],
+      "auto_estimated": false
+    },
+    {
+      "id": 52,
+      "name": "mouth_top_right_2",
+      "region": "mouth",
+      "vertices": [10642],
+      "weights": [1.0],
+      "auto_estimated": false
+    },
+    {
+      "id": 53,
+      "name": "mouth_top_right_1",
+      "region": "mouth",
+      "vertices": [6906],
+      "weights": [1.0],
+      "auto_estimated": false
+    },
+    {
+      "id": 54,
+      "name": "mouth_right",
+      "region": "mouth",
+      "vertices": [9340],
+      "weights": [1.0],
+      "auto_estimated": false
+    },
+    {
+      "id": 55,
+      "name": "mouth_bottom_right_1",
+      "region": "mouth",
+      "vertices": [6329],
+      "weights": [1.0],
+      "auto_estimated": false
+    },
+    {
+      "id": 56,
+      "name": "mouth_bottom_right_2",
+      "region": "mouth",
+      "vertices": [6320],
+      "weights": [1.0],
+      "auto_estimated": false
+    },
+    {
+      "id": 57,
+      "name": "mouth_bottom_center",
+      "region": "mouth",
+      "vertices": [12365],
+      "weights": [1.0],
+      "auto_estimated": false
+    },
+    {
+      "id": 58,
+      "name": "mouth_bottom_left_2",
+      "region": "mouth",
+      "vertices": [192],
+      "weights": [1.0],
+      "auto_estimated": false
+    },
+    {
+      "id": 59,
+      "name": "mouth_bottom_left_1",
+      "region": "mouth",
+      "vertices": [201],
+      "weights": [1.0],
+      "auto_estimated": false
+    },
+    {
+      "id": 60,
+      "name": "inner_mouth_left",
+      "region": "mouth_inner",
+      "vertices": [3509],
+      "weights": [1.0],
+      "auto_estimated": false
+    },
+    {
+      "id": 61,
+      "name": "inner_mouth_top_left",
+      "region": "mouth_inner",
+      "vertices": [3509],
+      "weights": [1.0],
+      "auto_estimated": false
+    },
+    {
+      "id": 62,
+      "name": "inner_mouth_top_center",
+      "region": "mouth_inner",
+      "vertices": [12366],
+      "weights": [1.0],
+      "auto_estimated": false
+    },
+    {
+      "id": 63,
+      "name": "inner_mouth_top_right",
+      "region": "mouth_inner",
+      "vertices": [9637],
+      "weights": [1.0],
+      "auto_estimated": false
+    },
+    {
+      "id": 64,
+      "name": "inner_mouth_right",
+      "region": "mouth_inner",
+      "vertices": [9637],
+      "weights": [1.0],
+      "auto_estimated": false
+    },
+    {
+      "id": 65,
+      "name": "inner_mouth_bottom_right",
+      "region": "mouth_inner",
+      "vertices": [6322],
+      "weights": [1.0],
+      "auto_estimated": false
+    },
+    {
+      "id": 66,
+      "name": "inner_mouth_bottom_center",
+      "region": "mouth_inner",
+      "vertices": [12365],
+      "weights": [1.0],
+      "auto_estimated": false
+    },
+    {
+      "id": 67,
+      "name": "inner_mouth_bottom_left",
+      "region": "mouth_inner",
+      "vertices": [194],
+      "weights": [1.0],
+      "auto_estimated": false
+    }
+  ]
+}

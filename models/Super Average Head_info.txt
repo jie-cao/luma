@@ -1,0 +1,11 @@
+Head Mesh Info
+==============
+Source: c:\code\luma\models\Super Average Head.obj
+Vertices: 12608
+Triangles: 24820
+Neck boundary: 68 vertices at index 5409
+
+Bounds:
+  X: [-0.0833, 0.0833]
+  Y: [-0.1150, 0.1150]
+  Z: [-0.0768, 0.0768]

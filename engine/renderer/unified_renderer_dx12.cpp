@@ -164,31 +164,20 @@ float4 PSMain(PSInput input) : SV_TARGET {
         return float4(baseColor, 1.0);  // Direct color output - no lighting!
     }
     
+    // DEBUG: Visualize normals
+    return float4(normalize(input.normal) * 0.5 + 0.5, 1.0);
+    
     float4 diffuseSample = diffuseTexture.Sample(texSampler, input.uv);
     float4 normalSample = normalTexture.Sample(texSampler, input.uv);
     float4 specularSample = specularTexture.Sample(texSampler, input.uv);
     
     if (diffuseSample.a < 0.1) discard;
     
-    // Albedo
-    float3 albedo;
-    float texBrightness = diffuseSample.r + diffuseSample.g + diffuseSample.b;
-    if (texBrightness < 2.9) {
-        albedo = diffuseSample.rgb;
-    } else {
-        albedo = input.color * baseColor;
-    }
+    // Albedo - always use vertex color * baseColor for character meshes (no texture)
+    float3 albedo = input.color * baseColor;
     
-    // Normal Mapping
-    float3 N;
-    bool hasNormalMap = (abs(normalSample.r - normalSample.g) > 0.01 || abs(normalSample.b - 1.0) > 0.1);
-    if (hasNormalMap) {
-        float3 normalMap = normalSample.rgb * 2.0 - 1.0;
-        float3x3 TBN = float3x3(normalize(input.tangent), normalize(input.bitangent), normalize(input.normal));
-        N = normalize(mul(normalMap, TBN));
-    } else {
-        N = normalize(input.normal);
-    }
+    // Normal - always use vertex normal (no normal map for character meshes)
+    float3 N = normalize(input.normal);
     
     // PBR Parameters
     float metal = metallic;
@@ -229,13 +218,14 @@ float4 PSMain(PSInput input) : SV_TARGET {
     float3 kD = (1.0 - F) * (1.0 - metal);
     float3 diffuse = kD * albedo / PI;
     
-    // Shadow
-    float3 shadowCoord = input.shadowCoord.xyz / input.shadowCoord.w;
-    shadowCoord.xy = shadowCoord.xy * 0.5 + 0.5;
-    shadowCoord.y = 1.0 - shadowCoord.y;  // Flip Y for DX
-    float shadow = sampleShadowPCF(shadowCoord, N, lightDir);
+    // Shadow (temporarily disabled for debugging)
+    // float3 shadowCoord = input.shadowCoord.xyz / input.shadowCoord.w;
+    // shadowCoord.xy = shadowCoord.xy * 0.5 + 0.5;
+    // shadowCoord.y = 1.0 - shadowCoord.y;  // Flip Y for DX
+    // float shadow = sampleShadowPCF(shadowCoord, N, lightDir);
+    float shadow = 1.0;  // No shadow for now
     
-    float3 lightColor = float3(1.0, 0.98, 0.95) * 2.5;
+    float3 lightColor = float3(1.0, 0.98, 0.95) * 2.5;  // Balanced light intensity
     float3 Lo = (diffuse + specular) * NdotL * lightColor * shadow;
     
     // Ambient - use IBL or fallback to simple hemisphere
@@ -260,11 +250,9 @@ float4 PSMain(PSInput input) : SV_TARGET {
         
         ambient = (diffuseIBL + specularIBL) * iblIntensity;
     } else {
-        // Fallback: simple hemisphere ambient
-        float3 skyColor = float3(0.5, 0.6, 0.8);
-        float3 groundColor = float3(0.3, 0.25, 0.2);
-        float3 ambientColor = lerp(groundColor, skyColor, N.y * 0.5 + 0.5);
-        ambient = albedo * ambientColor * 0.25;
+        // Fallback: uniform ambient light (no directional bias)
+        float3 ambientColor = float3(0.55, 0.55, 0.58);  // Neutral gray-blue
+        ambient = albedo * ambientColor * 0.4;  // Uniform fill light
     }
     
     float3 color = ambient + Lo;
@@ -697,6 +685,10 @@ struct UnifiedRenderer::Impl {
     RHISceneConstants constants{};
     uint8_t* constantBufferMapped = nullptr;
     UINT currentDrawIndex = 0;
+    
+    // Camera for picking
+    Vec3 cameraPosition{0, 0, 5};
+    Vec3 cameraTarget{0, 0, 0};
     
     // Mesh Storage
     std::vector<DX12MeshData> meshStorage;
@@ -3043,9 +3035,10 @@ void UnifiedRenderer::render(const RHILoadedModel& model, const RHICameraParams&
     memcpy(impl_->constants.worldViewProj, wvp, sizeof(wvp));
     memcpy(impl_->constants.world, world, sizeof(world));
     
-    impl_->constants.lightDirAndFlags[0] = 0.5f;
-    impl_->constants.lightDirAndFlags[1] = -0.7f;
-    impl_->constants.lightDirAndFlags[2] = -0.5f;
+    // Key light: slightly above and to the side for better face definition
+    impl_->constants.lightDirAndFlags[0] = 0.3f;   // Slight right
+    impl_->constants.lightDirAndFlags[1] = -0.8f;  // From above
+    impl_->constants.lightDirAndFlags[2] = -0.5f;  // From front
     impl_->constants.cameraPosAndMetal[0] = eye[0];
     impl_->constants.cameraPosAndMetal[1] = eye[1];
     impl_->constants.cameraPosAndMetal[2] = eye[2];
@@ -3185,6 +3178,10 @@ void UnifiedRenderer::setCamera(const RHICameraParams& camera, float sceneRadius
     impl_->cameraPos[1] = eye[1];
     impl_->cameraPos[2] = eye[2];
     impl_->cameraSet = true;
+    
+    // Store for picking
+    impl_->cameraPosition = Vec3(eye[0], eye[1], eye[2]);
+    impl_->cameraTarget = Vec3(target[0], target[1], target[2]);
 }
 
 void UnifiedRenderer::getViewMatrix(float* outMatrix16) const {
@@ -3218,9 +3215,10 @@ void UnifiedRenderer::renderModel(const RHILoadedModel& model, const float* worl
     memcpy(impl_->constants.world, worldMatrix, 64);
     memcpy(impl_->constants.lightViewProj, impl_->lightViewProj, 64);
     
-    impl_->constants.lightDirAndFlags[0] = 0.5f;
-    impl_->constants.lightDirAndFlags[1] = -0.7f;
-    impl_->constants.lightDirAndFlags[2] = -0.5f;
+    // Key light: slightly above and to the side for better face definition
+    impl_->constants.lightDirAndFlags[0] = 0.3f;   // Slight right
+    impl_->constants.lightDirAndFlags[1] = -0.8f;  // From above
+    impl_->constants.lightDirAndFlags[2] = -0.5f;  // From front
     impl_->constants.cameraPosAndMetal[0] = impl_->cameraPos[0];
     impl_->constants.cameraPosAndMetal[1] = impl_->cameraPos[1];
     impl_->constants.cameraPosAndMetal[2] = impl_->cameraPos[2];
@@ -5220,6 +5218,21 @@ void UnifiedRenderer::endFrame() {
 
 uint32_t UnifiedRenderer::getWidth() const { return impl_ ? impl_->width : 0; }
 uint32_t UnifiedRenderer::getHeight() const { return impl_ ? impl_->height : 0; }
+
+Vec3 UnifiedRenderer::getCameraPosition() const {
+    return impl_ ? impl_->cameraPosition : Vec3(0, 0, 5);
+}
+
+Vec3 UnifiedRenderer::getCameraTarget() const {
+    return impl_ ? impl_->cameraTarget : Vec3(0, 0, 0);
+}
+
+void UnifiedRenderer::setCameraForPicking(const Vec3& pos, const Vec3& target) {
+    if (impl_) {
+        impl_->cameraPosition = pos;
+        impl_->cameraTarget = target;
+    }
+}
 
 // ===== Shadow Mapping =====
 void UnifiedRenderer::setShadowSettings(const ShadowSettings& settings) {

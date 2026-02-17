@@ -64,6 +64,9 @@ using Microsoft::WRL::ComPtr;
 #include "engine/editor/material_edit/material_node_editor.h"
 #include "engine/editor/material_edit/material_preview.h"
 
+// Character Mode (Phase 7 - Character Creation & Face Sculpting)
+#include "engine/editor/character_mode_handler.h"
+
 extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam);
 
 // Forward declaration of helper function (defined after Application)
@@ -117,6 +120,7 @@ struct Application {
     luma::editor::ModeHandlerManager modeHandlers;     // 模式处理器管理器
     luma::editor::EditModeHandler* editModeHandler = nullptr;   // Edit 模式处理器指针
     luma::editor::SceneModeHandler* sceneModeHandler = nullptr; // Scene 模式处理器指针
+    luma::editor::CharacterModeHandler* characterModeHandler = nullptr; // Character 模式处理器指针
     luma::editor::InputSystem inputSystem;             // 统一输入系统
     bool inputSystemInitialized = false;               // InputSystem 初始化标志
     
@@ -241,6 +245,7 @@ struct Application {
         ctx.gizmo = &gizmo;
         ctx.drawManager = &drawManager;
         ctx.editPipeline = &editPipeline;
+        ctx.nativeWindowHandle = hwnd;
         ctx.windowWidth = width;
         ctx.windowHeight = height;
         modeHandlers.setContext(ctx);
@@ -309,6 +314,45 @@ struct Application {
 
         editModeHandler = editHandler.get();
         modeHandlers.registerHandler(std::move(editHandler));
+        
+        // Create and register Character Mode Handler
+        auto charHandler = std::make_unique<luma::editor::CharacterModeHandler>();
+        charHandler->init(&modeHandlers.getContext());
+        
+        // Setup projection callback for Character mode
+        charHandler->setProjectionCallback([this](float wx, float wy, float wz, float& sx, float& sy) -> bool {
+            float viewMatrix[16], projMatrix[16];
+            renderer.getViewMatrix(viewMatrix);
+            renderer.getProjectionMatrix(projMatrix);
+            
+            float viewPos[4];
+            viewPos[0] = viewMatrix[0]*wx + viewMatrix[4]*wy + viewMatrix[8]*wz + viewMatrix[12];
+            viewPos[1] = viewMatrix[1]*wx + viewMatrix[5]*wy + viewMatrix[9]*wz + viewMatrix[13];
+            viewPos[2] = viewMatrix[2]*wx + viewMatrix[6]*wy + viewMatrix[10]*wz + viewMatrix[14];
+            viewPos[3] = viewMatrix[3]*wx + viewMatrix[7]*wy + viewMatrix[11]*wz + viewMatrix[15];
+            
+            float clipPos[4];
+            clipPos[0] = projMatrix[0]*viewPos[0] + projMatrix[4]*viewPos[1] + projMatrix[8]*viewPos[2] + projMatrix[12]*viewPos[3];
+            clipPos[1] = projMatrix[1]*viewPos[0] + projMatrix[5]*viewPos[1] + projMatrix[9]*viewPos[2] + projMatrix[13]*viewPos[3];
+            clipPos[2] = projMatrix[2]*viewPos[0] + projMatrix[6]*viewPos[1] + projMatrix[10]*viewPos[2] + projMatrix[14]*viewPos[3];
+            clipPos[3] = projMatrix[3]*viewPos[0] + projMatrix[7]*viewPos[1] + projMatrix[11]*viewPos[2] + projMatrix[15]*viewPos[3];
+            
+            if (clipPos[3] <= 0.0f) return false;
+            sx = (clipPos[0] / clipPos[3] + 1.0f) * 0.5f * width;
+            sy = (1.0f - clipPos[1] / clipPos[3]) * 0.5f * height;
+            return true;
+        });
+        
+        charHandler->setRayCallback([](float sx, float sy) -> luma::Ray {
+            return ::getMouseRay(sx, sy);
+        });
+        
+        charHandler->setCharacterChangedCallback([this]() {
+            editorState.consoleLogs.push_back("[INFO] Character updated");
+        });
+        
+        characterModeHandler = charHandler.get();
+        modeHandlers.registerHandler(std::move(charHandler));
         
         // Start in Scene mode (or Welcome if no scene)
         modeHandlers.switchMode(luma::editor::EditorMode::Scene);
@@ -400,10 +444,16 @@ struct Application {
                 editPipeline.render(luma::RenderContext{}, renderMode, entity, -1);
             });
         } else {
-            // Normal scene rendering
+            // Normal scene rendering (includes character entities)
             scene.traverseRenderables([this](luma::Entity* entity) {
                 renderer.renderModel(entity->model, entity->worldMatrix.m);
             });
+        }
+        
+        // Character mode: update and render character mesh in real-time
+        if (modeManager.currentMode == luma::editor::EditorMode::Character && characterModeHandler) {
+            // The character mesh is already part of the scene as an entity,
+            // so it gets rendered above. We just need to ensure the mode handler updates.
         }
         
         // === Mode-specific rendering (Gizmos, overlays, etc.) ===
@@ -754,7 +804,13 @@ static void SetupEditorCallbacks() {
     
     // Empty scene guide callbacks
     g_app.emptySceneGuide.onCreateCharacter = []() {
-        g_app.editorState.showCharacterCreator = true;
+        // Switch to Character mode with creation UI
+        if (g_app.characterModeHandler) {
+            g_app.modeManager.switchMode(luma::editor::EditorMode::Character);
+            g_app.modeHandlers.switchMode(luma::editor::EditorMode::Character);
+            g_app.emptySceneGuide.isVisible = false;
+            g_app.editorState.consoleLogs.push_back("[INFO] 进入角色创建模式");
+        }
     };
     
     g_app.emptySceneGuide.onAddObject = []() {
@@ -818,6 +874,17 @@ static void SetupEditorCallbacks() {
         g_app.emptySceneGuide.isVisible = false;
     };
     
+    g_app.addObjectMenu.menu.onCreateCharacter = []() {
+        // Create character and switch to Character mode
+        if (g_app.characterModeHandler) {
+            g_app.characterModeHandler->createFromTemplate("Human", luma::CharacterStyle::Realistic);
+            g_app.modeManager.switchMode(luma::editor::EditorMode::Character);
+            g_app.modeHandlers.switchMode(luma::editor::EditorMode::Character);
+            g_app.emptySceneGuide.isVisible = false;
+            g_app.editorState.consoleLogs.push_back("[INFO] 角色已创建，进入角色编辑模式");
+        }
+    };
+    
     g_app.addObjectMenu.menu.onCreateLight = [](const std::string& type) {
         // TODO: Implement light creation
         g_app.editorState.consoleLogs.push_back("[INFO] 创建光源: " + type);
@@ -827,6 +894,12 @@ static void SetupEditorCallbacks() {
     g_app.modeManager.onModeChanged = [](luma::editor::EditorMode mode) {
         std::string modeName = luma::editor::EditorModeManager::getModeName(mode);
         g_app.editorState.consoleLogs.push_back("[INFO] 切换模式: " + std::string(modeName));
+        
+        // Handle Character mode entry
+        if (mode == luma::editor::EditorMode::Character) {
+            // Character mode entered - handler's onEnter() handles initialization
+            g_app.editorState.consoleLogs.push_back("[INFO] Entered character editing mode");
+        }
         
         // Reset mesh selection when leaving edit mode
         if (mode != luma::editor::EditorMode::Edit) {
@@ -980,7 +1053,9 @@ static void RenderUI() {
             };
             
             drawModeBtn(EditorMode::Scene, "Scene", true);
-            drawModeBtn(EditorMode::Character, "Character", availability.character, "Please select a character object");
+            // Character mode: always available (can create characters from scratch)
+            bool charAvail = availability.character || (g_app.characterModeHandler && g_app.characterModeHandler->getCharacter());
+            drawModeBtn(EditorMode::Character, "Character", true);
             drawModeBtn(EditorMode::Edit, "Edit", availability.edit, "Please select an object");
             drawModeBtn(EditorMode::Animation, "Animation", availability.animation, "Selected object has no skeleton");
             
@@ -1188,6 +1263,33 @@ static void RenderUI() {
         
         // ========== UV Editor Window (floating) ==========
         g_app.uvEditor.draw();
+    } else if (g_app.modeManager.currentMode == luma::editor::EditorMode::Character) {
+        // Character mode: Show character editing panel
+        float rightPanelX = (float)g_app.width - 320.0f;
+        float topOffset = luma::ui::EditorLayout::getTopOffset();
+        
+        ImGui::SetNextWindowPos(ImVec2(rightPanelX, topOffset));
+        ImGui::SetNextWindowSize(ImVec2(320.0f, (float)g_app.height - topOffset - 24.0f));
+        
+        using luma::ui::loc;
+        
+        if (ImGui::Begin(loc("Character Mode - Inspector"), nullptr, 
+                        ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoResize)) {
+            if (g_app.characterModeHandler) {
+                g_app.characterModeHandler->renderUI();
+            }
+            
+            ImGui::Spacing();
+            ImGui::Separator();
+            ImGui::Spacing();
+            
+            // Exit button
+            if (ImGui::Button(loc("Back to Scene"), ImVec2(-1, 28))) {
+                g_app.modeManager.switchMode(luma::editor::EditorMode::Scene);
+                g_app.modeHandlers.switchMode(luma::editor::EditorMode::Scene);
+            }
+        }
+        ImGui::End();
     } else {
         // Scene mode: Show standard inspector
         luma::ui::drawInspectorPanel(g_app.scene, g_app.editorState);

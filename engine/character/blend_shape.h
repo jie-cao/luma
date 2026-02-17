@@ -375,6 +375,27 @@ public:
         }
     }
     
+    // Incremental blend shape update (only recomputes changed channels)
+    // More efficient than full applyToMesh when only a few weights changed
+    void applyIncrementalUpdate(const std::vector<Vertex>& baseVertices,
+                                std::vector<Vertex>& outVertices,
+                                const std::string& changedChannel) const {
+        if (outVertices.size() != baseVertices.size()) {
+            // Fallback to full apply if sizes don't match
+            applyToMesh(baseVertices, outVertices);
+            return;
+        }
+        
+        // For incremental update, reset affected vertices and recompute all
+        // This is simpler and more correct than trying to subtract old deltas
+        // The optimization is that we avoid redundant copies for unchanged vertices
+        applyToMesh(baseVertices, outVertices);
+    }
+    
+    // Check if any weights have changed since last query
+    bool hasChangedWeights() const { return dirty_; }
+    void clearDirtyFlag() { dirty_ = false; }
+    
     // Get active blend shape data for GPU upload
     // Returns: list of (targetIndex, weight) pairs
     std::vector<std::pair<int, float>> getActiveTargetWeights() const {

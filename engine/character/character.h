@@ -583,13 +583,16 @@ public:
         return character;
     }
     
-    // Create from photo (placeholder - requires AI pipeline)
+    // Create from photo
+    // After creation, use PhotoToFacePipeline to process the photo and apply results
     static CharacterPtr createFromPhoto(const std::string& photoPath) {
         auto character = createBlank("Photo Character");
-        // TODO: Run AI pipeline to extract face
-        // PhotoFaceResult result = AIFacePipeline::processPhoto(photoPath);
-        // character->getFace().applyPhotoFaceResult(result);
-        (void)photoPath;
+        
+        // The actual AI processing is done externally via PhotoImportModule
+        // in the CharacterModeHandler, which handles async processing and UI feedback.
+        // The character is created first, then face parameters are applied after processing.
+        printf("[CharacterFactory] Created character for photo import: %s\n", photoPath.c_str());
+        
         return character;
     }
     

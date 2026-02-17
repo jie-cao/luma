@@ -74,8 +74,60 @@ def load_obj(filepath):
     
     return positions, normals, uvs, faces
 
+def calculate_normals(positions, faces):
+    """Calculate smooth vertex normals from face data."""
+    # Initialize normals to zero
+    normals = [[0.0, 0.0, 0.0] for _ in positions]
+    
+    # Accumulate face normals to vertices
+    for face in faces:
+        # Get vertex positions for this face
+        p0 = np.array(positions[face[0][0]])
+        p1 = np.array(positions[face[1][0]])
+        p2 = np.array(positions[face[2][0]])
+        
+        # Calculate face normal
+        edge1 = p1 - p0
+        edge2 = p2 - p0
+        face_normal = np.cross(edge1, edge2)
+        
+        # Normalize (avoid division by zero)
+        length = np.linalg.norm(face_normal)
+        if length > 1e-8:
+            face_normal = face_normal / length
+        
+        # Add to each vertex's normal
+        for pos_idx, _, _ in face:
+            normals[pos_idx][0] += face_normal[0]
+            normals[pos_idx][1] += face_normal[1]
+            normals[pos_idx][2] += face_normal[2]
+    
+    # Normalize all vertex normals
+    for i in range(len(normals)):
+        n = np.array(normals[i])
+        length = np.linalg.norm(n)
+        if length > 1e-8:
+            normals[i] = (n / length).tolist()
+        else:
+            normals[i] = [0.0, 1.0, 0.0]  # Default up
+    
+    return normals
+
 def build_mesh(positions, normals, uvs, faces):
     """Build indexed mesh with unique vertices."""
+    # If no normals in OBJ, calculate them
+    if not normals:
+        print("No normals in OBJ file, calculating smooth normals...")
+        normals = calculate_normals(positions, faces)
+        # Update faces to use calculated normals (same index as position)
+        new_faces = []
+        for face in faces:
+            new_face = []
+            for pos_idx, uv_idx, _ in face:
+                new_face.append((pos_idx, uv_idx, pos_idx))  # norm_idx = pos_idx
+            new_faces.append(new_face)
+        faces = new_faces
+    
     vertex_map = {}  # (pos_idx, uv_idx, norm_idx) -> new_vertex_idx
     vertices = []  # List of (pos, norm, uv)
     indices = []

@@ -1,0 +1,11 @@
+BFM Model exported from 3DDFA_V2
+Vertices: 38365
+Triangles: 76073
+Shape dimensions: 40
+Expression dimensions: 10
+Keypoints: 204
+
+Vertex bounds:
+  X: [-78194.80, 76469.00]
+  Y: [-90549.60, 88859.59]
+  Z: [12451.93, 132685.44]

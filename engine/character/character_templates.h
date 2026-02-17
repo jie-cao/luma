@@ -155,8 +155,81 @@ public:
                                      const Mesh& baseMesh) override {
         BlendShapeMesh blendShapes;
         
-        // Basic expression blend shapes would go here
-        // For now, return empty
+        uint32_t vertexCount = static_cast<uint32_t>(baseMesh.vertices.size());
+        if (vertexCount == 0) return blendShapes;
+        
+        // Create procedural face blend shape targets based on vertex positions
+        // Vertices in the head region (above shoulder height) are affected
+        float headMinY = params.height * 0.7f;
+        
+        auto createFaceTarget = [&](const std::string& name, 
+                                    const std::string& category,
+                                    auto deltaFunc) {
+            BlendShapeTarget target(name);
+            target.category = category;
+            for (uint32_t i = 0; i < vertexCount; i++) {
+                const auto& v = baseMesh.vertices[i];
+                if (v.position[1] > headMinY) {
+                    Vec3 delta = deltaFunc(v.position[0], v.position[1], v.position[2]);
+                    if (delta.length() > 0.0001f) {
+                        target.addDelta(BlendShapeDelta(i, delta));
+                    }
+                }
+            }
+            if (!target.deltas.empty()) {
+                int idx = blendShapes.addTarget(target);
+                blendShapes.createChannel(name, idx);
+            }
+        };
+        
+        // Face width
+        createFaceTarget("faceWidth", "face", [](float x, float y, float z) -> Vec3 {
+            return Vec3(x * 0.1f, 0, 0);
+        });
+        
+        // Face length
+        createFaceTarget("faceLength", "face", [&](float x, float y, float z) -> Vec3 {
+            float centerY = params.height * 0.85f;
+            return Vec3(0, (y - centerY) * 0.08f, 0);
+        });
+        
+        // Eye size
+        createFaceTarget("eyeSize", "eyes", [&](float x, float y, float z) -> Vec3 {
+            float eyeY = params.height * 0.85f;
+            float dist = std::abs(y - eyeY);
+            if (dist < params.height * 0.03f) {
+                return Vec3(0, 0, z * 0.05f);
+            }
+            return Vec3(0, 0, 0);
+        });
+        
+        // Nose length
+        createFaceTarget("noseLength", "nose", [&](float x, float y, float z) -> Vec3 {
+            float noseY = params.height * 0.82f;
+            if (std::abs(y - noseY) < params.height * 0.04f && 
+                std::abs(x) < params.height * 0.02f && z > 0) {
+                return Vec3(0, 0, 0.02f);
+            }
+            return Vec3(0, 0, 0);
+        });
+        
+        // Jaw width
+        createFaceTarget("jawWidth", "jaw", [&](float x, float y, float z) -> Vec3 {
+            float jawY = params.height * 0.75f;
+            if (y < jawY && y > params.height * 0.7f) {
+                return Vec3(x * 0.08f, 0, 0);
+            }
+            return Vec3(0, 0, 0);
+        });
+        
+        // Mouth width
+        createFaceTarget("mouthWidth", "mouth", [&](float x, float y, float z) -> Vec3 {
+            float mouthY = params.height * 0.78f;
+            if (std::abs(y - mouthY) < params.height * 0.01f) {
+                return Vec3(x * 0.06f, 0, 0);
+            }
+            return Vec3(0, 0, 0);
+        });
         
         return blendShapes;
     }
@@ -173,7 +246,39 @@ public:
     void applyCustomization(CharacterCreationResult& result,
                            const std::string& attribute,
                            float value) override {
-        // Customization logic would go here
+        // Apply customization to the character result
+        if (attribute == "height") {
+            // Adjust mesh scale
+            float scale = 0.8f + value * 0.8f; // 0.8 to 1.6
+            for (auto& v : result.baseMesh.vertices) {
+                v.position[1] *= scale;
+            }
+        } else if (attribute == "weight") {
+            // Adjust width scale
+            float scale = 0.8f + value * 0.6f; // 0.8 to 1.4
+            for (auto& v : result.baseMesh.vertices) {
+                v.position[0] *= scale;
+                v.position[2] *= scale;
+            }
+        } else if (attribute == "muscle") {
+            // Adjust muscularity (wider shoulders, narrower waist)
+            float muscleScale = value * 0.3f;
+            for (auto& v : result.baseMesh.vertices) {
+                // Increase width for upper body vertices
+                if (v.position[1] > 0.5f) {
+                    v.position[0] *= (1.0f + muscleScale);
+                    v.position[2] *= (1.0f + muscleScale * 0.5f);
+                }
+            }
+        } else if (attribute == "skinColor") {
+            // Apply skin color (value maps to a preset gradient)
+            float r = 0.4f + value * 0.55f;
+            float g = 0.25f + value * 0.5f;
+            float b = 0.15f + value * 0.45f;
+            result.baseMesh.baseColor[0] = r;
+            result.baseMesh.baseColor[1] = g;
+            result.baseMesh.baseColor[2] = b;
+        }
     }
 };
 

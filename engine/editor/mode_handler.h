@@ -73,6 +73,9 @@ struct ModeHandlerContext {
     DrawManager* drawManager = nullptr;
     EditModePipeline* editPipeline = nullptr;
     
+    // Native window handle (HWND on Windows, for file dialogs etc.)
+    void* nativeWindowHandle = nullptr;
+    
     // Window dimensions
     int windowWidth = 1280;
     int windowHeight = 720;

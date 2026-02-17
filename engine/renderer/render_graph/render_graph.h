@@ -4,10 +4,16 @@
 #include <memory>
 #include <vector>
 #include <utility>
+#include <unordered_map>
+#include <string>
 
 #include "engine/renderer/rhi/rhi.h"
 
 namespace luma::render_graph {
+
+struct ResourceHandle {
+    int id{-1};
+};
 
 struct ClearPass {
     float r{0.0f};
@@ -16,15 +22,11 @@ struct ClearPass {
     ResourceHandle target;
 };
 
-struct ResourceHandle {
-    int id{-1};
-};
-
 struct ResourceDesc {
     uint32_t width{0};
     uint32_t height{0};
     rhi::TextureFormat format{rhi::TextureFormat::RGBA8_UNorm};
-    rhi::TextureUsage usage{rhi::TextureUsage::ColorAttachment};
+    rhi::TextureUsage usage{rhi::TextureUsage::RenderTarget};
 };
 
 struct Barrier {
