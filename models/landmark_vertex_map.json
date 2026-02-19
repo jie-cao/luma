@@ -11,7 +11,7 @@
       "id": 0,
       "name": "jaw_right_ear",
       "region": "jaw",
-      "vertices": [8614],
+      "vertices": [3007],
       "weights": [1.0],
       "auto_estimated": false
     },
@@ -19,7 +19,7 @@
       "id": 1,
       "name": "jaw_right_1",
       "region": "jaw",
-      "vertices": [10398],
+      "vertices": [4879],
       "weights": [1.0],
       "auto_estimated": false
     },
@@ -27,7 +27,7 @@
       "id": 2,
       "name": "jaw_right_2",
       "region": "jaw",
-      "vertices": [3238],
+      "vertices": [3700],
       "weights": [1.0],
       "auto_estimated": false
     },
@@ -35,7 +35,7 @@
       "id": 3,
       "name": "jaw_right_3",
       "region": "jaw",
-      "vertices": [6842],
+      "vertices": [5197],
       "weights": [1.0],
       "auto_estimated": false
     },
@@ -43,7 +43,7 @@
       "id": 4,
       "name": "jaw_right_4",
       "region": "jaw",
-      "vertices": [2875],
+      "vertices": [2606],
       "weights": [1.0],
       "auto_estimated": false
     },
@@ -51,7 +51,7 @@
       "id": 5,
       "name": "jaw_right_chin",
       "region": "jaw",
-      "vertices": [9995],
+      "vertices": [715],
       "weights": [1.0],
       "auto_estimated": false
     },
@@ -59,15 +59,15 @@
       "id": 6,
       "name": "jaw_chin_right",
       "region": "chin",
-      "vertices": [11543],
+      "vertices": [3866],
       "weights": [1.0],
       "auto_estimated": false
     },
     {
       "id": 7,
-      "name": "jaw_chin_center",
+      "name": "jaw_chin_center_r",
       "region": "chin",
-      "vertices": [11747],
+      "vertices": [3614],
       "weights": [1.0],
       "auto_estimated": false
     },
@@ -75,15 +75,15 @@
       "id": 8,
       "name": "jaw_chin_bottom",
       "region": "chin",
-      "vertices": [12358],
+      "vertices": [12257],
       "weights": [1.0],
       "auto_estimated": false
     },
     {
       "id": 9,
-      "name": "jaw_chin_left",
+      "name": "jaw_chin_center_l",
       "region": "chin",
-      "vertices": [5619],
+      "vertices": [9742],
       "weights": [1.0],
       "auto_estimated": false
     },
@@ -91,7 +91,7 @@
       "id": 10,
       "name": "jaw_left_chin",
       "region": "jaw",
-      "vertices": [5415],
+      "vertices": [9994],
       "weights": [1.0],
       "auto_estimated": false
     },
@@ -99,7 +99,7 @@
       "id": 11,
       "name": "jaw_left_4",
       "region": "jaw",
-      "vertices": [5344],
+      "vertices": [6843],
       "weights": [1.0],
       "auto_estimated": false
     },
@@ -107,7 +107,7 @@
       "id": 12,
       "name": "jaw_left_3",
       "region": "jaw",
-      "vertices": [5583],
+      "vertices": [8734],
       "weights": [1.0],
       "auto_estimated": false
     },
@@ -115,7 +115,7 @@
       "id": 13,
       "name": "jaw_left_2",
       "region": "jaw",
-      "vertices": [391],
+      "vertices": [11325],
       "weights": [1.0],
       "auto_estimated": false
     },
@@ -123,7 +123,7 @@
       "id": 14,
       "name": "jaw_left_1",
       "region": "jaw",
-      "vertices": [338],
+      "vertices": [9828],
       "weights": [1.0],
       "auto_estimated": false
     },
@@ -131,7 +131,7 @@
       "id": 15,
       "name": "jaw_left_ear_low",
       "region": "jaw",
-      "vertices": [330],
+      "vertices": [11007],
       "weights": [1.0],
       "auto_estimated": false
     },
@@ -139,23 +139,23 @@
       "id": 16,
       "name": "jaw_left_ear",
       "region": "jaw",
-      "vertices": [122],
+      "vertices": [9135],
       "weights": [1.0],
       "auto_estimated": false
     },
     {
       "id": 17,
-      "name": "left_brow_inner",
+      "name": "left_brow_outer",
       "region": "left_eyebrow",
-      "vertices": [1518],
+      "vertices": [7633],
       "weights": [1.0],
       "auto_estimated": false
     },
     {
       "id": 18,
-      "name": "left_brow_1",
+      "name": "left_brow_2",
       "region": "left_eyebrow",
-      "vertices": [1438],
+      "vertices": [7577],
       "weights": [1.0],
       "auto_estimated": false
     },
@@ -163,23 +163,23 @@
       "id": 19,
       "name": "left_brow_center",
       "region": "left_eyebrow",
-      "vertices": [1523],
+      "vertices": [7655],
       "weights": [1.0],
       "auto_estimated": false
     },
     {
       "id": 20,
-      "name": "left_brow_2",
+      "name": "left_brow_1",
       "region": "left_eyebrow",
-      "vertices": [1451],
+      "vertices": [7092],
       "weights": [1.0],
       "auto_estimated": false
     },
     {
       "id": 21,
-      "name": "left_brow_outer",
+      "name": "left_brow_inner",
       "region": "left_eyebrow",
-      "vertices": [1659],
+      "vertices": [7114],
       "weights": [1.0],
       "auto_estimated": false
     },
@@ -187,7 +187,7 @@
       "id": 22,
       "name": "right_brow_inner",
       "region": "right_eyebrow",
-      "vertices": [7646],
+      "vertices": [986],
       "weights": [1.0],
       "auto_estimated": false
     },
@@ -195,7 +195,7 @@
       "id": 23,
       "name": "right_brow_1",
       "region": "right_eyebrow",
-      "vertices": [7092],
+      "vertices": [964],
       "weights": [1.0],
       "auto_estimated": false
     },
@@ -203,7 +203,7 @@
       "id": 24,
       "name": "right_brow_center",
       "region": "right_eyebrow",
-      "vertices": [7671],
+      "vertices": [1527],
       "weights": [1.0],
       "auto_estimated": false
     },
@@ -211,7 +211,7 @@
       "id": 25,
       "name": "right_brow_2",
       "region": "right_eyebrow",
-      "vertices": [7578],
+      "vertices": [1449],
       "weights": [1.0],
       "auto_estimated": false
     },
@@ -219,7 +219,7 @@
       "id": 26,
       "name": "right_brow_outer",
       "region": "right_eyebrow",
-      "vertices": [7458],
+      "vertices": [1505],
       "weights": [1.0],
       "auto_estimated": false
     },
@@ -235,7 +235,7 @@
       "id": 28,
       "name": "nose_bridge_1",
       "region": "nose",
-      "vertices": [12438],
+      "vertices": [12327],
       "weights": [1.0],
       "auto_estimated": false
     },
@@ -243,7 +243,7 @@
       "id": 29,
       "name": "nose_bridge_2",
       "region": "nose",
-      "vertices": [12309],
+      "vertices": [12305],
       "weights": [1.0],
       "auto_estimated": false
     },
@@ -251,7 +251,7 @@
       "id": 30,
       "name": "nose_bridge_bottom",
       "region": "nose",
-      "vertices": [12287],
+      "vertices": [12296],
       "weights": [1.0],
       "auto_estimated": false
     },
@@ -259,7 +259,7 @@
       "id": 31,
       "name": "nose_left_wing",
       "region": "nose",
-      "vertices": [3988],
+      "vertices": [9447],
       "weights": [1.0],
       "auto_estimated": false
     },
@@ -267,7 +267,7 @@
       "id": 32,
       "name": "nose_left_nostril",
       "region": "nose",
-      "vertices": [458],
+      "vertices": [10200],
       "weights": [1.0],
       "auto_estimated": false
     },
@@ -283,7 +283,7 @@
       "id": 34,
       "name": "nose_right_nostril",
       "region": "nose",
-      "vertices": [10153],
+      "vertices": [4072],
       "weights": [1.0],
       "auto_estimated": false
     },
@@ -291,7 +291,7 @@
       "id": 35,
       "name": "nose_right_wing",
       "region": "nose",
-      "vertices": [6607],
+      "vertices": [3319],
       "weights": [1.0],
       "auto_estimated": false
     },
@@ -299,7 +299,7 @@
       "id": 36,
       "name": "left_eye_outer",
       "region": "left_eye",
-      "vertices": [580],
+      "vertices": [6708],
       "weights": [1.0],
       "auto_estimated": false
     },
@@ -307,7 +307,7 @@
       "id": 37,
       "name": "left_eye_top_outer",
       "region": "left_eye",
-      "vertices": [4906],
+      "vertices": [11034],
       "weights": [1.0],
       "auto_estimated": false
     },
@@ -315,7 +315,7 @@
       "id": 38,
       "name": "left_eye_top_inner",
       "region": "left_eye",
-      "vertices": [1139],
+      "vertices": [11052],
       "weights": [1.0],
       "auto_estimated": false
     },
@@ -323,7 +323,7 @@
       "id": 39,
       "name": "left_eye_inner",
       "region": "left_eye",
-      "vertices": [1254],
+      "vertices": [7393],
       "weights": [1.0],
       "auto_estimated": false
     },
@@ -331,7 +331,7 @@
       "id": 40,
       "name": "left_eye_bottom_inner",
       "region": "left_eye",
-      "vertices": [1053],
+      "vertices": [6739],
       "weights": [1.0],
       "auto_estimated": false
     },
@@ -339,7 +339,7 @@
       "id": 41,
       "name": "left_eye_bottom_outer",
       "region": "left_eye",
-      "vertices": [5951],
+      "vertices": [6728],
       "weights": [1.0],
       "auto_estimated": false
     },
@@ -347,7 +347,7 @@
       "id": 42,
       "name": "right_eye_inner",
       "region": "right_eye",
-      "vertices": [6702],
+      "vertices": [1265],
       "weights": [1.0],
       "auto_estimated": false
     },
@@ -355,7 +355,7 @@
       "id": 43,
       "name": "right_eye_top_inner",
       "region": "right_eye",
-      "vertices": [12117],
+      "vertices": [4924],
       "weights": [1.0],
       "auto_estimated": false
     },
@@ -363,7 +363,7 @@
       "id": 44,
       "name": "right_eye_top_outer",
       "region": "right_eye",
-      "vertices": [12204],
+      "vertices": [4906],
       "weights": [1.0],
       "auto_estimated": false
     },
@@ -371,7 +371,7 @@
       "id": 45,
       "name": "right_eye_outer",
       "region": "right_eye",
-      "vertices": [6708],
+      "vertices": [580],
       "weights": [1.0],
       "auto_estimated": false
     },
@@ -379,7 +379,7 @@
       "id": 46,
       "name": "right_eye_bottom_outer",
       "region": "right_eye",
-      "vertices": [12079],
+      "vertices": [600],
       "weights": [1.0],
       "auto_estimated": false
     },
@@ -387,7 +387,7 @@
       "id": 47,
       "name": "right_eye_bottom_inner",
       "region": "right_eye",
-      "vertices": [7181],
+      "vertices": [611],
       "weights": [1.0],
       "auto_estimated": false
     },
@@ -395,7 +395,7 @@
       "id": 48,
       "name": "mouth_left",
       "region": "mouth",
-      "vertices": [5845],
+      "vertices": [10653],
       "weights": [1.0],
       "auto_estimated": false
     },
@@ -403,7 +403,7 @@
       "id": 49,
       "name": "mouth_top_left_1",
       "region": "mouth",
-      "vertices": [4543],
+      "vertices": [10673],
       "weights": [1.0],
       "auto_estimated": false
     },
@@ -411,7 +411,7 @@
       "id": 50,
       "name": "mouth_top_left_2",
       "region": "mouth",
-      "vertices": [4509],
+      "vertices": [10672],
       "weights": [1.0],
       "auto_estimated": false
     },
@@ -419,7 +419,7 @@
       "id": 51,
       "name": "mouth_top_center",
       "region": "mouth",
-      "vertices": [12278],
+      "vertices": [12279],
       "weights": [1.0],
       "auto_estimated": false
     },
@@ -427,7 +427,7 @@
       "id": 52,
       "name": "mouth_top_right_2",
       "region": "mouth",
-      "vertices": [10642],
+      "vertices": [4544],
       "weights": [1.0],
       "auto_estimated": false
     },
@@ -435,7 +435,7 @@
       "id": 53,
       "name": "mouth_top_right_1",
       "region": "mouth",
-      "vertices": [6906],
+      "vertices": [4545],
       "weights": [1.0],
       "auto_estimated": false
     },
@@ -443,7 +443,7 @@
       "id": 54,
       "name": "mouth_right",
       "region": "mouth",
-      "vertices": [9340],
+      "vertices": [4525],
       "weights": [1.0],
       "auto_estimated": false
     },
@@ -451,7 +451,7 @@
       "id": 55,
       "name": "mouth_bottom_right_1",
       "region": "mouth",
-      "vertices": [6329],
+      "vertices": [4599],
       "weights": [1.0],
       "auto_estimated": false
     },
@@ -459,7 +459,7 @@
       "id": 56,
       "name": "mouth_bottom_right_2",
       "region": "mouth",
-      "vertices": [6320],
+      "vertices": [4593],
       "weights": [1.0],
       "auto_estimated": false
     },
@@ -467,7 +467,7 @@
       "id": 57,
       "name": "mouth_bottom_center",
       "region": "mouth",
-      "vertices": [12365],
+      "vertices": [12270],
       "weights": [1.0],
       "auto_estimated": false
     },
@@ -475,7 +475,7 @@
       "id": 58,
       "name": "mouth_bottom_left_2",
       "region": "mouth",
-      "vertices": [192],
+      "vertices": [10721],
       "weights": [1.0],
       "auto_estimated": false
     },
@@ -483,7 +483,7 @@
       "id": 59,
       "name": "mouth_bottom_left_1",
       "region": "mouth",
-      "vertices": [201],
+      "vertices": [10727],
       "weights": [1.0],
       "auto_estimated": false
     },
@@ -491,7 +491,7 @@
       "id": 60,
       "name": "inner_mouth_left",
       "region": "mouth_inner",
-      "vertices": [3509],
+      "vertices": [10827],
       "weights": [1.0],
       "auto_estimated": false
     },
@@ -499,7 +499,7 @@
       "id": 61,
       "name": "inner_mouth_top_left",
       "region": "mouth_inner",
-      "vertices": [3509],
+      "vertices": [10762],
       "weights": [1.0],
       "auto_estimated": false
     },
@@ -507,7 +507,7 @@
       "id": 62,
       "name": "inner_mouth_top_center",
       "region": "mouth_inner",
-      "vertices": [12366],
+      "vertices": [12280],
       "weights": [1.0],
       "auto_estimated": false
     },
@@ -515,7 +515,7 @@
       "id": 63,
       "name": "inner_mouth_top_right",
       "region": "mouth_inner",
-      "vertices": [9637],
+      "vertices": [4634],
       "weights": [1.0],
       "auto_estimated": false
     },
@@ -523,7 +523,7 @@
       "id": 64,
       "name": "inner_mouth_right",
       "region": "mouth_inner",
-      "vertices": [9637],
+      "vertices": [4699],
       "weights": [1.0],
       "auto_estimated": false
     },
@@ -531,7 +531,7 @@
       "id": 65,
       "name": "inner_mouth_bottom_right",
       "region": "mouth_inner",
-      "vertices": [6322],
+      "vertices": [4660],
       "weights": [1.0],
       "auto_estimated": false
     },
@@ -539,7 +539,7 @@
       "id": 66,
       "name": "inner_mouth_bottom_center",
       "region": "mouth_inner",
-      "vertices": [12365],
+      "vertices": [12271],
       "weights": [1.0],
       "auto_estimated": false
     },
@@ -547,7 +547,7 @@
       "id": 67,
       "name": "inner_mouth_bottom_left",
       "region": "mouth_inner",
-      "vertices": [194],
+      "vertices": [10788],
       "weights": [1.0],
       "auto_estimated": false
     }

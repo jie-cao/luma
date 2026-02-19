@@ -20,6 +20,7 @@
 #include "engine/character/expression_presets.h"
 #include "engine/character/ai/face_reconstruction.h"
 #include "engine/character/landmark_deformer.h"
+#include "engine/character/identity_fitter.h"
 #include "engine/character/mesh_landmark_editor.h"
 #include "engine/editor/character_mode/photo_import.h"
 #include "engine/scene/scene_graph.h"
@@ -140,14 +141,23 @@ struct CharacterEditState {
     bool hasAIModels = false;
     std::string modelDirectory = "models";  // Path to AI models and BFM data
     
-    // Landmark-based deformation
-    LandmarkDeformer landmarkDeformer;
+    // Landmark visualization (for debugging - shows 68 points on mesh)
+    LandmarkDeformer landmarkDeformer;  // Used only for getCurrentLandmarkPositions()
     bool landmarkDeformerInitialized = false;
-    bool useLandmarkDeformation = true;  // Use direct landmark deformation instead of BlendShapes
-    bool landmarkDeformationApplied = false;  // True if landmark deformation was applied (skip BlendShape update)
+    bool showLandmarks = false;
+    
+    // Identity Fitter (MetaHuman-style optimization)
+    IdentityFitter identityFitter;
+    bool identityFitterInitialized = false;
+    
+    // Base topology comparison
+    bool showBaseTopo = false;  // When true, show base topology (all params = 0)
+    FaceShapeParams savedParams;  // Saved params when comparing
     
     // Landmark editor for marking mesh vertices
     MeshLandmarkEditor landmarkEditor;
+    RHILoadedModel landmarkEditorModel;  // GPU model for PBR rendering
+    bool landmarkEditorModelLoaded = false;
     
     // Template selection
     std::string selectedTemplate = "human";
@@ -279,6 +289,7 @@ private:
     
     // Internal helpers
     void initializePipeline();
+    void initializeIdentityFitter();
     void updateCharacterMesh();
     void uploadCharacterToGPU();
     
@@ -292,6 +303,13 @@ private:
     void renderExportUI();
     void renderCharacterToolbar();
     void renderFaceRegionSliders(FaceEditRegion region);
+    
+    // Landmark editor overlay (screen-space points)
+    void renderLandmarkEditorOverlay();
+    bool projectToScreen(float wx, float wy, float wz, float& sx, float& sy);
+    
+    // Landmark visualization (68 points on deformed mesh)
+    void renderLandmarkVisualization();
     
     // Helper: face parameter slider with undo
     bool faceSlider(const char* label, float* value, float min = 0.0f, float max = 1.0f);
@@ -449,68 +467,31 @@ inline void CharacterModeHandler::render(const RenderContext& ctx) {
     
     // Render landmark editor (independent of character creation)
     if (m_state.landmarkEditor.isActive()) {
+        const auto& opts = m_state.landmarkEditor.getDisplayOptions();
+        const auto& vertices = m_state.landmarkEditor.getVertices();
+        float landmarkSize = opts.landmarkSize;
+        
         std::vector<float> gizmoLines;  // {x0,y0,z0, x1,y1,z1, r,g,b,a} per line
         
-        // Render standard topology head as point cloud
-        const auto& vertices = m_state.landmarkEditor.getVertices();
-        for (size_t i = 0; i < vertices.size(); i++) {
-            const auto& v = vertices[i];
-            float size = 0.0005f;  // Small dots for vertices
+        // ========== 渲染 PBR 网格（如果启用）==========
+        if (opts.showMesh && m_state.landmarkEditorModelLoaded) {
+            // 使用已加载的模型进行 PBR 渲染
+            float identity[16] = {1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1};
             
-            // Gray color for regular vertices
-            gizmoLines.insert(gizmoLines.end(), {
-                v.position[0] - size, v.position[1], v.position[2],
-                v.position[0] + size, v.position[1], v.position[2],
-                0.4f, 0.4f, 0.4f, 0.5f
-            });
+            if (opts.meshTransparent) {
+                // 半透明模式 - 渲染为灰色实体
+                float solidColor[4] = {0.5f, 0.5f, 0.5f, opts.meshOpacity};
+                m_ctx->renderer->renderModelSolid(m_state.landmarkEditorModel, identity, solidColor);
+            } else {
+                // 完整 PBR 渲染
+                m_ctx->renderer->renderModel(m_state.landmarkEditorModel, identity);
+            }
         }
         
-        // Render landmark markers with colors
-        auto markers = m_state.landmarkEditor.getLandmarkMarkers();
-        for (const auto& [pos, color] : markers) {
-            float size = 0.003f;  // 3mm cross for landmarks
-            
-            // X axis line
-            gizmoLines.insert(gizmoLines.end(), {
-                pos.x - size, pos.y, pos.z,
-                pos.x + size, pos.y, pos.z,
-                color.x, color.y, color.z, 1.0f
-            });
-            // Y axis line
-            gizmoLines.insert(gizmoLines.end(), {
-                pos.x, pos.y - size, pos.z,
-                pos.x, pos.y + size, pos.z,
-                color.x, color.y, color.z, 1.0f
-            });
-            // Z axis line
-            gizmoLines.insert(gizmoLines.end(), {
-                pos.x, pos.y, pos.z - size,
-                pos.x, pos.y, pos.z + size,
-                color.x, color.y, color.z, 1.0f
-            });
-        }
+        // 顶点点云在 renderLandmarkEditorOverlay() 中用 ImGui 屏幕空间渲染
         
-        // Highlight current landmark with larger yellow marker
-        int currentId = m_state.landmarkEditor.getCurrentLandmark();
-        Vec3 currentPos;
-        if (m_state.landmarkEditor.getLandmarkPosition(currentId, currentPos)) {
-            float size = 0.006f;  // 6mm for current
-            gizmoLines.insert(gizmoLines.end(), {
-                currentPos.x - size, currentPos.y, currentPos.z,
-                currentPos.x + size, currentPos.y, currentPos.z,
-                1.0f, 1.0f, 0.0f, 1.0f
-            });
-            gizmoLines.insert(gizmoLines.end(), {
-                currentPos.x, currentPos.y - size, currentPos.z,
-                currentPos.x, currentPos.y + size, currentPos.z,
-                1.0f, 1.0f, 0.0f, 1.0f
-            });
-            gizmoLines.insert(gizmoLines.end(), {
-                currentPos.x, currentPos.y, currentPos.z - size,
-                currentPos.x, currentPos.y, currentPos.z + size,
-                1.0f, 1.0f, 0.0f, 1.0f
-            });
-        }
+        // Landmark 和顶点都在 renderLandmarkEditorOverlay() 中用 ImGui 屏幕空间渲染
+        // 不再使用 3D 空间的十字标记，避免遮挡 hover 检测
         
         // Render all lines at once
         if (!gizmoLines.empty()) {
@@ -566,6 +547,82 @@ inline void CharacterModeHandler::render(const RenderContext& ctx) {
         eyes.pupilSize = texParams.pupilSize;
         m_state.renderer.setEyeParams(eyes);
     }
+    
+    // Render landmark visualization if enabled
+    if (m_state.showLandmarks && m_state.landmarkDeformerInitialized) {
+        renderLandmarkVisualization();
+    }
+}
+
+// Render 68 facial landmarks as colored points on the mesh
+inline void CharacterModeHandler::renderLandmarkVisualization() {
+    if (!m_ctx || !m_ctx->renderer) return;
+    
+    // Get current landmark positions from the base mesh
+    const auto& currentVertices = m_state.renderer.getBaseMesh();
+    if (currentVertices.empty()) return;
+    
+    auto positions = m_state.landmarkDeformer.getCurrentLandmarkPositions(currentVertices);
+    
+    // Define colors for different landmark regions
+    // Jaw contour (0-16): Red
+    // Left eyebrow (17-21): Light green
+    // Right eyebrow (22-26): Dark green
+    // Nose bridge (27-30): Light blue
+    // Nose bottom (31-35): Dark blue
+    // Left eye (36-41): Yellow
+    // Right eye (42-47): Orange
+    // Outer lip (48-59): Purple
+    // Inner lip (60-67): Pink
+    
+    auto getColor = [](int idx) -> std::array<float, 4> {
+        if (idx <= 16) return {1.0f, 0.2f, 0.2f, 1.0f};       // Jaw: Red
+        if (idx <= 21) return {0.4f, 1.0f, 0.4f, 1.0f};       // Left brow: Light green
+        if (idx <= 26) return {0.2f, 0.7f, 0.2f, 1.0f};       // Right brow: Dark green
+        if (idx <= 30) return {0.4f, 0.6f, 1.0f, 1.0f};       // Nose bridge: Light blue
+        if (idx <= 35) return {0.2f, 0.3f, 0.9f, 1.0f};       // Nose bottom: Dark blue
+        if (idx <= 41) return {1.0f, 1.0f, 0.2f, 1.0f};       // Left eye: Yellow
+        if (idx <= 47) return {1.0f, 0.6f, 0.2f, 1.0f};       // Right eye: Orange
+        if (idx <= 59) return {0.8f, 0.2f, 0.8f, 1.0f};       // Outer lip: Purple
+        return {1.0f, 0.5f, 0.7f, 1.0f};                       // Inner lip: Pink
+    };
+    
+    // Render each landmark as a small cross (3D gizmo lines)
+    std::vector<float> gizmoLines;
+    float crossSize = 0.003f;  // Size of the cross marker
+    
+    for (int i = 0; i < 68; i++) {
+        const Vec3& pos = positions[i];
+        if (pos.x == 0 && pos.y == 0 && pos.z == 0) continue;  // Skip invalid
+        
+        auto color = getColor(i);
+        
+        // X-axis line
+        gizmoLines.insert(gizmoLines.end(), {
+            pos.x - crossSize, pos.y, pos.z,
+            pos.x + crossSize, pos.y, pos.z,
+            color[0], color[1], color[2], color[3]
+        });
+        
+        // Y-axis line
+        gizmoLines.insert(gizmoLines.end(), {
+            pos.x, pos.y - crossSize, pos.z,
+            pos.x, pos.y + crossSize, pos.z,
+            color[0], color[1], color[2], color[3]
+        });
+        
+        // Z-axis line (pointing outward from face)
+        gizmoLines.insert(gizmoLines.end(), {
+            pos.x, pos.y, pos.z,
+            pos.x, pos.y, pos.z + crossSize * 2,
+            color[0], color[1], color[2], color[3]
+        });
+    }
+    
+    if (!gizmoLines.empty()) {
+        uint32_t lineCount = static_cast<uint32_t>(gizmoLines.size() / 10);
+        m_ctx->renderer->renderGizmoLines(gizmoLines.data(), lineCount);
+    }
 }
 
 inline void CharacterModeHandler::renderUI() {
@@ -588,6 +645,9 @@ inline void CharacterModeHandler::renderUI() {
     // Render landmark editor if active
     std::string landmarkPath = m_state.modelDirectory + "/landmark_vertex_map.json";
     renderLandmarkEditorUI(m_state.landmarkEditor, landmarkPath);
+    
+    // Render landmark editor overlay (screen-space points)
+    renderLandmarkEditorOverlay();
 }
 
 inline bool CharacterModeHandler::handleInput(const InputEvent& event) {
@@ -595,6 +655,44 @@ inline bool CharacterModeHandler::handleInput(const InputEvent& event) {
     
     // Landmark editor input handling
     if (m_state.landmarkEditor.isActive()) {
+        // 计算射线（用于 hover 和点击）
+        auto calculateRay = [this](float mouseX, float mouseY, Vec3& outOrigin, Vec3& outDir) -> bool {
+            if (!m_ctx || !m_ctx->renderer) return false;
+            
+            float viewportWidth = (float)m_ctx->renderer->getWidth();
+            float viewportHeight = (float)m_ctx->renderer->getHeight();
+            
+            float ndcX = (2.0f * mouseX / viewportWidth) - 1.0f;
+            float ndcY = 1.0f - (2.0f * mouseY / viewportHeight);
+            
+            Vec3 cameraPos = m_ctx->renderer->getCameraPosition();
+            Vec3 cameraTarget = m_ctx->renderer->getCameraTarget();
+            Vec3 cameraUp(0, 1, 0);
+            
+            Vec3 forward = (cameraTarget - cameraPos).normalized();
+            Vec3 right = forward.cross(cameraUp).normalized();
+            Vec3 up = right.cross(forward).normalized();
+            
+            float fov = 45.0f * 3.14159f / 180.0f;
+            float aspect = viewportWidth / viewportHeight;
+            float tanHalfFov = tanf(fov * 0.5f);
+            
+            outOrigin = cameraPos;
+            outDir = (forward + right * (ndcX * tanHalfFov * aspect) + up * (ndcY * tanHalfFov)).normalized();
+            return true;
+        };
+        
+        // 鼠标移动时更新 hover
+        if (event.type == InputEvent::Type::MouseMove) {
+            if (!ImGui::GetIO().WantCaptureMouse) {
+                Vec3 rayOrigin, rayDir;
+                if (calculateRay(event.mouseX, event.mouseY, rayOrigin, rayDir)) {
+                    Vec3 camPos = m_ctx->renderer->getCameraPosition();
+                    m_state.landmarkEditor.updateHover(rayOrigin, rayDir, camPos);
+                }
+            }
+        }
+        
         // Keyboard shortcuts for landmark navigation
         if (event.type == InputEvent::Type::KeyDown) {
             if (event.key == VK_LEFT || event.key == 'A') {
@@ -605,6 +703,11 @@ inline bool CharacterModeHandler::handleInput(const InputEvent& event) {
                 m_state.landmarkEditor.nextLandmark();
                 return true;
             }
+            if (event.key == VK_UP || event.key == 'W') {
+                // 跳到上一个未标记的
+                m_state.landmarkEditor.nextUnmarked();
+                return true;
+            }
             if (event.key == VK_DELETE || event.key == 'X') {
                 m_state.landmarkEditor.clearLandmark(m_state.landmarkEditor.getCurrentLandmark());
                 return true;
@@ -613,49 +716,57 @@ inline bool CharacterModeHandler::handleInput(const InputEvent& event) {
                 m_state.landmarkEditor.setActive(false);
                 return true;
             }
+            // 数字键快速跳转区域
+            if (event.key >= '1' && event.key <= '9') {
+                const char* regions[] = {"jaw", "chin", "left_eyebrow", "right_eyebrow", 
+                                          "nose", "left_eye", "right_eye", "mouth", "mouth_inner"};
+                int idx = event.key - '1';
+                if (idx < 9) {
+                    m_state.landmarkEditor.jumpToRegion(regions[idx]);
+                    return true;
+                }
+            }
+            // Tab 切换显示模式
+            if (event.key == VK_TAB) {
+                auto& opts = m_state.landmarkEditor.getDisplayOptions();
+                opts.showVertexDots = !opts.showVertexDots;
+                return true;
+            }
         }
         
         // Mouse click for vertex picking (key == 0 means left button for MouseDown)
         if (event.type == InputEvent::Type::MouseDown && event.key == 0) {
-            // Don't pick if clicking on ImGui windows
             if (!ImGui::GetIO().WantCaptureMouse) {
-                // Calculate ray from camera through mouse position
-                // This requires camera info from the context
-                if (m_ctx && m_ctx->renderer) {
-                    // Get viewport size
-                    float viewportWidth = (float)m_ctx->renderer->getWidth();
-                    float viewportHeight = (float)m_ctx->renderer->getHeight();
+                // 首先检查是否点击了已有的 landmark（用于选中它）
+                int hoveredLm = m_state.landmarkEditor.getHoveredLandmark();
+                if (hoveredLm >= 0) {
+                    // 点击已有 landmark，选中它
+                    m_state.landmarkEditor.setCurrentLandmark(hoveredLm);
+                    printf("[LandmarkEditor] Selected landmark %d\n", hoveredLm);
+                    return true;
+                }
+                
+                // 否则，标记当前 landmark 到 hover 的顶点
+                int hoveredVert = m_state.landmarkEditor.getHoveredVertex();
+                if (hoveredVert >= 0) {
+                    int currentLandmark = m_state.landmarkEditor.getCurrentLandmark();
+                    m_state.landmarkEditor.setLandmarkVertex(currentLandmark, hoveredVert);
                     
-                    // Normalize mouse coords to [-1, 1]
-                    float ndcX = (2.0f * event.mouseX / viewportWidth) - 1.0f;
-                    float ndcY = 1.0f - (2.0f * event.mouseY / viewportHeight);
+                    // Auto advance to next landmark
+                    m_state.landmarkEditor.nextLandmark();
                     
-                    // Get camera matrices (simplified - use actual camera if available)
-                    Vec3 cameraPos = m_ctx->renderer->getCameraPosition();
-                    Vec3 cameraTarget = m_ctx->renderer->getCameraTarget();
-                    Vec3 cameraUp(0, 1, 0);
-                    
-                    // Calculate ray direction
-                    Vec3 forward = (cameraTarget - cameraPos).normalized();
-                    Vec3 right = forward.cross(cameraUp).normalized();
-                    Vec3 up = right.cross(forward).normalized();
-                    
-                    float fov = 45.0f * 3.14159f / 180.0f;
-                    float aspect = viewportWidth / viewportHeight;
-                    float tanHalfFov = tanf(fov * 0.5f);
-                    
-                    Vec3 rayDir = forward + right * (ndcX * tanHalfFov * aspect) + up * (ndcY * tanHalfFov);
-                    rayDir = rayDir.normalized();
-                    
-                    // Pick vertex
-                    int pickedVertex = m_state.landmarkEditor.pickVertex(cameraPos, rayDir);
+                    printf("[LandmarkEditor] Set landmark %d to vertex %d\n", currentLandmark, hoveredVert);
+                    return true;
+                }
+                
+                // 如果没有 hover，用传统的射线拾取
+                Vec3 rayOrigin, rayDir;
+                if (calculateRay(event.mouseX, event.mouseY, rayOrigin, rayDir)) {
+                    int pickedVertex = m_state.landmarkEditor.pickVertex(rayOrigin, rayDir);
                     if (pickedVertex >= 0) {
                         int currentLandmark = m_state.landmarkEditor.getCurrentLandmark();
                         m_state.landmarkEditor.setLandmarkVertex(currentLandmark, pickedVertex);
-                        
-                        // Auto advance to next unmarked landmark
                         m_state.landmarkEditor.nextLandmark();
-                        
                         printf("[LandmarkEditor] Set landmark %d to vertex %d\n", currentLandmark, pickedVertex);
                         return true;
                     }
@@ -817,58 +928,58 @@ inline void CharacterModeHandler::processPhotoImport() {
         // Apply skin color
         m_state.character->getFace().getTextureParams().skinTone = importResult.skinColor;
 
-        // === NEW: Use Landmark-based direct deformation ===
-        if (m_state.useLandmarkDeformation && !importResult.landmarks.points.empty()) {
-            printf("[CharacterMode] Using landmark-based direct deformation\n");
+        // Initialize IdentityFitter if needed
+        if (!m_state.identityFitterInitialized) {
+            initializeIdentityFitter();
+        }
+        
+        // Use MetaHuman-style optimization: minimize || project(V + Σ w*BS) - landmarks_2D ||²
+        if (m_state.identityFitterInitialized && !importResult.landmarks.points.empty()) {
+            printf("[CharacterMode] Using MetaHuman-style identity fitting\n");
             
-            // Initialize landmark deformer if needed
-            if (!m_state.landmarkDeformerInitialized) {
-                auto& renderer = m_state.renderer;
-                auto baseMesh = renderer.getBaseMesh();
-                if (!baseMesh.empty()) {
-                    // IMPORTANT: Load mapping FIRST, then set base mesh
-                    // setBaseMesh needs mappings_ to extract landmark positions
-                    std::string mappingPath = m_state.modelDirectory + "/landmark_vertex_map.json";
-                    std::string objPath = m_state.modelDirectory + "/Super Average Head.obj";
-                    bool mappingLoaded = m_state.landmarkDeformer.loadMapping(mappingPath);
-                    if (mappingLoaded) {
-                        m_state.landmarkDeformer.setBaseMesh(baseMesh, objPath);
-                        m_state.landmarkDeformerInitialized = true;
-                    }
-                    printf("[CharacterMode] Landmark deformer initialized: %d\n", m_state.landmarkDeformerInitialized);
-                }
+            // Convert landmarks to Vec2 format (normalized to face bbox)
+            std::vector<Vec2> landmarks2D;
+            const auto& slot = m_state.photoImport.photos[0];
+            float faceX = slot.detection.x1;
+            float faceY = slot.detection.y1;
+            float faceW = slot.detection.width();
+            float faceH = slot.detection.height();
+            
+            if (faceW < 10 || faceH < 10) {
+                faceX = 0; faceY = 0;
+                faceW = slot.width > 0 ? (float)slot.width : 1.0f;
+                faceH = slot.height > 0 ? (float)slot.height : 1.0f;
             }
             
-            if (m_state.landmarkDeformerInitialized) {
-                // Convert detected landmarks to Vec2 format (normalized 0-1)
-                std::vector<Vec2> landmarks2D;
-                const auto& slot = m_state.photoImport.photos[0];
-                float imgW = slot.width > 0 ? (float)slot.width : 1.0f;
-                float imgH = slot.height > 0 ? (float)slot.height : 1.0f;
-                
-                for (const auto& pt : importResult.landmarks.points) {
-                    // Normalize to 0-1
-                    landmarks2D.push_back(Vec2(pt.x / imgW, pt.y / imgH));
-                }
-                
-                if (landmarks2D.size() >= 68) {
-                    std::vector<Vertex> deformedVertices;
-                    m_state.landmarkDeformer.deformFromLandmarks2D(landmarks2D, imgW / imgH, deformedVertices);
-                    
-                    if (!deformedVertices.empty()) {
-                        // Apply deformed vertices to renderer
-                        m_state.renderer.setDeformedVertices(deformedVertices);
-                        m_state.landmarkDeformationApplied = true;  // Mark that we used landmark deformation
-                        printf("[CharacterMode] Landmark deformation applied: %zu vertices\n", deformedVertices.size());
-                    }
-                }
+            for (const auto& pt : importResult.landmarks.points) {
+                float nx = (pt.x - faceX) / faceW;
+                float ny = (pt.y - faceY) / faceH;
+                landmarks2D.push_back(Vec2(nx, ny));
             }
+            
+            // Run optimization with FLAME/DECA-style parameters
+            IdentityFitter::FitParams fitParams;
+            fitParams.maxIterations = 300;
+            fitParams.learningRate = 0.1f;
+            fitParams.regularization = 0.01f;
+            fitParams.convergenceThreshold = 1e-7f;
+            fitParams.verbose = true;
+            
+            auto fitResult = m_state.identityFitter.fit(landmarks2D, faceW / faceH, fitParams);
+            
+            // Apply optimized weights to face params
+            auto& faceParams = m_state.character->getFace().getShapeParams();
+            m_state.identityFitter.applyToParams(fitResult, faceParams);
+            
+            printf("[CharacterMode] Identity fitting: %d iters, error=%.4f, converged=%d\n",
+                   fitResult.iterations, fitResult.finalError, fitResult.converged);
         } else {
-            // Fallback: use BlendShape-based deformation via FaceShapeParams
-            printf("[CharacterMode] Using BlendShape-based deformation\n");
+            // Fallback to landmark-ratio based mapping
+            printf("[CharacterMode] Fallback: using landmark-ratio mapping\n");
             m_state.character->getFace().setShapeParams(importResult.faceParams);
         }
-
+        
+        m_state.meshNeedsUpdate = true;
         m_state.photoImport.multiPhotoResult = importResult;
 
         PhotoFaceResult legacyResult;
@@ -906,18 +1017,86 @@ inline void CharacterModeHandler::processPhotoImport() {
 }
 
 // ============================================================================
+// Identity Fitter Initialization
+// ============================================================================
+
+inline void CharacterModeHandler::initializeIdentityFitter() {
+    if (m_state.identityFitterInitialized) return;
+    
+    printf("[CharacterMode] Initializing IdentityFitter...\n");
+    
+    // Get base mesh
+    auto baseMesh = m_state.renderer.getBaseMesh();
+    if (baseMesh.empty()) {
+        printf("[CharacterMode] No base mesh available for IdentityFitter\n");
+        return;
+    }
+    
+    // First, initialize LandmarkDeformer if not already done (it handles OBJ->BIN index conversion)
+    if (!m_state.landmarkDeformerInitialized) {
+        std::string mappingPath = m_state.modelDirectory + "/landmark_vertex_map.json";
+        std::string objPath = m_state.modelDirectory + "/Super Average Head.obj";
+        if (m_state.landmarkDeformer.loadMapping(mappingPath)) {
+            m_state.landmarkDeformer.setBaseMesh(baseMesh, objPath);
+            m_state.landmarkDeformerInitialized = true;
+        }
+    }
+    
+    if (!m_state.landmarkDeformerInitialized) {
+        printf("[CharacterMode] Failed to initialize LandmarkDeformer\n");
+        return;
+    }
+    
+    // Get the converted vertex indices from LandmarkDeformer
+    const auto& vertexIndices = m_state.landmarkDeformer.getLandmarkVertexIndices();
+    std::unordered_map<int, int> landmarkVertexMap;
+    
+    int validCount = 0;
+    for (int i = 0; i < 68; i++) {
+        if (vertexIndices[i] >= 0) {
+            landmarkVertexMap[i] = vertexIndices[i];
+            validCount++;
+        }
+    }
+    
+    printf("[CharacterMode] Got %d landmark vertex mappings from LandmarkDeformer\n", validCount);
+    
+    if (validCount < 68) {
+        printf("[CharacterMode] Incomplete landmark mapping: %d/68\n", validCount);
+        return;
+    }
+    
+    // Initialize fitter with base mesh and landmark mapping
+    m_state.identityFitter.initialize(baseMesh, landmarkVertexMap);
+    
+    // Get identity BlendShape names from character
+    std::vector<std::string> identityShapeNames = {
+        "faceWidth", "faceLength", "faceRoundness",
+        "jawWidth", "jawAngle", "chinLength", "chinWidth",
+        "noseWidth", "noseLength", "noseHeight", "noseBridge",
+        "mouthWidth", "upperLipThickness", "lowerLipThickness",
+        "eyeSize", "eyeWidth", "eyeHeight", "eyeSpacing", "eyeDepth",
+        "browHeight", "browWidth", "browAngle",
+        "cheekboneWidth", "cheekboneHeight",
+        "foreheadHeight", "foreheadWidth"
+    };
+    
+    // Set BlendShapes for fitting
+    auto* blendShapes = m_state.character->getFace().getBlendShapeMesh();
+    if (blendShapes) {
+        m_state.identityFitter.setBlendShapes(*blendShapes, identityShapeNames);
+    }
+    
+    m_state.identityFitterInitialized = true;
+    printf("[CharacterMode] IdentityFitter initialized successfully\n");
+}
+
+// ============================================================================
 // Mesh Update and GPU Upload
 // ============================================================================
 
 inline void CharacterModeHandler::updateCharacterMesh() {
     if (!m_state.character) return;
-    
-    // If landmark deformation was applied, skip BlendShape update
-    // (landmark deformation directly sets vertex positions)
-    if (m_state.landmarkDeformationApplied) {
-        printf("[CharacterMode] Skipping BlendShape update (landmark deformation active)\n");
-        return;
-    }
     
     // Apply parameter constraints to maintain plausible face shapes
     m_state.character->getFace().applyConstraints();
@@ -1068,11 +1247,13 @@ inline void CharacterModeHandler::renderOverviewUI() {
             std::vector<Vertex> vertices;
             std::vector<uint32_t> indices;
             
-            // 简单的 OBJ 加载
+            // 使用简单 OBJ 解析器加载顶点和面
             std::ifstream objFile(objPath);
             if (objFile.is_open()) {
                 std::string line;
                 std::vector<Vec3> positions;
+                std::vector<Vec3> normals;
+                std::vector<std::tuple<int, int, int>> faces;  // vertex indices
                 
                 while (std::getline(objFile, line)) {
                     if (line.empty() || line[0] == '#') continue;
@@ -1086,21 +1267,94 @@ inline void CharacterModeHandler::renderOverviewUI() {
                         iss >> x >> y >> z;
                         positions.push_back(Vec3(x, y, z));
                     }
+                    else if (prefix == "vn") {
+                        float x, y, z;
+                        iss >> x >> y >> z;
+                        normals.push_back(Vec3(x, y, z));
+                    }
+                    else if (prefix == "f") {
+                        // 解析面（支持 v, v/vt, v/vt/vn, v//vn 格式）
+                        std::vector<int> faceVerts;
+                        std::string token;
+                        while (iss >> token) {
+                            int vIdx = 0;
+                            size_t slashPos = token.find('/');
+                            if (slashPos != std::string::npos) {
+                                vIdx = std::stoi(token.substr(0, slashPos)) - 1;
+                            } else {
+                                vIdx = std::stoi(token) - 1;
+                            }
+                            faceVerts.push_back(vIdx);
+                        }
+                        // 三角化（假设是三角形或四边形）
+                        if (faceVerts.size() >= 3) {
+                            faces.push_back({faceVerts[0], faceVerts[1], faceVerts[2]});
+                            if (faceVerts.size() >= 4) {
+                                faces.push_back({faceVerts[0], faceVerts[2], faceVerts[3]});
+                            }
+                        }
+                    }
                 }
                 objFile.close();
                 
+                // 计算顶点法线（如果没有）
+                std::vector<Vec3> computedNormals(positions.size(), Vec3(0, 0, 0));
+                for (const auto& [i0, i1, i2] : faces) {
+                    if (i0 >= 0 && i1 >= 0 && i2 >= 0 && 
+                        i0 < (int)positions.size() && i1 < (int)positions.size() && i2 < (int)positions.size()) {
+                        Vec3 v0 = positions[i0];
+                        Vec3 v1 = positions[i1];
+                        Vec3 v2 = positions[i2];
+                        Vec3 edge1 = v1 - v0;
+                        Vec3 edge2 = v2 - v0;
+                        Vec3 faceNormal = edge1.cross(edge2);
+                        computedNormals[i0] = computedNormals[i0] + faceNormal;
+                        computedNormals[i1] = computedNormals[i1] + faceNormal;
+                        computedNormals[i2] = computedNormals[i2] + faceNormal;
+                    }
+                }
+                for (auto& n : computedNormals) {
+                    float len = n.length();
+                    if (len > 0.0001f) n = n * (1.0f / len);
+                }
+                
                 // 转换为 Vertex 格式
                 vertices.reserve(positions.size());
-                for (const auto& pos : positions) {
+                for (size_t i = 0; i < positions.size(); i++) {
                     Vertex v{};
-                    v.position[0] = pos.x;
-                    v.position[1] = pos.y;
-                    v.position[2] = pos.z;
+                    v.position[0] = positions[i].x;
+                    v.position[1] = positions[i].y;
+                    v.position[2] = positions[i].z;
+                    v.normal[0] = computedNormals[i].x;
+                    v.normal[1] = computedNormals[i].y;
+                    v.normal[2] = computedNormals[i].z;
                     vertices.push_back(v);
+                }
+                
+                // 转换面为索引
+                indices.reserve(faces.size() * 3);
+                for (const auto& [i0, i1, i2] : faces) {
+                    if (i0 >= 0 && i1 >= 0 && i2 >= 0) {
+                        indices.push_back((uint32_t)i0);
+                        indices.push_back((uint32_t)i1);
+                        indices.push_back((uint32_t)i2);
+                    }
                 }
                 
                 if (!vertices.empty()) {
                     m_state.landmarkEditor.setMesh(vertices, indices);
+                    
+                    // 使用 loadModel 加载完整模型用于 PBR 渲染
+                    if (m_ctx && m_ctx->renderer) {
+                        m_state.landmarkEditorModelLoaded = m_ctx->renderer->loadModel(
+                            objPath, m_state.landmarkEditorModel
+                        );
+                        if (m_state.landmarkEditorModelLoaded) {
+                            printf("[CharacterMode] Loaded model for PBR: %zu meshes, %zu verts\n",
+                                   m_state.landmarkEditorModel.meshes.size(),
+                                   m_state.landmarkEditorModel.totalVerts);
+                        }
+                    }
                     
                     // 先尝试加载现有映射
                     std::string landmarkPath = m_state.modelDirectory + "/landmark_vertex_map.json";
@@ -1113,8 +1367,8 @@ inline void CharacterModeHandler::renderOverviewUI() {
                     }
                     
                     m_state.landmarkEditor.setActive(true);
-                    printf("[CharacterMode] Landmark editor opened with standard topology head: %zu vertices, %d landmarks marked\n", 
-                           vertices.size(), m_state.landmarkEditor.getMarkedCount());
+                    printf("[CharacterMode] Landmark editor opened: %zu vertices, %zu faces, %d landmarks\n", 
+                           vertices.size(), faces.size(), m_state.landmarkEditor.getMarkedCount());
                 } else {
                     printf("[CharacterMode] ERROR: Failed to load vertices from %s\n", objPath.c_str());
                 }
@@ -1261,6 +1515,7 @@ inline void CharacterModeHandler::renderOverviewUI() {
             const auto& body = m_state.character->getBody().getParams();
             ImGui::Text("%s: %s", loc("Gender"), body.gender == Gender::Male ? loc("Male") : loc("Female"));
         }
+        
     }
     
     // Photo import dialog (MetaHuman-style multi-photo)
@@ -1755,6 +2010,45 @@ inline void CharacterModeHandler::renderFaceUI() {
             }
         }
     }
+    
+    // Debug visualization options
+    if (ImGui::CollapsingHeader(loc("Debug Visualization"), ImGuiTreeNodeFlags_DefaultOpen)) {
+        // Base topology comparison toggle
+        if (ImGui::Checkbox(loc("Show Base Topology"), &m_state.showBaseTopo)) {
+            if (m_state.showBaseTopo) {
+                // Save current params and reset to base
+                m_state.savedParams = m_state.character->getFace().getShapeParams();
+                m_state.character->getFace().getShapeParams().reset();
+                m_state.meshNeedsUpdate = true;
+            } else {
+                // Restore saved params
+                m_state.character->getFace().setShapeParams(m_state.savedParams);
+                m_state.meshNeedsUpdate = true;
+            }
+        }
+        if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip("%s", loc("Toggle between current face and base topology (all parameters = 0)"));
+        }
+        
+        // Landmark visualization toggle
+        ImGui::Checkbox(loc("Show Landmarks"), &m_state.showLandmarks);
+        if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip("%s", loc("Display 68 facial landmark points on the mesh"));
+        }
+        
+        // Initialize landmark deformer for visualization if needed
+        if (m_state.showLandmarks && !m_state.landmarkDeformerInitialized) {
+            auto baseMesh = m_state.renderer.getBaseMesh();
+            if (!baseMesh.empty()) {
+                std::string mappingPath = m_state.modelDirectory + "/landmark_vertex_map.json";
+                std::string objPath = m_state.modelDirectory + "/Super Average Head.obj";
+                if (m_state.landmarkDeformer.loadMapping(mappingPath)) {
+                    m_state.landmarkDeformer.setBaseMesh(baseMesh, objPath);
+                    m_state.landmarkDeformerInitialized = true;
+                }
+            }
+        }
+    }
 }
 
 // ============================================================================
@@ -2039,6 +2333,148 @@ inline void CharacterModeHandler::renderExportUI() {
 inline void CharacterModeHandler::setSubMode(CharacterSubMode subMode) {
     if (m_state.subMode == subMode) return;
     m_state.subMode = subMode;
+}
+
+// ============================================================================
+// Landmark Editor Overlay (screen-space rendering)
+// ============================================================================
+
+inline bool CharacterModeHandler::projectToScreen(float wx, float wy, float wz, float& sx, float& sy) {
+    if (m_projectionCallback) {
+        return m_projectionCallback(wx, wy, wz, sx, sy);
+    }
+    return false;
+}
+
+inline void CharacterModeHandler::renderLandmarkEditorOverlay() {
+    if (!m_state.landmarkEditor.isActive()) return;
+    if (!m_ctx || !m_ctx->renderer) return;
+    
+    const auto& opts = m_state.landmarkEditor.getDisplayOptions();
+    const auto& vertices = m_state.landmarkEditor.getVertices();
+    
+    ImDrawList* drawList = ImGui::GetBackgroundDrawList();
+    
+    // 获取相机位置用于背面剔除
+    Vec3 cameraPos = m_ctx->renderer->getCameraPosition();
+    
+    // 背面剔除辅助函数：检查顶点法线是否朝向相机
+    auto isFacingCamera = [&](const Vertex& v) -> bool {
+        // 计算从顶点到相机的方向
+        Vec3 toCamera(
+            cameraPos.x - v.position[0],
+            cameraPos.y - v.position[1],
+            cameraPos.z - v.position[2]
+        );
+        // 点积判断：法线与相机方向同向则可见
+        float dot = v.normal[0] * toCamera.x + v.normal[1] * toCamera.y + v.normal[2] * toCamera.z;
+        return dot > 0;
+    };
+    
+    // ========== 渲染顶点点云（屏幕空间圆点）==========
+    if (!opts.showMesh || opts.showVertexDots) {
+        int hoveredVert = m_state.landmarkEditor.getHoveredVertex();
+        int hoveredLm = m_state.landmarkEditor.getHoveredLandmark();
+        
+        ImU32 normalColor = IM_COL32(100, 100, 100, 180);
+        ImU32 hoverColor = IM_COL32(0, 255, 255, 255);
+        
+        // 先画普通顶点（背面剔除）
+        for (size_t i = 0; i < vertices.size(); i++) {
+            // 跳过 hover 的顶点（后面单独画）
+            if ((int)i == hoveredVert && hoveredLm < 0) continue;
+            
+            const auto& v = vertices[i];
+            
+            // 背面剔除：跳过背对相机的顶点
+            if (!isFacingCamera(v)) continue;
+            
+            float sx, sy;
+            if (projectToScreen(v.position[0], v.position[1], v.position[2], sx, sy)) {
+                drawList->AddCircleFilled(ImVec2(sx, sy), 2.0f, normalColor, 6);
+            }
+        }
+        
+        // 画 hover 的顶点（如果不是 landmark，且面向相机）
+        if (hoveredVert >= 0 && hoveredLm < 0 && hoveredVert < (int)vertices.size()) {
+            const auto& v = vertices[hoveredVert];
+            if (isFacingCamera(v)) {
+                float sx, sy;
+                if (projectToScreen(v.position[0], v.position[1], v.position[2], sx, sy)) {
+                    drawList->AddCircleFilled(ImVec2(sx, sy), 5.0f, hoverColor, 8);
+                    drawList->AddCircle(ImVec2(sx, sy), 5.0f, IM_COL32(255, 255, 255, 200), 8, 1.5f);
+                }
+            }
+        }
+    }
+    
+    // ========== 渲染 Landmark 点（屏幕空间）==========
+    if (opts.showLandmarks) {
+        int currentId = m_state.landmarkEditor.getCurrentLandmark();
+        int hoveredLm = m_state.landmarkEditor.getHoveredLandmark();
+        const char* currentRegion = m_state.landmarkEditor.getCurrentRegion();
+        
+        for (int i = 0; i < 68; i++) {
+            Vec3 pos;
+            if (!m_state.landmarkEditor.getLandmarkPosition(i, pos)) continue;
+            
+            float sx, sy;
+            if (!projectToScreen(pos.x, pos.y, pos.z, sx, sy)) continue;
+            
+            Vec3 color = getRegionColor(LANDMARK_DEFS[i].region);
+            float radius = 4.0f;
+            float alpha = 1.0f;
+            
+            // 当前 landmark - 黄色，更大
+            if (i == currentId) {
+                color = Vec3(1.0f, 1.0f, 0.0f);
+                radius = 6.0f;
+            }
+            // Hover 的 landmark - 青色，更大
+            else if (i == hoveredLm) {
+                color = Vec3(0.0f, 1.0f, 1.0f);
+                radius = 5.5f;
+            }
+            // 高亮当前区域
+            else if (opts.highlightRegion && strcmp(LANDMARK_DEFS[i].region, currentRegion) == 0) {
+                radius = 4.5f;
+            }
+            // 其他区域的 landmark 稍暗
+            else if (opts.highlightRegion) {
+                alpha = 0.5f;
+                radius = 3.0f;
+            }
+            
+            ImU32 fillColor = IM_COL32(
+                (int)(color.x * 255 * alpha),
+                (int)(color.y * 255 * alpha),
+                (int)(color.z * 255 * alpha),
+                (int)(220 * alpha)
+            );
+            ImU32 outlineColor = IM_COL32(255, 255, 255, (int)(200 * alpha));
+            
+            drawList->AddCircleFilled(ImVec2(sx, sy), radius, fillColor, 8);
+            drawList->AddCircle(ImVec2(sx, sy), radius, outlineColor, 8, 1.5f);
+        }
+    }
+    
+    // ========== 网格模式下单独渲染 hover 顶点 ==========
+    if (opts.showMesh && !opts.showVertexDots) {
+        int hoveredVert = m_state.landmarkEditor.getHoveredVertex();
+        int hoveredLm = m_state.landmarkEditor.getHoveredLandmark();
+        
+        if (hoveredVert >= 0 && hoveredLm < 0) {
+            Vec3 pos;
+            if (m_state.landmarkEditor.getHoveredPosition(pos)) {
+                float sx, sy;
+                if (projectToScreen(pos.x, pos.y, pos.z, sx, sy)) {
+                    ImU32 hoverColor = IM_COL32(0, 255, 255, 255);
+                    drawList->AddCircleFilled(ImVec2(sx, sy), 5.0f, hoverColor, 8);
+                    drawList->AddCircle(ImVec2(sx, sy), 5.0f, IM_COL32(255, 255, 255, 200), 8, 1.5f);
+                }
+            }
+        }
+    }
 }
 
 } // namespace editor

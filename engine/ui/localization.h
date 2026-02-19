@@ -724,6 +724,23 @@ private:
         chinese_["Select a photo file:"] = "选择照片文件:";
         chinese_["Generate"] = "生成";
         chinese_["Cancel"] = "取消";
+        
+        // Photo deformation comparison
+        chinese_["Photo Deformation Settings"] = "照片变形设置";
+        chinese_["Compare"] = "对比";
+        chinese_["Generated"] = "生成结果";
+        chinese_["Standard"] = "标准头";
+        chinese_["Deform Strength"] = "变形强度";
+        chinese_["Influence Radius"] = "影响半径";
+        chinese_["Re-apply Deformation"] = "重新应用变形";
+        chinese_["Reset to Base Mesh"] = "重置为标准网格";
+        chinese_["How much the photo shape affects the mesh (1.0 = 100%)"] = "照片形状对网格的影响程度 (1.0 = 100%)";
+        chinese_["How far each landmark affects nearby vertices"] = "每个特征点影响周围顶点的范围";
+        chinese_["Adjust these parameters and re-import to change deformation strength"] = "调整参数后点击重新应用来改变变形效果";
+        
+        // Landmark visualization
+        chinese_["Show Landmarks"] = "显示特征点";
+        chinese_["Display 68 facial landmark points on the mesh for debugging"] = "在网格上显示68个人脸特征点用于调试";
     }
     
     Language currentLanguage_ = Language::Chinese;

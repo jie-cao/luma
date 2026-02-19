@@ -174,82 +174,121 @@ private:
         };
         
         // === OVERALL FACE SHAPE ===
-        // NOTE: Deformation magnitudes are scaled for visible effect (0.3-0.5 = significant change)
+        // NOTE: These BlendShapes are designed to affect 68-landmark positions
+        // Mesh bounds: Y from -0.115 to 0.115 (total 0.23m)
+        // Landmark Y positions (normalized 0-1):
+        //   - Eyes: ~0.69, Nose: ~0.61, Mouth: ~0.50, Chin: ~0.39, Jaw: ~0.45-0.55
         
         addBlendShape("faceWidth", [&](const Vertex& v, const HeadMeshLoader::RegionWeights& w) -> Vec3 {
             float nY = normalizedY(v);
-            float weight = smoothWeight(nY, 0.4f, 0.5f);
-            float frontWeight = 1.0f - w.skull;
-            // 0.4 = 40% width change at full slider
-            return Vec3(v.position[0] * 0.4f * weight * frontWeight, 0, 0);
+            float nZ = normalizedZ(v);
+            // Affect entire front face (Y: 0.3-0.8, Z > 0.3)
+            float yWeight = 1.0f;
+            if (nY < 0.3f) yWeight = nY / 0.3f;
+            else if (nY > 0.8f) yWeight = (1.0f - nY) / 0.2f;
+            float frontWeight = (nZ > 0.3f) ? 1.0f : 0.0f;
+            // Scale X position by 40% - affects jaw contour landmarks (0-16)
+            return Vec3(v.position[0] * 0.4f * yWeight * frontWeight, 0, 0);
         });
         
         addBlendShape("faceLength", [&](const Vertex& v, const HeadMeshLoader::RegionWeights& w) -> Vec3 {
             float nY = normalizedY(v);
-            if (nY > 0.6f) return Vec3(0, 0, 0);
-            float weight = (0.6f - nY) / 0.6f;
-            float frontWeight = 1.0f - w.skull;
-            // 0.12 = 12% head height change (about 2.8cm)
-            return Vec3(0, -H * 0.12f * weight * frontWeight, 0);
+            float nZ = normalizedZ(v);
+            // Only affect lower face (below eyes, Y < 0.65)
+            if (nY > 0.65f) return Vec3(0, 0, 0);
+            float weight = (0.65f - nY) / 0.65f;
+            float frontWeight = (nZ > 0.3f) ? 1.0f : 0.0f;
+            // Move down by up to 15% of head height
+            return Vec3(0, -H * 0.15f * weight * frontWeight, 0);
         });
         
         addBlendShape("faceRoundness", [&](const Vertex& v, const HeadMeshLoader::RegionWeights& w) -> Vec3 {
             float nY = normalizedY(v);
-            float weight = smoothWeight(nY, 0.35f, 0.3f);
-            float frontWeight = 1.0f - w.skull;
-            float sign = v.position[0] > 0 ? 1.0f : -1.0f;
-            // 0.35 = 35% roundness change
-            return Vec3(std::abs(v.position[0]) * 0.35f * weight * frontWeight * sign, 0, 0);
+            float nZ = normalizedZ(v);
+            // Affect cheek area (Y: 0.4-0.7)
+            float yWeight = smoothWeight(nY, 0.55f, 0.15f);
+            float frontWeight = (nZ > 0.3f) ? 1.0f : 0.0f;
+            // Scale X outward
+            return Vec3(v.position[0] * 0.3f * yWeight * frontWeight, 0, 0);
         });
         
         // === FOREHEAD ===
         
         addBlendShape("foreheadHeight", [&](const Vertex& v, const HeadMeshLoader::RegionWeights& w) -> Vec3 {
-            return Vec3(0, H * 0.08f * w.forehead, 0);  // 8% head height
+            return Vec3(0, H * 0.15f * w.forehead, 0);  // 15% head height
         });
         
         addBlendShape("foreheadWidth", [&](const Vertex& v, const HeadMeshLoader::RegionWeights& w) -> Vec3 {
             float sign = v.position[0] > 0 ? 1.0f : -1.0f;
-            return Vec3(v.position[0] * 0.3f * w.forehead, 0, 0);  // 30% width
+            return Vec3(v.position[0] * 0.5f * w.forehead, 0, 0);  // 50% width
         });
         
         addBlendShape("foreheadSlope", [&](const Vertex& v, const HeadMeshLoader::RegionWeights& w) -> Vec3 {
-            return Vec3(0, 0, -H * 0.08f * w.forehead);  // 8% depth
+            return Vec3(0, 0, -H * 0.12f * w.forehead);  // 12% depth
         });
         
         // === EYES ===
         
         addBlendShape("eyeSize", [&](const Vertex& v, const HeadMeshLoader::RegionWeights& w) -> Vec3 {
-            // Scale eyes in all directions
+            float nY = normalizedY(v);
+            float nZ = normalizedZ(v);
+            // Eye region: Y around 0.65-0.75
+            float eyeWeight = smoothWeight(nY, 0.70f, 0.08f);
+            float frontWeight = (nZ > 0.4f) ? 1.0f : 0.0f;
+            // Scale eyes outward from center
             float sign = v.position[0] > 0 ? 1.0f : -1.0f;
-            return Vec3(v.position[0] * 0.15f * w.eyes, H * 0.02f * w.eyes, H * 0.02f * w.eyes);
+            return Vec3(v.position[0] * 0.3f * eyeWeight * frontWeight, 
+                       H * 0.05f * eyeWeight * frontWeight, 
+                       H * 0.05f * eyeWeight * frontWeight);
         });
         
         addBlendShape("eyeSpacing", [&](const Vertex& v, const HeadMeshLoader::RegionWeights& w) -> Vec3 {
+            float nY = normalizedY(v);
+            float nZ = normalizedZ(v);
+            // Eye region
+            float eyeWeight = smoothWeight(nY, 0.70f, 0.08f);
+            float frontWeight = (nZ > 0.4f) ? 1.0f : 0.0f;
             float sign = v.position[0] > 0 ? 1.0f : -1.0f;
-            return Vec3(H * 0.04f * sign * w.eyes, 0, 0);  // 4% head height = ~9mm
+            // Move eyes horizontally by up to 15% of head height
+            return Vec3(H * 0.15f * sign * eyeWeight * frontWeight, 0, 0);
         });
         
         addBlendShape("eyeHeight", [&](const Vertex& v, const HeadMeshLoader::RegionWeights& w) -> Vec3 {
-            return Vec3(0, H * 0.05f * w.eyes, 0);  // 5% head height
+            float nY = normalizedY(v);
+            float nZ = normalizedZ(v);
+            float eyeWeight = smoothWeight(nY, 0.70f, 0.08f);
+            float frontWeight = (nZ > 0.4f) ? 1.0f : 0.0f;
+            return Vec3(0, H * 0.12f * eyeWeight * frontWeight, 0);
         });
         
         addBlendShape("eyeDepth", [&](const Vertex& v, const HeadMeshLoader::RegionWeights& w) -> Vec3 {
-            return Vec3(0, 0, -H * 0.06f * w.eyes);  // 6% depth (deep-set eyes)
+            float nY = normalizedY(v);
+            float nZ = normalizedZ(v);
+            float eyeWeight = smoothWeight(nY, 0.70f, 0.08f);
+            float frontWeight = (nZ > 0.4f) ? 1.0f : 0.0f;
+            return Vec3(0, 0, -H * 0.12f * eyeWeight * frontWeight);
         });
         
         addBlendShape("eyeAngle", [&](const Vertex& v, const HeadMeshLoader::RegionWeights& w) -> Vec3 {
+            float nY = normalizedY(v);
+            float nZ = normalizedZ(v);
+            float eyeWeight = smoothWeight(nY, 0.70f, 0.08f);
+            float frontWeight = (nZ > 0.4f) ? 1.0f : 0.0f;
             float sign = v.position[0] > 0 ? 1.0f : -1.0f;
             float nX = std::abs(normalizedX(v));
-            float outerFactor = std::clamp((nX - 0.3f) / 0.3f, 0.0f, 1.0f);
-            return Vec3(0, H * 0.025f * sign * w.eyes * outerFactor, 0);  // 2.5%
+            float outerFactor = std::clamp((nX - 0.2f) / 0.4f, 0.0f, 1.0f);
+            return Vec3(0, H * 0.06f * sign * eyeWeight * frontWeight * outerFactor, 0);
         });
         
         addBlendShape("eyeWidth", [&](const Vertex& v, const HeadMeshLoader::RegionWeights& w) -> Vec3 {
+            float nY = normalizedY(v);
+            float nZ = normalizedZ(v);
+            float eyeWeight = smoothWeight(nY, 0.70f, 0.08f);
+            float frontWeight = (nZ > 0.4f) ? 1.0f : 0.0f;
             float sign = v.position[0] > 0 ? 1.0f : -1.0f;
             float nX = std::abs(normalizedX(v));
-            float outerFactor = std::clamp((nX - 0.2f) / 0.3f, 0.0f, 1.0f);
-            return Vec3(H * 0.02f * sign * w.eyes * outerFactor, 0, 0);  // 2%
+            float outerFactor = std::clamp((nX - 0.15f) / 0.35f, 0.0f, 1.0f);
+            return Vec3(H * 0.06f * sign * eyeWeight * frontWeight * outerFactor, 0, 0);
         });
         
         // === EYEBROWS ===
@@ -257,7 +296,7 @@ private:
         addBlendShape("browHeight", [&](const Vertex& v, const HeadMeshLoader::RegionWeights& w) -> Vec3 {
             float nY = normalizedY(v);
             float browWeight = smoothWeight(nY, Y_BROW, 0.05f);
-            return Vec3(0, H * 0.05f * browWeight * (1.0f - w.skull), 0);  // 5%
+            return Vec3(0, H * 0.08f * browWeight * (1.0f - w.skull), 0);  // 8%
         });
         
         addBlendShape("browAngle", [&](const Vertex& v, const HeadMeshLoader::RegionWeights& w) -> Vec3 {
@@ -265,40 +304,40 @@ private:
             float browWeight = smoothWeight(nY, Y_BROW, 0.04f);
             float sign = v.position[0] > 0 ? 1.0f : -1.0f;
             float nX = std::abs(normalizedX(v));
-            return Vec3(0, H * 0.03f * sign * browWeight * nX * (1.0f - w.skull), 0);  // 3%
+            return Vec3(0, H * 0.05f * sign * browWeight * nX * (1.0f - w.skull), 0);  // 5%
         });
         
         addBlendShape("browThickness", [&](const Vertex& v, const HeadMeshLoader::RegionWeights& w) -> Vec3 {
             float nY = normalizedY(v);
             float browWeight = smoothWeight(nY, Y_BROW, 0.03f);
-            return Vec3(0, 0, H * 0.03f * browWeight * (1.0f - w.skull));  // 3%
+            return Vec3(0, 0, H * 0.05f * browWeight * (1.0f - w.skull));  // 5%
         });
         
         // === NOSE ===
         
         addBlendShape("noseLength", [&](const Vertex& v, const HeadMeshLoader::RegionWeights& w) -> Vec3 {
-            return Vec3(0, -H * 0.06f * w.nose, 0);  // 6% = ~14mm
+            return Vec3(0, -H * 0.10f * w.nose, 0);  // 10% = ~23mm
         });
         
         addBlendShape("noseWidth", [&](const Vertex& v, const HeadMeshLoader::RegionWeights& w) -> Vec3 {
             float sign = v.position[0] > 0 ? 1.0f : -1.0f;
-            return Vec3(H * 0.04f * sign * w.nose, 0, 0);  // 4%
+            return Vec3(H * 0.08f * sign * w.nose, 0, 0);  // 8%
         });
         
         addBlendShape("noseHeight", [&](const Vertex& v, const HeadMeshLoader::RegionWeights& w) -> Vec3 {
-            return Vec3(0, 0, H * 0.08f * w.nose);  // 8% = prominent nose
+            return Vec3(0, 0, H * 0.12f * w.nose);  // 12% = prominent nose
         });
         
         addBlendShape("noseBridge", [&](const Vertex& v, const HeadMeshLoader::RegionWeights& w) -> Vec3 {
             float nY = normalizedY(v);
             float bridgeWeight = smoothWeight(nY, Y_NOSE_BRIDGE, 0.05f);
-            return Vec3(0, 0, H * 0.05f * bridgeWeight * w.nose);  // 5%
+            return Vec3(0, 0, H * 0.08f * bridgeWeight * w.nose);  // 8%
         });
         
         addBlendShape("noseTip", [&](const Vertex& v, const HeadMeshLoader::RegionWeights& w) -> Vec3 {
             float nY = normalizedY(v);
             float tipWeight = smoothWeight(nY, Y_NOSE_TIP, 0.03f);
-            return Vec3(0, 0, H * 0.06f * tipWeight * w.nose);  // 6%
+            return Vec3(0, 0, H * 0.10f * tipWeight * w.nose);  // 10%
         });
         
         addBlendShape("nostrilWidth", [&](const Vertex& v, const HeadMeshLoader::RegionWeights& w) -> Vec3 {
@@ -307,7 +346,7 @@ private:
             float sign = v.position[0] > 0 ? 1.0f : -1.0f;
             float nX = std::abs(normalizedX(v));
             float nostrilRegion = (nX > 0.05f && nX < 0.25f) ? 1.0f : 0.0f;
-            return Vec3(H * 0.03f * sign * baseWeight * nostrilRegion, 0, 0);  // 3%
+            return Vec3(H * 0.06f * sign * baseWeight * nostrilRegion, 0, 0);  // 6%
         });
         
         // === MOUTH ===
@@ -316,69 +355,99 @@ private:
             float sign = v.position[0] > 0 ? 1.0f : -1.0f;
             float nX = std::abs(normalizedX(v));
             float mouthRegion = (nX > 0.1f) ? 1.0f : 0.0f;
-            return Vec3(H * 0.04f * sign * w.mouth * mouthRegion, 0, 0);  // 4%
+            return Vec3(H * 0.08f * sign * w.mouth * mouthRegion, 0, 0);  // 8%
         });
         
         addBlendShape("upperLipThickness", [&](const Vertex& v, const HeadMeshLoader::RegionWeights& w) -> Vec3 {
             float nY = normalizedY(v);
             float upperWeight = smoothWeight(nY, Y_UPPER_LIP, 0.025f);
-            return Vec3(0, H * 0.015f * upperWeight * w.mouth, H * 0.04f * upperWeight * w.mouth);  // Fuller lips
+            return Vec3(0, H * 0.025f * upperWeight * w.mouth, H * 0.06f * upperWeight * w.mouth);  // Fuller lips
         });
         
         addBlendShape("lowerLipThickness", [&](const Vertex& v, const HeadMeshLoader::RegionWeights& w) -> Vec3 {
             float nY = normalizedY(v);
             float lowerWeight = smoothWeight(nY, Y_LOWER_LIP, 0.025f);
-            return Vec3(0, -H * 0.015f * lowerWeight * w.mouth, H * 0.04f * lowerWeight * w.mouth);  // Fuller lips
+            return Vec3(0, -H * 0.025f * lowerWeight * w.mouth, H * 0.06f * lowerWeight * w.mouth);  // Fuller lips
         });
         
         addBlendShape("lipProtrusion", [&](const Vertex& v, const HeadMeshLoader::RegionWeights& w) -> Vec3 {
-            return Vec3(0, 0, H * 0.06f * w.mouth);  // 6%
+            return Vec3(0, 0, H * 0.10f * w.mouth);  // 10%
         });
         
         addBlendShape("mouthCorners", [&](const Vertex& v, const HeadMeshLoader::RegionWeights& w) -> Vec3 {
             float nX = std::abs(normalizedX(v));
             float cornerRegion = std::clamp((nX - 0.2f) / 0.2f, 0.0f, 1.0f);
-            return Vec3(0, H * 0.02f * w.mouth * cornerRegion, 0);  // 2%
+            return Vec3(0, H * 0.04f * w.mouth * cornerRegion, 0);  // 4%
         });
         
         // === CHIN ===
+        // Chin landmarks: 6-10 (lower jaw), 8 (chin point)
+        // Chin Y position: ~0.39 normalized
         
         addBlendShape("chinLength", [&](const Vertex& v, const HeadMeshLoader::RegionWeights& w) -> Vec3 {
-            return Vec3(0, -H * 0.08f * w.chin, 0);  // 8% = ~18mm
+            float nY = normalizedY(v);
+            float nZ = normalizedZ(v);
+            // Affect chin area (Y < 0.45)
+            if (nY > 0.45f) return Vec3(0, 0, 0);
+            float weight = (0.45f - nY) / 0.45f;
+            float frontWeight = (nZ > 0.3f) ? 1.0f : 0.0f;
+            return Vec3(0, -H * 0.15f * weight * frontWeight, 0);
         });
         
         addBlendShape("chinWidth", [&](const Vertex& v, const HeadMeshLoader::RegionWeights& w) -> Vec3 {
+            float nY = normalizedY(v);
+            float nZ = normalizedZ(v);
+            if (nY > 0.45f) return Vec3(0, 0, 0);
+            float weight = (0.45f - nY) / 0.45f;
+            float frontWeight = (nZ > 0.3f) ? 1.0f : 0.0f;
             float sign = v.position[0] > 0 ? 1.0f : -1.0f;
-            return Vec3(H * 0.05f * sign * w.chin, 0, 0);  // 5%
+            return Vec3(H * 0.10f * sign * weight * frontWeight, 0, 0);
         });
         
         addBlendShape("chinProtrusion", [&](const Vertex& v, const HeadMeshLoader::RegionWeights& w) -> Vec3 {
-            return Vec3(0, 0, H * 0.06f * w.chin);  // 6%
+            float nY = normalizedY(v);
+            float nZ = normalizedZ(v);
+            if (nY > 0.45f) return Vec3(0, 0, 0);
+            float weight = (0.45f - nY) / 0.45f;
+            float frontWeight = (nZ > 0.3f) ? 1.0f : 0.0f;
+            return Vec3(0, 0, H * 0.12f * weight * frontWeight);
         });
         
         // === JAW ===
+        // Jaw landmarks: 0-6 (right), 10-16 (left)
+        // Jaw Y position: ~0.45-0.55 normalized
         
         addBlendShape("jawWidth", [&](const Vertex& v, const HeadMeshLoader::RegionWeights& w) -> Vec3 {
+            float nY = normalizedY(v);
+            float nZ = normalizedZ(v);
+            // Affect jaw area (Y: 0.35-0.55)
+            float weight = smoothWeight(nY, 0.45f, 0.12f);
+            float frontWeight = (nZ > 0.2f) ? 1.0f : 0.0f;
             float sign = v.position[0] > 0 ? 1.0f : -1.0f;
-            return Vec3(H * 0.06f * sign * w.jaw, 0, 0);  // 6% = strong jaw
+            return Vec3(H * 0.15f * sign * weight * frontWeight, 0, 0);
         });
         
         addBlendShape("jawAngle", [&](const Vertex& v, const HeadMeshLoader::RegionWeights& w) -> Vec3 {
+            float nY = normalizedY(v);
+            float nZ = normalizedZ(v);
+            float weight = smoothWeight(nY, 0.45f, 0.10f);
+            float frontWeight = (nZ > 0.2f) ? 1.0f : 0.0f;
             float sign = v.position[0] > 0 ? 1.0f : -1.0f;
             float nX = std::abs(normalizedX(v));
-            return Vec3(H * 0.03f * sign * w.jaw * nX, -H * 0.015f * w.jaw * nX, 0);  // 3%
+            return Vec3(H * 0.08f * sign * weight * frontWeight * nX, 
+                       -H * 0.04f * weight * frontWeight * nX, 0);
         });
         
         // === CHEEKS ===
         
         addBlendShape("cheekboneProminence", [&](const Vertex& v, const HeadMeshLoader::RegionWeights& w) -> Vec3 {
             float sign = v.position[0] > 0 ? 1.0f : -1.0f;
-            return Vec3(H * 0.04f * sign * w.cheeks, 0, H * 0.03f * w.cheeks);  // 4%
+            return Vec3(H * 0.06f * sign * w.cheeks, 0, H * 0.05f * w.cheeks);  // 6%
         });
         
         addBlendShape("cheekFullness", [&](const Vertex& v, const HeadMeshLoader::RegionWeights& w) -> Vec3 {
             float sign = v.position[0] > 0 ? 1.0f : -1.0f;
-            return Vec3(H * 0.035f * sign * w.cheeks, 0, H * 0.025f * w.cheeks);  // 3.5%
+            return Vec3(H * 0.05f * sign * w.cheeks, 0, H * 0.04f * w.cheeks);  // 5%
         });
         
         // === EARS ===
@@ -505,17 +574,22 @@ private:
         });
         
         addBlendShape("cheekboneHeight", [&](const Vertex& v, const HeadMeshLoader::RegionWeights& w) -> Vec3 {
-            return Vec3(0, H * 0.005f * w.cheeks, 0);
+            return Vec3(0, H * 0.06f * w.cheeks, 0);  // 6% - high/low cheekbones
         });
         
         addBlendShape("cheekboneWidth", [&](const Vertex& v, const HeadMeshLoader::RegionWeights& w) -> Vec3 {
+            float nY = normalizedY(v);
+            float nZ = normalizedZ(v);
+            // Cheekbone area (Y: 0.55-0.70)
+            float weight = smoothWeight(nY, 0.62f, 0.10f);
+            float frontWeight = (nZ > 0.3f) ? 1.0f : 0.0f;
             float sign = v.position[0] > 0 ? 1.0f : -1.0f;
-            return Vec3(H * 0.006f * sign * w.cheeks, 0, 0);
+            return Vec3(H * 0.12f * sign * weight * frontWeight, 0, 0);
         });
         
         addBlendShape("cheekFat", [&](const Vertex& v, const HeadMeshLoader::RegionWeights& w) -> Vec3 {
             float sign = v.position[0] > 0 ? 1.0f : -1.0f;
-            return Vec3(H * 0.005f * sign * w.cheeks, -H * 0.002f * w.cheeks, H * 0.004f * w.cheeks);
+            return Vec3(H * 0.06f * sign * w.cheeks, -H * 0.02f * w.cheeks, H * 0.05f * w.cheeks);  // 6%
         });
 
         createARKitCompatibilityChannels(mesh);

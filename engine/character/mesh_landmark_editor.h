@@ -22,37 +22,37 @@ struct LandmarkInfo {
 
 // 68 个 landmark 的定义
 inline const LandmarkInfo LANDMARK_DEFS[68] = {
-    // 下巴轮廓 (0-16)
-    {0, "jaw_right_ear", "jaw", "右耳下方"},
-    {1, "jaw_right_1", "jaw", "右下颌1"},
-    {2, "jaw_right_2", "jaw", "右下颌2"},
-    {3, "jaw_right_3", "jaw", "右下颌3"},
-    {4, "jaw_right_4", "jaw", "右下颌4"},
-    {5, "jaw_right_chin", "jaw", "右下巴"},
+    // 下巴轮廓 (0-16) - 从右耳沿下巴到左耳
+    {0, "jaw_right_ear", "jaw", "右耳旁"},
+    {1, "jaw_right_1", "jaw", "右脸颊上"},
+    {2, "jaw_right_2", "jaw", "右脸颊中"},
+    {3, "jaw_right_3", "jaw", "右脸颊下"},
+    {4, "jaw_right_4", "jaw", "右下颌角"},
+    {5, "jaw_right_chin", "jaw", "右下颌"},
     {6, "jaw_chin_right", "chin", "下巴右侧"},
-    {7, "jaw_chin_center", "chin", "下巴中心偏右"},
-    {8, "jaw_chin_bottom", "chin", "下巴最低点"},
-    {9, "jaw_chin_left", "chin", "下巴中心偏左"},
-    {10, "jaw_left_chin", "jaw", "左下巴"},
-    {11, "jaw_left_4", "jaw", "左下颌4"},
-    {12, "jaw_left_3", "jaw", "左下颌3"},
-    {13, "jaw_left_2", "jaw", "左下颌2"},
-    {14, "jaw_left_1", "jaw", "左下颌1"},
-    {15, "jaw_left_ear_low", "jaw", "左耳下方低"},
-    {16, "jaw_left_ear", "jaw", "左耳下方"},
+    {7, "jaw_chin_center_r", "chin", "下巴偏右"},
+    {8, "jaw_chin_bottom", "chin", "下巴尖"},
+    {9, "jaw_chin_center_l", "chin", "下巴偏左"},
+    {10, "jaw_left_chin", "jaw", "左下颌"},
+    {11, "jaw_left_4", "jaw", "左下颌角"},
+    {12, "jaw_left_3", "jaw", "左脸颊下"},
+    {13, "jaw_left_2", "jaw", "左脸颊中"},
+    {14, "jaw_left_1", "jaw", "左脸颊上"},
+    {15, "jaw_left_ear_low", "jaw", "左耳下"},
+    {16, "jaw_left_ear", "jaw", "左耳旁"},
     
-    // 左眉毛 (17-21)
-    {17, "left_brow_inner", "left_eyebrow", "左眉内侧"},
-    {18, "left_brow_1", "left_eyebrow", "左眉1"},
+    // 左眉毛 (17-21) - 从外到内
+    {17, "left_brow_outer", "left_eyebrow", "左眉外侧"},
+    {18, "left_brow_2", "left_eyebrow", "左眉外2"},
     {19, "left_brow_center", "left_eyebrow", "左眉中心"},
-    {20, "left_brow_2", "left_eyebrow", "左眉2"},
-    {21, "left_brow_outer", "left_eyebrow", "左眉外侧"},
+    {20, "left_brow_1", "left_eyebrow", "左眉内2"},
+    {21, "left_brow_inner", "left_eyebrow", "左眉内侧"},
     
-    // 右眉毛 (22-26)
+    // 右眉毛 (22-26) - 从内到外
     {22, "right_brow_inner", "right_eyebrow", "右眉内侧"},
-    {23, "right_brow_1", "right_eyebrow", "右眉1"},
+    {23, "right_brow_1", "right_eyebrow", "右眉内2"},
     {24, "right_brow_center", "right_eyebrow", "右眉中心"},
-    {25, "right_brow_2", "right_eyebrow", "右眉2"},
+    {25, "right_brow_2", "right_eyebrow", "右眉外2"},
     {26, "right_brow_outer", "right_eyebrow", "右眉外侧"},
     
     // 鼻梁 (27-30)
@@ -363,10 +363,12 @@ public:
         }
         
         // ========== 眉毛 (17-26) ==========
-        // 左眉毛 (17-21) - 注意：iBUG 的"左"是图像中的左，即人脸的右边 (X > 0)
+        // 左眉毛 (17-21) - 从外侧到内侧（17=太阳穴端，21=鼻子端）
+        // iBUG 的"左"是图像中的左，即观察者的左边
         for (int i = 17; i <= 21; i++) {
             float t = (i - 17) / 4.0f;  // 0 到 1
-            float targetX = center.x + eyeOffsetX * 0.5f + t * eyeOffsetX * 0.8f;
+            // t=0 时在外侧（远离中心），t=1 时在内侧（靠近中心）
+            float targetX = center.x + eyeOffsetX * 1.3f - t * eyeOffsetX * 0.8f;
             float targetY = browY;
             float targetZ = meshMax_.z * 0.5f;
             
@@ -377,9 +379,10 @@ public:
             }
         }
         
-        // 右眉毛 (22-26) - 人脸的左边 (X < 0)
+        // 右眉毛 (22-26) - 从内侧到外侧（22=鼻子端，26=太阳穴端）
         for (int i = 22; i <= 26; i++) {
             float t = (i - 22) / 4.0f;  // 0 到 1
+            // t=0 时在内侧（靠近中心），t=1 时在外侧（远离中心）
             float targetX = center.x - eyeOffsetX * 0.5f - t * eyeOffsetX * 0.8f;
             float targetY = browY;
             float targetZ = meshMax_.z * 0.5f;
@@ -613,12 +616,309 @@ public:
     
     const std::vector<LandmarkMapping>& getMappings() const { return mappings_; }
     const std::vector<Vertex>& getVertices() const { return vertices_; }
+    const std::vector<uint32_t>& getIndices() const { return indices_; }
     
     int getMarkedCount() const {
         int count = 0;
         for (const auto& m : mappings_) if (m.isSet) count++;
         return count;
     }
+    
+    // ========== 显示选项 ==========
+    struct DisplayOptions {
+        bool showMesh = false;          // 显示 PBR 网格（默认关闭，用点云）
+        bool meshTransparent = true;    // 网格半透明
+        float meshOpacity = 0.5f;       // 网格不透明度
+        bool showVertexDots = true;     // 显示所有顶点点（默认开启）
+        bool showLandmarks = true;      // 显示 landmark 标记
+        float landmarkSize = 0.004f;    // landmark 标记大小
+        bool highlightRegion = true;    // 高亮当前区域
+    };
+    
+    DisplayOptions& getDisplayOptions() { return displayOptions_; }
+    const DisplayOptions& getDisplayOptions() const { return displayOptions_; }
+    
+    // ========== Hover 功能 ==========
+    void updateHover(const Vec3& rayOrigin, const Vec3& rayDir, const Vec3& cameraPos) {
+        hoveredVertex_ = -1;
+        hoveredLandmark_ = -1;
+        float bestDist = 1e30f;
+        
+        // 背面剔除辅助函数
+        auto isFacingCamera = [&](const Vertex& v) -> bool {
+            Vec3 toCamera(
+                cameraPos.x - v.position[0],
+                cameraPos.y - v.position[1],
+                cameraPos.z - v.position[2]
+            );
+            float dot = v.normal[0] * toCamera.x + v.normal[1] * toCamera.y + v.normal[2] * toCamera.z;
+            return dot > 0;
+        };
+        
+        // 优先检测普通顶点（用于设置 landmark）
+        // 这样即使鼠标靠近已标记的 landmark，也能选择附近的顶点
+        for (size_t i = 0; i < vertices_.size(); i++) {
+            // 背面剔除
+            if (!isFacingCamera(vertices_[i])) continue;
+            
+            Vec3 pos(vertices_[i].position[0], vertices_[i].position[1], vertices_[i].position[2]);
+            Vec3 toPos = pos - rayOrigin;
+            float t = toPos.dot(rayDir);
+            if (t < 0) continue;
+            
+            Vec3 closestOnRay = rayOrigin + rayDir * t;
+            float dist = (pos - closestOnRay).length();
+            
+            float threshold = 0.003f;
+            if (dist < threshold && dist < bestDist) {
+                bestDist = dist;
+                hoveredVertex_ = (int)i;
+            }
+        }
+        
+        // 如果 hover 到了顶点，检查这个顶点是否是某个已标记的 landmark
+        if (hoveredVertex_ >= 0) {
+            for (int i = 0; i < 68; i++) {
+                if (mappings_[i].isSet && mappings_[i].vertexIndex == hoveredVertex_) {
+                    hoveredLandmark_ = i;
+                    break;
+                }
+            }
+        }
+        // 如果没有 hover 到顶点，再检查是否 hover 在已标记的 landmark 附近（用于切换当前 landmark）
+        else {
+            bestDist = 1e30f;
+            for (int i = 0; i < 68; i++) {
+                if (!mappings_[i].isSet) continue;
+                int vIdx = mappings_[i].vertexIndex;
+                if (vIdx < 0 || vIdx >= (int)vertices_.size()) continue;
+                
+                // Landmark 也做背面剔除
+                if (!isFacingCamera(vertices_[vIdx])) continue;
+                
+                Vec3 pos(vertices_[vIdx].position[0], vertices_[vIdx].position[1], vertices_[vIdx].position[2]);
+                Vec3 toPos = pos - rayOrigin;
+                float t = toPos.dot(rayDir);
+                if (t < 0) continue;
+                
+                Vec3 closestOnRay = rayOrigin + rayDir * t;
+                float dist = (pos - closestOnRay).length();
+                
+                // Landmark 有更大的拾取范围（用于切换）
+                float threshold = displayOptions_.landmarkSize * 3.0f;
+                if (dist < threshold && dist < bestDist) {
+                    bestDist = dist;
+                    hoveredLandmark_ = i;
+                    hoveredVertex_ = vIdx;
+                }
+            }
+        }
+    }
+    
+    // 兼容旧接口
+    void updateHover(const Vec3& rayOrigin, const Vec3& rayDir) {
+        updateHover(rayOrigin, rayDir, rayOrigin);
+    }
+    
+    int getHoveredVertex() const { return hoveredVertex_; }
+    int getHoveredLandmark() const { return hoveredLandmark_; }
+    
+    // 获取 hover 的顶点位置
+    bool getHoveredPosition(Vec3& outPos) const {
+        if (hoveredVertex_ < 0 || hoveredVertex_ >= (int)vertices_.size()) return false;
+        outPos.x = vertices_[hoveredVertex_].position[0];
+        outPos.y = vertices_[hoveredVertex_].position[1];
+        outPos.z = vertices_[hoveredVertex_].position[2];
+        return true;
+    }
+    
+    // ========== 快捷操作 ==========
+    // 跳转到下一个未标记的 landmark
+    void nextUnmarked() {
+        for (int i = currentLandmark_ + 1; i < 68; i++) {
+            if (!mappings_[i].isSet) {
+                currentLandmark_ = i;
+                return;
+            }
+        }
+        // 从头开始找
+        for (int i = 0; i < currentLandmark_; i++) {
+            if (!mappings_[i].isSet) {
+                currentLandmark_ = i;
+                return;
+            }
+        }
+    }
+    
+    // 跳转到指定区域的第一个 landmark
+    void jumpToRegion(const char* region) {
+        for (int i = 0; i < 68; i++) {
+            if (strcmp(LANDMARK_DEFS[i].region, region) == 0) {
+                currentLandmark_ = i;
+                return;
+            }
+        }
+    }
+    
+    // 获取当前 landmark 所在区域
+    const char* getCurrentRegion() const {
+        return LANDMARK_DEFS[currentLandmark_].region;
+    }
+    
+    // 清除所有标记
+    void clearAll() {
+        for (auto& m : mappings_) {
+            m.vertexIndex = -1;
+            m.isSet = false;
+        }
+    }
+    
+    // ========== 镜像功能 ==========
+    // 左右对称的 landmark 对应关系
+    // 注意：对应的是语义上相同位置的点（如左眉内侧↔右眉内侧）
+    static constexpr int MIRROR_PAIRS[][2] = {
+        // 下巴轮廓 (0-16 是对称的，8 是中心)
+        {0, 16}, {1, 15}, {2, 14}, {3, 13}, {4, 12}, {5, 11}, {6, 10}, {7, 9},
+        // 眉毛：左眉外侧(17)↔右眉外侧(26), 左眉内侧(21)↔右眉内侧(22)
+        {17, 26}, {18, 25}, {19, 24}, {20, 23}, {21, 22},
+        // 鼻子 (31-35)：左鼻翼(31)↔右鼻翼(35), 左鼻孔(32)↔右鼻孔(34)
+        {31, 35}, {32, 34},
+        // 眼睛：左眼外角(36)↔右眼外角(45), 左眼内角(39)↔右眼内角(42)
+        // 左眼上外(37)↔右眼上外(44), 左眼上内(38)↔右眼上内(43)
+        // 左眼下内(40)↔右眼下内(47), 左眼下外(41)↔右眼下外(46)
+        {36, 45}, {37, 44}, {38, 43}, {39, 42}, {40, 47}, {41, 46},
+        // 外嘴唇：左嘴角(48)↔右嘴角(54)
+        // 上唇左1(49)↔上唇右1(53), 上唇左2(50)↔上唇右2(52)
+        // 下唇左1(59)↔下唇右1(55), 下唇左2(58)↔下唇右2(56)
+        {48, 54}, {49, 53}, {50, 52}, {59, 55}, {58, 56},
+        // 内嘴唇：内唇左(60)↔内唇右(64)
+        // 内上唇左(61)↔内上唇右(63), 内下唇左(67)↔内下唇右(65)
+        {60, 64}, {61, 63}, {67, 65}
+    };
+    
+    // 从左边镜像到右边（X > 0 的点镜像到 X < 0）
+    void mirrorLeftToRight() {
+        if (vertices_.empty()) return;
+        
+        // 计算中心 X
+        float centerX = (meshMin_.x + meshMax_.x) * 0.5f;
+        
+        for (const auto& pair : MIRROR_PAIRS) {
+            int leftIdx = pair[0];
+            int rightIdx = pair[1];
+            
+            // 检查左边是否已标记
+            if (!mappings_[leftIdx].isSet) continue;
+            
+            int srcVertIdx = mappings_[leftIdx].vertexIndex;
+            if (srcVertIdx < 0 || srcVertIdx >= (int)vertices_.size()) continue;
+            
+            // 获取源顶点位置
+            float srcX = vertices_[srcVertIdx].position[0];
+            float srcY = vertices_[srcVertIdx].position[1];
+            float srcZ = vertices_[srcVertIdx].position[2];
+            
+            // 计算镜像位置
+            float mirrorX = 2.0f * centerX - srcX;
+            
+            // 找到最接近镜像位置的顶点
+            int bestIdx = -1;
+            float bestDist = 1e30f;
+            for (size_t i = 0; i < vertices_.size(); i++) {
+                float dx = vertices_[i].position[0] - mirrorX;
+                float dy = vertices_[i].position[1] - srcY;
+                float dz = vertices_[i].position[2] - srcZ;
+                float dist = dx*dx + dy*dy + dz*dz;
+                if (dist < bestDist) {
+                    bestDist = dist;
+                    bestIdx = (int)i;
+                }
+            }
+            
+            if (bestIdx >= 0) {
+                mappings_[rightIdx].vertexIndex = bestIdx;
+                mappings_[rightIdx].isSet = true;
+            }
+        }
+        
+        printf("[LandmarkEditor] Mirrored left to right\n");
+    }
+    
+    // 从右边镜像到左边（X < 0 的点镜像到 X > 0）
+    void mirrorRightToLeft() {
+        if (vertices_.empty()) return;
+        
+        float centerX = (meshMin_.x + meshMax_.x) * 0.5f;
+        
+        for (const auto& pair : MIRROR_PAIRS) {
+            int leftIdx = pair[0];
+            int rightIdx = pair[1];
+            
+            // 检查右边是否已标记
+            if (!mappings_[rightIdx].isSet) continue;
+            
+            int srcVertIdx = mappings_[rightIdx].vertexIndex;
+            if (srcVertIdx < 0 || srcVertIdx >= (int)vertices_.size()) continue;
+            
+            float srcX = vertices_[srcVertIdx].position[0];
+            float srcY = vertices_[srcVertIdx].position[1];
+            float srcZ = vertices_[srcVertIdx].position[2];
+            
+            float mirrorX = 2.0f * centerX - srcX;
+            
+            int bestIdx = -1;
+            float bestDist = 1e30f;
+            for (size_t i = 0; i < vertices_.size(); i++) {
+                float dx = vertices_[i].position[0] - mirrorX;
+                float dy = vertices_[i].position[1] - srcY;
+                float dz = vertices_[i].position[2] - srcZ;
+                float dist = dx*dx + dy*dy + dz*dz;
+                if (dist < bestDist) {
+                    bestDist = dist;
+                    bestIdx = (int)i;
+                }
+            }
+            
+            if (bestIdx >= 0) {
+                mappings_[leftIdx].vertexIndex = bestIdx;
+                mappings_[leftIdx].isSet = true;
+            }
+        }
+        
+        printf("[LandmarkEditor] Mirrored right to left\n");
+    }
+    
+    // 交换左右（用于修正左右相反的问题）
+    void swapLeftRight() {
+        for (const auto& pair : MIRROR_PAIRS) {
+            std::swap(mappings_[pair[0]], mappings_[pair[1]]);
+        }
+        printf("[LandmarkEditor] Swapped left and right landmarks\n");
+    }
+    
+    // 获取区域内已标记数量
+    int getRegionMarkedCount(const char* region) const {
+        int count = 0;
+        for (int i = 0; i < 68; i++) {
+            if (strcmp(LANDMARK_DEFS[i].region, region) == 0 && mappings_[i].isSet) {
+                count++;
+            }
+        }
+        return count;
+    }
+    
+    int getRegionTotalCount(const char* region) const {
+        int count = 0;
+        for (int i = 0; i < 68; i++) {
+            if (strcmp(LANDMARK_DEFS[i].region, region) == 0) count++;
+        }
+        return count;
+    }
+    
+    // 获取包围盒
+    Vec3 getMeshMin() const { return meshMin_; }
+    Vec3 getMeshMax() const { return meshMax_; }
+    Vec3 getMeshCenter() const { return (meshMin_ + meshMax_) * 0.5f; }
 
 private:
     std::vector<Vertex> vertices_;
@@ -629,13 +929,20 @@ private:
     
     bool active_ = false;
     int currentLandmark_ = 0;
+    
+    // 显示选项
+    DisplayOptions displayOptions_;
+    
+    // Hover 状态
+    int hoveredVertex_ = -1;
+    int hoveredLandmark_ = -1;
 };
 
 // 渲染 Landmark 编辑器 UI
 inline void renderLandmarkEditorUI(MeshLandmarkEditor& editor, const std::string& savePath) {
     if (!editor.isActive()) return;
     
-    ImGui::SetNextWindowSize(ImVec2(350, 500), ImGuiCond_FirstUseEver);
+    ImGui::SetNextWindowSize(ImVec2(380, 600), ImGuiCond_FirstUseEver);
     bool open = editor.isActive();
     if (!ImGui::Begin("Landmark 标记器", &open)) {
         ImGui::End();
@@ -644,83 +951,215 @@ inline void renderLandmarkEditorUI(MeshLandmarkEditor& editor, const std::string
     }
     editor.setActive(open);
     
-    // 进度
-    int marked = editor.getMarkedCount();
-    ImGui::Text("进度: %d / 68", marked);
-    ImGui::ProgressBar(marked / 68.0f);
+    auto& opts = editor.getDisplayOptions();
+    
+    // ========== 显示选项 ==========
+    if (ImGui::CollapsingHeader("显示选项", ImGuiTreeNodeFlags_DefaultOpen)) {
+        // 显示模式选择
+        ImGui::Text("显示模式:");
+        ImGui::SameLine();
+        if (ImGui::RadioButton("点云", !opts.showMesh)) {
+            opts.showMesh = false;
+            opts.showVertexDots = true;
+        }
+        ImGui::SameLine();
+        if (ImGui::RadioButton("网格", opts.showMesh)) {
+            opts.showMesh = true;
+            opts.showVertexDots = false;
+        }
+        ImGui::SameLine();
+        if (ImGui::RadioButton("两者", opts.showMesh && opts.showVertexDots)) {
+            opts.showMesh = true;
+            opts.showVertexDots = true;
+        }
+        
+        if (opts.showMesh) {
+            ImGui::Checkbox("网格半透明", &opts.meshTransparent);
+            if (opts.meshTransparent) {
+                ImGui::SameLine();
+                ImGui::SetNextItemWidth(80);
+                ImGui::SliderFloat("##opacity", &opts.meshOpacity, 0.1f, 1.0f, "%.1f");
+            }
+        }
+        
+        ImGui::Spacing();
+        ImGui::Checkbox("显示 Landmark", &opts.showLandmarks);
+        if (opts.showLandmarks) {
+            ImGui::SameLine();
+            ImGui::SetNextItemWidth(80);
+            ImGui::SliderFloat("大小##lmsize", &opts.landmarkSize, 0.002f, 0.01f, "%.3f");
+        }
+        
+        ImGui::Checkbox("高亮当前区域", &opts.highlightRegion);
+    }
+    
     ImGui::Separator();
     
-    // 当前 landmark
+    // ========== Hover 信息 ==========
+    int hoveredVert = editor.getHoveredVertex();
+    int hoveredLm = editor.getHoveredLandmark();
+    if (hoveredLm >= 0) {
+        Vec3 color = getRegionColor(LANDMARK_DEFS[hoveredLm].region);
+        ImGui::TextColored(ImVec4(color.x, color.y, color.z, 1.0f), 
+                          "悬停: Landmark #%d %s", hoveredLm, LANDMARK_DEFS[hoveredLm].description);
+    } else if (hoveredVert >= 0) {
+        Vec3 pos;
+        if (editor.getHoveredPosition(pos)) {
+            ImGui::TextColored(ImVec4(0.7f, 0.7f, 0.7f, 1.0f), 
+                              "悬停: 顶点 %d (%.3f, %.3f, %.3f)", hoveredVert, pos.x, pos.y, pos.z);
+        }
+    } else {
+        ImGui::TextDisabled("将鼠标移到顶点上查看信息");
+    }
+    
+    ImGui::Separator();
+    
+    // ========== 进度总览 ==========
+    int marked = editor.getMarkedCount();
+    
+    // 区域快捷按钮
+    ImGui::Text("快速跳转区域:");
+    const char* regions[] = {"jaw", "chin", "left_eyebrow", "right_eyebrow", 
+                              "nose", "left_eye", "right_eye", "mouth", "mouth_inner"};
+    const char* regionShort[] = {"下颌", "下巴", "左眉", "右眉", "鼻", "左眼", "右眼", "外唇", "内唇"};
+    
+    for (int r = 0; r < 9; r++) {
+        if (r > 0 && r != 4 && r != 7) ImGui::SameLine(0, 2);
+        if (r == 4 || r == 7) {} // 换行
+        
+        int regionMarked = editor.getRegionMarkedCount(regions[r]);
+        int regionTotal = editor.getRegionTotalCount(regions[r]);
+        bool isCurrentRegion = (strcmp(editor.getCurrentRegion(), regions[r]) == 0);
+        
+        Vec3 color = getRegionColor(regions[r]);
+        if (isCurrentRegion) {
+            ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(color.x * 0.8f, color.y * 0.8f, color.z * 0.8f, 1.0f));
+        } else if (regionMarked == regionTotal) {
+            ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.1f, 0.4f, 0.1f, 1.0f));  // 完成 - 绿色
+        } else {
+            ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(color.x * 0.3f, color.y * 0.3f, color.z * 0.3f, 0.8f));
+        }
+        
+        char btnLabel[32];
+        snprintf(btnLabel, sizeof(btnLabel), "%s\n%d/%d", regionShort[r], regionMarked, regionTotal);
+        if (ImGui::Button(btnLabel, ImVec2(38, 36))) {
+            editor.jumpToRegion(regions[r]);
+        }
+        ImGui::PopStyleColor();
+    }
+    
+    ImGui::Spacing();
+    ImGui::Text("总进度: %d / 68", marked);
+    ImGui::ProgressBar(marked / 68.0f);
+    
+    ImGui::Separator();
+    
+    // ========== 当前 landmark ==========
     int current = editor.getCurrentLandmark();
     const auto& def = LANDMARK_DEFS[current];
     const auto& mapping = editor.getMappings()[current];
     
-    ImGui::TextColored(ImVec4(1, 1, 0, 1), "当前: #%d %s", current, def.description);
-    ImGui::Text("区域: %s", def.region);
+    Vec3 regionColor = getRegionColor(def.region);
+    ImGui::TextColored(ImVec4(regionColor.x, regionColor.y, regionColor.z, 1.0f), 
+                      "当前: #%d %s", current, def.description);
     
     if (mapping.isSet) {
         Vec3 pos;
         if (editor.getLandmarkPosition(current, pos)) {
-            ImGui::TextColored(ImVec4(0, 1, 0, 1), "顶点: %d (%.3f, %.3f, %.3f)", 
-                              mapping.vertexIndex, pos.x, pos.y, pos.z);
+            ImGui::TextColored(ImVec4(0.2f, 1.0f, 0.2f, 1.0f), "已标记: 顶点 %d", mapping.vertexIndex);
+            ImGui::TextDisabled("位置: (%.4f, %.4f, %.4f)", pos.x, pos.y, pos.z);
         }
     } else {
-        ImGui::TextColored(ImVec4(1, 0.5f, 0, 1), "未标记 - 点击网格选择顶点");
+        ImGui::TextColored(ImVec4(1.0f, 0.6f, 0.2f, 1.0f), "未标记");
     }
     
-    ImGui::Separator();
-    
-    // 导航
-    if (ImGui::Button("<< 上一个") && current > 0) {
+    // 导航按钮
+    ImGui::Spacing();
+    if (ImGui::Button("<<", ImVec2(30, 0)) && current > 0) {
         editor.prevLandmark();
     }
     ImGui::SameLine();
-    if (ImGui::Button("下一个 >>") && current < 67) {
+    if (ImGui::Button("上一个", ImVec2(60, 0)) && current > 0) {
+        editor.prevLandmark();
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("下一个", ImVec2(60, 0)) && current < 67) {
         editor.nextLandmark();
+    }
+    ImGui::SameLine();
+    if (ImGui::Button(">>", ImVec2(30, 0)) && current < 67) {
+        editor.nextLandmark();
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("下一未标记", ImVec2(-1, 0))) {
+        editor.nextUnmarked();
     }
     
     // 快速跳转
-    ImGui::SetNextItemWidth(100);
-    if (ImGui::InputInt("跳转到", &current)) {
+    ImGui::SetNextItemWidth(80);
+    if (ImGui::InputInt("##jumpTo", &current, 0, 0)) {
         if (current >= 0 && current < 68) {
             editor.setCurrentLandmark(current);
         }
     }
-    
-    // 清除当前
-    if (ImGui::Button("清除当前标记")) {
-        editor.clearLandmark(current);
+    ImGui::SameLine();
+    if (ImGui::Button("清除", ImVec2(50, 0))) {
+        editor.clearLandmark(editor.getCurrentLandmark());
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("清除全部", ImVec2(-1, 0))) {
+        editor.clearAll();
     }
     
     ImGui::Separator();
     
-    // 区域列表
-    if (ImGui::CollapsingHeader("按区域浏览", ImGuiTreeNodeFlags_DefaultOpen)) {
-        const char* regions[] = {"jaw", "chin", "left_eyebrow", "right_eyebrow", 
-                                  "nose", "left_eye", "right_eye", "mouth", "mouth_inner"};
+    // ========== 区域详情 ==========
+    if (ImGui::CollapsingHeader("区域详情")) {
         const char* regionNames[] = {"下颌轮廓", "下巴", "左眉毛", "右眉毛",
                                       "鼻子", "左眼", "右眼", "嘴唇外", "嘴唇内"};
         
         for (int r = 0; r < 9; r++) {
             Vec3 color = getRegionColor(regions[r]);
-            ImGui::PushStyleColor(ImGuiCol_Header, ImVec4(color.x * 0.5f, color.y * 0.5f, color.z * 0.5f, 0.5f));
+            int regionMarked = editor.getRegionMarkedCount(regions[r]);
+            int regionTotal = editor.getRegionTotalCount(regions[r]);
             
-            if (ImGui::TreeNode(regionNames[r])) {
+            ImGui::PushStyleColor(ImGuiCol_Header, ImVec4(color.x * 0.4f, color.y * 0.4f, color.z * 0.4f, 0.6f));
+            
+            char headerLabel[64];
+            snprintf(headerLabel, sizeof(headerLabel), "%s (%d/%d)###region%d", 
+                    regionNames[r], regionMarked, regionTotal, r);
+            
+            if (ImGui::TreeNode(headerLabel)) {
                 for (int i = 0; i < 68; i++) {
                     if (strcmp(LANDMARK_DEFS[i].region, regions[r]) == 0) {
                         const auto& m = editor.getMappings()[i];
+                        bool isCurrent = (i == editor.getCurrentLandmark());
+                        bool isHovered = (i == hoveredLm);
+                        
+                        if (isCurrent) {
+                            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1, 1, 0, 1));
+                        } else if (isHovered) {
+                            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.5f, 1, 1, 1));
+                        } else if (m.isSet) {
+                            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.5f, 1, 0.5f, 1));
+                        } else {
+                            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.7f, 0.5f, 0.3f, 1));
+                        }
                         
                         char label[128];
                         if (m.isSet) {
-                            snprintf(label, sizeof(label), "[%d] %s (v%d)", i, LANDMARK_DEFS[i].description, m.vertexIndex);
+                            snprintf(label, sizeof(label), "%s[%d] %s (v%d)", 
+                                    isCurrent ? "> " : "  ", i, LANDMARK_DEFS[i].description, m.vertexIndex);
                         } else {
-                            snprintf(label, sizeof(label), "[%d] %s (未标记)", i, LANDMARK_DEFS[i].description);
+                            snprintf(label, sizeof(label), "%s[%d] %s", 
+                                    isCurrent ? "> " : "  ", i, LANDMARK_DEFS[i].description);
                         }
                         
-                        bool selected = (i == editor.getCurrentLandmark());
-                        if (ImGui::Selectable(label, selected)) {
+                        if (ImGui::Selectable(label, isCurrent)) {
                             editor.setCurrentLandmark(i);
                         }
+                        
+                        ImGui::PopStyleColor();
                     }
                 }
                 ImGui::TreePop();
@@ -731,27 +1170,60 @@ inline void renderLandmarkEditorUI(MeshLandmarkEditor& editor, const std::string
     
     ImGui::Separator();
     
-    // 自动识别
-    if (ImGui::Button("重新自动识别", ImVec2(-1, 0))) {
-        editor.autoDetectLandmarks();
+    // ========== 镜像操作 ==========
+    ImGui::Text("镜像操作:");
+    if (ImGui::Button("左→右", ImVec2(80, 24))) {
+        editor.mirrorLeftToRight();
     }
     if (ImGui::IsItemHovered()) {
-        ImGui::SetTooltip("基于几何分析重新自动识别所有 landmark 位置");
+        ImGui::SetTooltip("将左边的标记镜像到右边\n（用于只标注了左半边的情况）");
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("右→左", ImVec2(80, 24))) {
+        editor.mirrorRightToLeft();
+    }
+    if (ImGui::IsItemHovered()) {
+        ImGui::SetTooltip("将右边的标记镜像到左边\n（用于只标注了右半边的情况）");
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("交换左右", ImVec2(-1, 24))) {
+        editor.swapLeftRight();
+    }
+    if (ImGui::IsItemHovered()) {
+        ImGui::SetTooltip("交换左右对称的 landmark\n（用于修正左右标反的情况）");
     }
     
     ImGui::Spacing();
     
-    // 保存/加载
-    if (ImGui::Button("保存映射", ImVec2(160, 0))) {
+    // ========== 操作按钮 ==========
+    if (ImGui::Button("重新自动识别", ImVec2(-1, 28))) {
+        editor.autoDetectLandmarks();
+    }
+    if (ImGui::IsItemHovered()) {
+        ImGui::SetTooltip("基于几何分析重新自动识别所有 landmark 位置\n（会覆盖当前标记）");
+    }
+    
+    ImGui::Spacing();
+    
+    if (ImGui::Button("保存", ImVec2(100, 28))) {
         editor.saveMapping(savePath);
     }
     ImGui::SameLine();
-    if (ImGui::Button("重新加载", ImVec2(-1, 0))) {
+    if (ImGui::Button("加载", ImVec2(100, 28))) {
         editor.loadMapping(savePath);
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("关闭", ImVec2(-1, 28))) {
+        editor.setActive(false);
     }
     
     ImGui::Separator();
-    ImGui::TextWrapped("提示:\n- 在 3D 视图中点击网格顶点来标记当前 landmark\n- 方向键或 A/D 切换 landmark\n- Delete/X 清除当前标记");
+    
+    // ========== 快捷键提示 ==========
+    ImGui::TextDisabled("快捷键:");
+    ImGui::TextDisabled("  A/← 上一个  D/→ 下一个");
+    ImGui::TextDisabled("  点击顶点标记  Delete/X 清除");
+    ImGui::TextDisabled("  ESC 关闭编辑器");
     
     ImGui::End();
 }

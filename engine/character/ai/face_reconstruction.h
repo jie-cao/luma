@@ -785,6 +785,10 @@ public:
         // Average human proportions serve as baseline
         outResult.identityCoeffs.resize(40, 0.0f);
 
+        printf("[Face3DMMRegressor] Raw ratios: faceW=%.2f, faceH=%.2f, jawW=%.2f, noseW=%.2f, mouthW=%.2f\n",
+               faceW, faceH, jawW, noseW, mouthW);
+        printf("[Face3DMMRegressor] IOD=%.1f pixels\n", iod);
+
         outResult.identityCoeffs[0]  = (faceW - 3.0f) * 1.5f;        // Face width
         outResult.identityCoeffs[1]  = (faceH - 3.5f) * 1.2f;        // Face height
         outResult.identityCoeffs[2]  = (avgEyeW - 0.6f) * 3.0f;      // Eye size
@@ -796,6 +800,9 @@ public:
         outResult.identityCoeffs[8]  = (jawW - 2.3f) * 1.5f;          // Jaw width
         outResult.identityCoeffs[9]  = (chinL - 0.5f) * 3.0f;         // Chin length
         outResult.identityCoeffs[10] = (browH - 0.35f) * 4.0f;        // Brow height
+        
+        printf("[Face3DMMRegressor] Coeffs: c0(faceW)=%.2f, c1(faceH)=%.2f, c8(jawW)=%.2f\n",
+               outResult.identityCoeffs[0], outResult.identityCoeffs[1], outResult.identityCoeffs[8]);
 
         // Estimate face shape from jaw contour curvature
         float jawCurvature = estimateJawCurvature(landmarks);
@@ -982,70 +989,88 @@ private:
     static void mapCoefficientsToParams(const Face3DMMResult& coeffs,
                                          const FaceLandmarks& landmarks,
                                          FaceShapeParams& p) {
-        // 3DDFA coefficients are typically in range [-5, 5] with mean ~0
-        // We map them to [0, 1] range for our face params
-        auto normalize3DMM = [](float v, float scale = 0.15f) -> float {
-            // v is typically in [-5, 5], map to [0, 1] centered at 0.5
-            return std::clamp(0.5f + v * scale, 0.0f, 1.0f);
+        // Map directly from landmark ratios to face params
+        // This is more reliable than using 3DMM PCA coefficients which are not semantic
+        (void)coeffs;  // 3DMM coeffs not used - they are PCA basis weights, not semantic params
+        
+        if (landmarks.numPoints < 68) {
+            printf("[MultiViewFusion] Not enough landmarks (%d), using defaults\n", landmarks.numPoints);
+            return;
+        }
+        
+        float iod = landmarks.getInterocularDistance();
+        if (iod < 10.0f) {
+            printf("[MultiViewFusion] IOD too small (%.1f), using defaults\n", iod);
+            return;
+        }
+        
+        printf("[MultiViewFusion] Mapping from landmarks (IOD=%.1f)\n", iod);
+        
+        // Helper to map ratio to [0,1] param space
+        auto mapRatio = [](float value, float baseline, float range) -> float {
+            return std::clamp((value - baseline) / range + 0.5f, 0.0f, 1.0f);
         };
-
-        if (coeffs.identityCoeffs.size() >= 12) {
-            const auto& c = coeffs.identityCoeffs;
-
-            printf("[MultiViewFusion] Mapping 3DMM coeffs to face params\n");
-
-            // 3DDFA coefficients interpretation (BFM model):
-            // First few coefficients control major shape variations
-            p.faceWidth           = normalize3DMM(c[0], 0.12f);
-            p.faceLength          = normalize3DMM(c[1], 0.08f);  // c[1] was 3.112, so scale down
-            p.eyeSize             = normalize3DMM(c[2], 0.15f);
-            p.eyeSpacing          = normalize3DMM(c[3], 0.15f);
-            p.noseWidth           = normalize3DMM(c[4], 0.15f);
-            p.noseLength          = normalize3DMM(c[5], 0.15f);
-            p.mouthWidth          = normalize3DMM(c[6], 0.15f);
-            p.upperLipThickness   = normalize3DMM(c[7], 0.12f);
-            p.lowerLipThickness   = normalize3DMM(c[7], 0.14f);
-            p.jawWidth            = normalize3DMM(c[8], 0.12f);
-            p.chinLength          = normalize3DMM(c[9], 0.15f);
-            p.browHeight          = normalize3DMM(c[10], 0.15f);
-            p.faceRoundness       = normalize3DMM(c[11], 0.15f);
-
-            printf("[MultiViewFusion] After 3DMM: faceWidth=%.2f, faceLength=%.2f, eyeSize=%.2f\n",
-                   p.faceWidth, p.faceLength, p.eyeSize);
-        }
-
-        // Refine from landmarks if available
-        if (landmarks.numPoints >= 68) {
-            float iod = landmarks.getInterocularDistance();
-            printf("[MultiViewFusion] Landmark IOD=%.1f\n", iod);
-
-            if (iod > 10.0f) {  // Need reasonable IOD (at least 10 pixels)
-                float faceW = landmarks.getFaceWidth() / iod;
-                float noseW = landmarks.getNoseWidth() / iod;
-                float mouthW = landmarks.getMouthWidth() / iod;
-
-                printf("[MultiViewFusion] Landmark ratios: faceW=%.2f, noseW=%.2f, mouthW=%.2f\n",
-                       faceW, noseW, mouthW);
-
-                // Only refine if ratios are in reasonable range (typical human proportions)
-                // Face width is typically 2.5-3.5x IOD, nose 0.4-0.8x, mouth 0.7-1.2x
-                if (faceW > 1.5f && faceW < 5.0f) {
-                    float faceWidthNorm = std::clamp((faceW - 2.5f) / 1.5f + 0.5f, 0.0f, 1.0f);
-                    p.faceWidth = p.faceWidth * 0.5f + faceWidthNorm * 0.5f;
-                }
-                if (noseW > 0.2f && noseW < 1.2f) {
-                    float noseWidthNorm = std::clamp((noseW - 0.5f) / 0.4f + 0.5f, 0.0f, 1.0f);
-                    p.noseWidth = p.noseWidth * 0.5f + noseWidthNorm * 0.5f;
-                }
-                if (mouthW > 0.4f && mouthW < 1.8f) {
-                    float mouthWidthNorm = std::clamp((mouthW - 0.8f) / 0.5f + 0.5f, 0.0f, 1.0f);
-                    p.mouthWidth = p.mouthWidth * 0.5f + mouthWidthNorm * 0.5f;
-                }
-
-                printf("[MultiViewFusion] After landmark refinement: faceWidth=%.2f, noseWidth=%.2f, mouthWidth=%.2f\n",
-                       p.faceWidth, p.noseWidth, p.mouthWidth);
-            }
-        }
+        
+        // Face width: jaw contour width / IOD, baseline ~3.0
+        float faceW = landmarks.getFaceWidth() / iod;
+        p.faceWidth = mapRatio(faceW, 3.0f, 1.0f);
+        
+        // Face length: chin to brow / IOD, baseline ~3.5
+        float faceH = (landmarks.points[8] - (landmarks.points[19] + landmarks.points[24]) * 0.5f).length() / iod;
+        p.faceLength = mapRatio(faceH, 3.5f, 1.0f);
+        
+        // Jaw width: points 4-12 / IOD, baseline ~2.3
+        float jawW = (landmarks.points[4] - landmarks.points[12]).length() / iod;
+        p.jawWidth = mapRatio(jawW, 2.3f, 0.8f);
+        
+        // Nose width / IOD, baseline ~0.65
+        float noseW = landmarks.getNoseWidth() / iod;
+        p.noseWidth = mapRatio(noseW, 0.65f, 0.3f);
+        
+        // Nose length: nose bridge to tip / IOD, baseline ~0.75
+        float noseL = (landmarks.points[30] - landmarks.points[27]).length() / iod;
+        p.noseLength = mapRatio(noseL, 0.75f, 0.3f);
+        
+        // Mouth width / IOD, baseline ~1.0
+        float mouthW = landmarks.getMouthWidth() / iod;
+        p.mouthWidth = mapRatio(mouthW, 1.0f, 0.4f);
+        
+        // Lip thickness: mouth height / IOD, baseline ~0.25
+        float mouthH = (landmarks.points[62] - landmarks.points[66]).length() / iod;
+        p.upperLipThickness = mapRatio(mouthH, 0.25f, 0.15f);
+        p.lowerLipThickness = p.upperLipThickness;
+        
+        // Eye size: average eye width / IOD, baseline ~0.5
+        float eyeW = ((landmarks.points[39] - landmarks.points[36]).length() + 
+                      (landmarks.points[45] - landmarks.points[42]).length()) * 0.5f / iod;
+        p.eyeSize = mapRatio(eyeW, 0.5f, 0.2f);
+        
+        // Eye spacing: inner eye corners / IOD, baseline ~1.0 (by definition)
+        float eyeSpacing = (landmarks.points[42] - landmarks.points[39]).length() / iod;
+        p.eyeSpacing = mapRatio(eyeSpacing, 1.0f, 0.3f);
+        
+        // Brow height: brow to eye / IOD, baseline ~0.35
+        float browH = ((landmarks.points[19] - landmarks.points[37]).length() +
+                       (landmarks.points[24] - landmarks.points[44]).length()) * 0.5f / iod;
+        p.browHeight = mapRatio(browH, 0.35f, 0.2f);
+        
+        // Chin length: mouth bottom to chin / IOD, baseline ~0.5
+        float chinL = (landmarks.points[8] - landmarks.points[57]).length() / iod;
+        p.chinLength = mapRatio(chinL, 0.5f, 0.25f);
+        
+        // Face roundness: estimate from jaw curvature
+        // Compare jaw width at different heights
+        float upperJaw = (landmarks.points[2] - landmarks.points[14]).length();
+        float lowerJaw = (landmarks.points[6] - landmarks.points[10]).length();
+        float jawTaper = lowerJaw / std::max(upperJaw, 1.0f);
+        p.faceRoundness = mapRatio(jawTaper, 0.7f, 0.3f);  // 0.7 = V-shape, 1.0 = round
+        
+        printf("[MultiViewFusion] Ratios: faceW=%.2f, faceH=%.2f, jawW=%.2f, noseW=%.2f, mouthW=%.2f\n",
+               faceW, faceH, jawW, noseW, mouthW);
+        printf("[MultiViewFusion] Params: faceWidth=%.2f, faceLength=%.2f, jawWidth=%.2f, noseWidth=%.2f\n",
+               p.faceWidth, p.faceLength, p.jawWidth, p.noseWidth);
+        printf("[MultiViewFusion] Params: eyeSize=%.2f, browHeight=%.2f, chinLength=%.2f, faceRoundness=%.2f\n",
+               p.eyeSize, p.browHeight, p.chinLength, p.faceRoundness);
     }
 
     static void overrideDepthParams(const Face3DMMResult& sideCoeffs,
